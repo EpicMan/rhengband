@@ -40,6 +40,9 @@
 #endif
 #include <fmt/format.h>
 #include <range/v3/all.hpp>
+#include <perception/simple-perception.h>
+#include <avatar/avatar.h>
+#include <object-enchant/special-object-flags.h>
 
 /*!
  * @brief 規定の処理にできるアイテムがプレイヤーの利用可能範囲内にあるかどうかを返す /
@@ -270,6 +273,138 @@ void carry(PlayerType *player_ptr, bool pickup)
     rfu.set_flag(SubWindowRedrawingFlag::OVERHEAD);
     handle_stuff(player_ptr);
     const auto &grid = player_ptr->current_floor_ptr->grid_array[player_ptr->y][player_ptr->x];
+
+    /* Instant Pseudo-ID, still ID average equipment, or *ID* if easy_id enabled */
+    /* TODO: Not if confused or blind */
+    {
+        for (auto it = grid.o_idx_list.begin(); it != grid.o_idx_list.end();) {
+            const auto this_o_idx = *it++;
+            auto &item = *player_ptr->current_floor_ptr->o_list[this_o_idx];
+
+            if (easy_id) {
+                auto &baseitem = item.get_baseitem();
+                baseitem.mark_awareness(true);
+                item.mark_as_known();
+                item.marked.set(OmType::TOUCHED);
+            } else {
+                /* skip IDed or already-sensed items */
+                if (any_bits(item.ident, IDENT_SENSE) || item.is_known()) {
+                    continue;
+                }
+
+                /* "just" id average and pseudo all others */
+                bool heavy = false;
+
+                switch (player_ptr->pclass) {
+                case PlayerClassType::WARRIOR:
+                case PlayerClassType::ARCHER:
+                case PlayerClassType::SAMURAI:
+                case PlayerClassType::CAVALRY:
+                case PlayerClassType::SMITH:
+                case PlayerClassType::ROGUE:
+                case PlayerClassType::NINJA:
+                case PlayerClassType::RANGER:
+                case PlayerClassType::PALADIN:
+                case PlayerClassType::SNIPER:
+                case PlayerClassType::CHAOS_WARRIOR:
+                case PlayerClassType::TOURIST:
+                case PlayerClassType::BERSERKER: {
+                    heavy = true;
+                    break;
+                }
+
+                default:
+                    if (compare_virtue(player_ptr, Virtue::KNOWLEDGE, 100)) {
+                        heavy = true;
+                        break;
+                    }
+                }
+
+                item_feel_type feel = FEEL_NONE;
+
+                switch (item.bi_key.tval()) {
+                case ItemKindType::SHOT:
+                case ItemKindType::ARROW:
+                case ItemKindType::BOLT:
+                case ItemKindType::BOW:
+                case ItemKindType::DIGGING:
+                case ItemKindType::HAFTED:
+                case ItemKindType::POLEARM:
+                case ItemKindType::SWORD:
+                case ItemKindType::BOOTS:
+                case ItemKindType::GLOVES:
+                case ItemKindType::HELM:
+                case ItemKindType::CROWN:
+                case ItemKindType::SHIELD:
+                case ItemKindType::CLOAK:
+                case ItemKindType::SOFT_ARMOR:
+                case ItemKindType::HARD_ARMOR:
+                case ItemKindType::DRAG_ARMOR:
+                case ItemKindType::CARD:
+                case ItemKindType::LITE: 
+                    /* Now do pseudo */
+                    feel = (heavy ? pseudo_value_check_heavy(&item) : pseudo_value_check_light(&item));
+
+                    if ((player_ptr->muta.has(PlayerMutationType::BAD_LUCK)) && !randint0(13)) {
+                        switch (feel) {
+                        case FEEL_TERRIBLE: {
+                            feel = FEEL_SPECIAL;
+                            break;
+                        }
+                        case FEEL_WORTHLESS: {
+                            feel = FEEL_EXCELLENT;
+                            break;
+                        }
+                        case FEEL_CURSED: {
+                            if (heavy) {
+                                feel = randint0(3) ? FEEL_GOOD : FEEL_AVERAGE;
+                            } else {
+                                feel = FEEL_UNCURSED;
+                            }
+                            break;
+                        }
+                        case FEEL_AVERAGE: {
+                            feel = randint0(2) ? FEEL_CURSED : FEEL_GOOD;
+                            break;
+                        }
+                        case FEEL_GOOD: {
+                            if (heavy) {
+                                feel = randint0(3) ? FEEL_CURSED : FEEL_AVERAGE;
+                            } else {
+                                feel = FEEL_CURSED;
+                            }
+                            break;
+                        }
+                        case FEEL_EXCELLENT: {
+                            feel = FEEL_WORTHLESS;
+                            break;
+                        }
+                        case FEEL_SPECIAL: {
+                            feel = FEEL_TERRIBLE;
+                            break;
+                        }
+
+                        default:
+                            break;
+                        }
+                    }
+
+                    /* ID average equipment, ammo,and lights */
+                    if (feel == FEEL_AVERAGE) {
+                        item.mark_as_known();
+                        item.marked.set(OmType::TOUCHED);
+                    } else {
+                        item.ident |= (IDENT_SENSE);
+                        item.feeling = feel;
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    }
+
     autopick_pickup_items(player_ptr, grid);
 
     if (!grid.o_idx_list.empty()) {
