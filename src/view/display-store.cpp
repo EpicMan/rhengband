@@ -15,6 +15,7 @@
 #include "term/screen-processor.h"
 #include "term/z-form.h"
 #include "util/int-char-converter.h"
+#include <term/term-color-types.h>
 
 /*!
  * @brief プレイヤーの所持金を表示する
@@ -82,7 +83,11 @@ void display_entry(PlayerType *player_ptr, int pos, StoreSaleType store_num)
     }
 
     const auto price = price_item(player_ptr, item.calc_price(), ot_ptr->inflate, false, store_num);
-    put_str(format("%9d  ", price), i + 6, 68);
+    auto price_color = TERM_WHITE;
+    if (price > player_ptr->au) {
+        price_color = TERM_L_DARK;
+    }
+    c_put_str(price_color, format("%9d  ", price), i + 6, 68);
 }
 
 /*!
