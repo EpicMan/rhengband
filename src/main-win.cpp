@@ -137,7 +137,7 @@
 /*
  * Window names
  */
-LPCWSTR win_term_name[] = { L"Hengband", L"Term-1", L"Term-2", L"Term-3", L"Term-4", L"Term-5", L"Term-6", L"Term-7" };
+LPCWSTR win_term_name[] = { L"Rhengband", L"Term-1", L"Term-2", L"Term-3", L"Term-4", L"Term-5", L"Term-6", L"Term-7" };
 
 static term_data data[MAX_TERM_DATA]; //!< An array of term_data's
 static bool is_main_term(term_data *td)
