@@ -18,3 +18,6 @@ extern bool autoroller; /* Allow use of autoroller for stats (*) */
 extern bool autochara; /* Autoroll for weight, height and social status */
 extern bool powerup_home; /* Increase capacity of your home (*) */
 extern bool keep_savefile; //!< 同一のセーブファイルでゲームを開始する / Start game with same savefile thet is loaded
+/* New ID is ID and *ID* merged, instant pseudo and auto-ID average stuff */
+extern bool easy_id; /* Items identified on walkover (*) */
+extern bool easy_lore; /* Know full monster lore */

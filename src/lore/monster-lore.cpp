@@ -22,6 +22,7 @@
 #include "view/display-lore-status.h"
 #include "view/display-lore.h"
 #include <algorithm>
+#include <game-option/birth-options.h>
 
 static void set_msex_flags(lore_type *lore_ptr)
 {
@@ -142,7 +143,7 @@ void process_monster_lore(PlayerType *player_ptr, MonraceId r_idx, monster_lore_
 {
     lore_type tmp_lore(r_idx, mode);
     lore_type *lore_ptr = &tmp_lore;
-    if (cheat_know || (mode == MONSTER_LORE_RESEARCH) || (mode == MONSTER_LORE_DEBUG)) {
+    if (cheat_know || easy_lore || (mode == MONSTER_LORE_RESEARCH) || (mode == MONSTER_LORE_DEBUG)) {
         lore_ptr->know_everything = true;
     }
 

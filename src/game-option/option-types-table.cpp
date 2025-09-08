@@ -255,6 +255,10 @@ const std::vector<GameOption> option_info = {
 
     { &keep_savefile, true, 4, 4, "keep_savefile", _("同一のセーブファイルでゲームを開始する", "Start game with same savefile thet is loaded"), GameOptionPage::BIRTH },
 
+    // GameOption(bool *value, bool norm, uint8_t set, uint8_t bits, std::string &&text, std::string &&description, const tl::optional<GameOptionPage> &page = tl::nullopt);
+    { &easy_id, true, 6, 17, "easy_id", _("物品は現地調査で完全に特定される", "Items are fully identified on walkover"), GameOptionPage::BIRTH },
+    { &easy_lore, false, 6, 18, "easy_lore", _("完全なモンスターの思い出を知る", "Know complete monster info"), GameOptionPage::BIRTH }, 
+
     /*** Easy Object Auto-Destroyer ***/
     { &destroy_items, false, 7, 0, "destroy_items", _("アイテムの簡易自動破壊を使用する", "Use easy auto-destroyer"), GameOptionPage::AUTODESTROY },
 
