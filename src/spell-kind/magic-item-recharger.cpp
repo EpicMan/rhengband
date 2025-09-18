@@ -109,7 +109,7 @@ bool recharge(PlayerType *player_ptr, int power)
             }
 
             o_ptr->pval += recharge_amount;
-            o_ptr->ident &= ~(IDENT_KNOWN);
+            /*o_ptr->ident &= ~(IDENT_KNOWN);*/
             o_ptr->ident &= ~(IDENT_EMPTY);
         }
     }
