@@ -12367,7 +12367,7 @@
           "rarity": 1,
         },
       ],
-      "flags": ["LITE", "LITE_FUEL"],
+      "flags": ["LITE_2", "LITE_FUEL"],
     },
     {
       "id": 347,

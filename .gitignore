@@ -442,3 +442,7 @@ m4/lt~obsolete.m4
 Makefile
 /Rhengband.exe
 /Rhengband.INI
+/src/curl
+/VisualStudio/Rhengband/libcurl/lib
+/.gitignore
+/.gitignore

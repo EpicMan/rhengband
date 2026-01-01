@@ -125,6 +125,8 @@ Y:autoroller
 X:autochara
 Y:powerup_home
 Y:keep_savefile
+X:easy_id
+Y:easy_lore
 
 ##### Easy Object Auto-Destroyer #####
 
