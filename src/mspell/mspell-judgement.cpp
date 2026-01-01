@@ -241,11 +241,15 @@ bool dispel_check(PlayerType *player_ptr, MONSTER_IDX m_idx)
     }
 
     PlayerClass pc(player_ptr);
-    if (player_ptr->shero && !pc.equals(PlayerClassType::BERSERKER)) {
+    if (player_ptr->berserk && !pc.equals(PlayerClassType::BERSERKER)) {
         return true;
     }
 
     if (player_ptr->mimic_form == MimicKindType::DEMON_LORD) {
+        return true;
+    }
+
+    if (player_ptr->mimic_form == MimicKindType::DEMIGOD) {
         return true;
     }
 

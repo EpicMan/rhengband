@@ -92,7 +92,7 @@ public:
     TIME_EFFECT invuln{}; /* Timed -- Invulnerable */
     TIME_EFFECT ult_res{}; /* Timed -- Ultimate Resistance */
     TIME_EFFECT hero{}; /* Timed -- Heroism */
-    TIME_EFFECT shero{}; /* Timed -- Super Heroism */
+    TIME_EFFECT berserk{}; /* Timed -- Super Heroism */
     TIME_EFFECT shield{}; /* Timed -- Shield Spell */
     TIME_EFFECT blessed{}; /* Timed -- Blessed */
     TIME_EFFECT tim_invis{}; /* Timed -- See Invisible */
@@ -120,6 +120,9 @@ public:
     TIME_EFFECT tsubureru{};
     TIME_EFFECT magicdef{};
     TIME_EFFECT tim_res_nether{}; /* Timed -- Nether resistance */
+    TIME_EFFECT tim_res_lite{}; /* Timed -- Lite resistance */
+    TIME_EFFECT tim_res_dark{}; /* Timed -- Dark resistance */
+    TIME_EFFECT tim_res_fear{}; /* Timed -- Fear resistance */
     TIME_EFFECT tim_res_time{}; /* Timed -- Time resistance */
     MimicKindType mimic_form{};
     TIME_EFFECT tim_mimic{};
@@ -131,6 +134,11 @@ public:
     TIME_EFFECT tim_reflect{}; /* Timed -- Reflect */
     TIME_EFFECT multishadow{}; /* Timed -- Multi-shadow */
     TIME_EFFECT dustrobe{}; /* Timed -- Robe of dust */
+
+    /* for crusade */
+    TIME_EFFECT tim_emission{}; /* Timed -- Player Emission */
+    TIME_EFFECT tim_exorcism{}; /* Timed -- Exorcism */
+    TIME_EFFECT tim_imm_dark{}; /* Timed -- Darkness immunity */
 
     bool timewalk{};
 

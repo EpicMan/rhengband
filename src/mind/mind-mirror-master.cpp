@@ -6,6 +6,7 @@
  */
 
 #include "mind/mind-mirror-master.h"
+#include "action/travel-execution.h"
 #include "core/disturbance.h"
 #include "core/stuff-handler.h"
 #include "effect/attribute-types.h"
@@ -148,8 +149,8 @@ bool binding_field(PlayerType *player_ptr, int dam)
             }
 
             if (floor.has_los_at(pos) && projectable(floor, p_pos, pos)) {
-                if (!(player_ptr->effects()->blindness().is_blind()) && panel_contains(y, x)) {
-                    print_bolt_pict(player_ptr, y, x, y, x, AttributeType::MANA);
+                if (!(player_ptr->effects()->blindness().is_blind()) && panel_contains(pos)) {
+                    print_bolt_pict(player_ptr, pos, pos, AttributeType::MANA);
                     move_cursor_relative(y, x);
                     term_fresh();
                     term_xtra(TERM_XTRA_DELAY, delay_factor);
@@ -282,8 +283,8 @@ bool set_multishadow(PlayerType *player_ptr, TIME_EFFECT v, bool do_dec)
         return false;
     }
 
-    if (disturb_state) {
-        disturb(player_ptr, false, false);
+    if (disturb_state || Travel::get_instance().is_ongoing()) {
+        disturb(player_ptr, false, true);
     }
 
     rfu.set_flag(StatusRecalculatingFlag::BONUS);
@@ -330,8 +331,8 @@ bool set_dustrobe(PlayerType *player_ptr, TIME_EFFECT v, bool do_dec)
         return false;
     }
 
-    if (disturb_state) {
-        disturb(player_ptr, false, false);
+    if (disturb_state || Travel::get_instance().is_ongoing()) {
+        disturb(player_ptr, false, true);
     }
 
     rfu.set_flag(StatusRecalculatingFlag::BONUS);
