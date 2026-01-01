@@ -291,34 +291,6 @@ void carry(PlayerType *player_ptr, bool pickup)
                     continue;
                 }
 
-                /* "just" id average and pseudo all others */
-                bool heavy = false;
-
-                switch (player_ptr->pclass) {
-                case PlayerClassType::WARRIOR:
-                case PlayerClassType::ARCHER:
-                case PlayerClassType::SAMURAI:
-                case PlayerClassType::CAVALRY:
-                case PlayerClassType::SMITH:
-                case PlayerClassType::ROGUE:
-                case PlayerClassType::NINJA:
-                case PlayerClassType::RANGER:
-                case PlayerClassType::PALADIN:
-                case PlayerClassType::SNIPER:
-                case PlayerClassType::CHAOS_WARRIOR:
-                case PlayerClassType::TOURIST:
-                case PlayerClassType::BERSERKER: {
-                    heavy = true;
-                    break;
-                }
-
-                default:
-                    if (compare_virtue(player_ptr, Virtue::KNOWLEDGE, 100)) {
-                        heavy = true;
-                        break;
-                    }
-                }
-
                 item_feel_type feel = FEEL_NONE;
 
                 switch (item.bi_key.tval()) {
@@ -342,51 +314,7 @@ void carry(PlayerType *player_ptr, bool pickup)
                 case ItemKindType::CARD:
                 case ItemKindType::LITE:
                     /* Now do pseudo */
-                    feel = (heavy ? pseudo_value_check_heavy(&item) : pseudo_value_check_light(&item));
-
-                    if ((player_ptr->muta.has(PlayerMutationType::BAD_LUCK)) && !randint0(13)) {
-                        switch (feel) {
-                        case FEEL_TERRIBLE: {
-                            feel = FEEL_SPECIAL;
-                            break;
-                        }
-                        case FEEL_WORTHLESS: {
-                            feel = FEEL_EXCELLENT;
-                            break;
-                        }
-                        case FEEL_CURSED: {
-                            if (heavy) {
-                                feel = randint0(3) ? FEEL_GOOD : FEEL_AVERAGE;
-                            } else {
-                                feel = FEEL_UNCURSED;
-                            }
-                            break;
-                        }
-                        case FEEL_AVERAGE: {
-                            feel = randint0(2) ? FEEL_CURSED : FEEL_GOOD;
-                            break;
-                        }
-                        case FEEL_GOOD: {
-                            if (heavy) {
-                                feel = randint0(3) ? FEEL_CURSED : FEEL_AVERAGE;
-                            } else {
-                                feel = FEEL_CURSED;
-                            }
-                            break;
-                        }
-                        case FEEL_EXCELLENT: {
-                            feel = FEEL_WORTHLESS;
-                            break;
-                        }
-                        case FEEL_SPECIAL: {
-                            feel = FEEL_TERRIBLE;
-                            break;
-                        }
-
-                        default:
-                            break;
-                        }
-                    }
+                    feel = pseudo_value_check_heavy(&item);
 
                     /* ID average equipment, ammo,and lights */
                     if (feel == FEEL_AVERAGE) {
@@ -397,6 +325,14 @@ void carry(PlayerType *player_ptr, bool pickup)
                         item.feeling = feel;
                     }
                     break;
+
+                case ItemKindType::RING:
+                case ItemKindType::AMULET:
+                    /* Now do pseudo */
+                    item.ident |= (IDENT_SENSE);
+                    item.feeling = pseudo_value_check_heavy(&item);
+                    break;
+
                 default:
                     break;
                 }
