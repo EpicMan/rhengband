@@ -256,7 +256,7 @@ void WorldTurnProcessor::process_change_daytime_night()
 
 void WorldTurnProcessor::process_world_monsters()
 {
-    decide_alloc_monster();
+    /* decide_alloc_monster(); */
     const auto &world = AngbandWorld::get_instance();
     if (!(world.game_turn % (TURNS_PER_TICK * 10)) && !AngbandSystem::get_instance().is_phase_out()) {
         regenerate_monsters(this->player_ptr);

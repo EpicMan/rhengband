@@ -77,6 +77,25 @@ void print_exp(PlayerType *player_ptr)
     PlayerRace pr(player_ptr);
     if ((!exp_need) || pr.equals(PlayerRaceType::ANDROID)) {
         out_val = format("%8d", player_ptr->exp);
+
+        auto current_xp = player_ptr->exp;
+        if (player_ptr->lev > 1) {
+            current_xp -= player_exp[player_ptr->lev - 2] * player_ptr->expfact / 100;
+        }
+
+        auto advance_xp = player_exp[player_ptr->lev - 1] * player_ptr->expfact / 100;
+
+        auto percentage = current_xp * 10000 / advance_xp;
+
+        auto xpPct = percentage / 100;
+        auto xpPctDecimal = percentage % 100;
+
+        if (xpPctDecimal < 10) {
+            out_val = format("  %2d.0%d%%", xpPct, xpPctDecimal);
+        } else {
+            out_val = format("  %2d.%d%%", xpPct, xpPctDecimal);
+        }
+        
     } else {
         if (player_ptr->lev >= PY_MAX_LEVEL) {
             out_val = "********";

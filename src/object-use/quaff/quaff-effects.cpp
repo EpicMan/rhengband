@@ -120,11 +120,14 @@ bool QuaffEffects::influence(const ItemEntity &item)
     case SV_POTION_BESERK_STRENGTH:
         return berserk(this->player_ptr, randint1(25) + 25);
     case SV_POTION_CURE_LIGHT:
-        return cure_light_wounds(this->player_ptr, Dice::roll(2, 8));
+        return cure_light_wounds(this->player_ptr, 15);
+        /* return cure_light_wounds(this->player_ptr, Dice::roll(2, 8));*/
     case SV_POTION_CURE_SERIOUS:
-        return cure_serious_wounds(this->player_ptr, Dice::roll(4, 8));
+        return cure_serious_wounds(this->player_ptr, 30);
+        /*return cure_serious_wounds(this->player_ptr, Dice::roll(4, 8));*/
     case SV_POTION_CURE_CRITICAL:
-        return cure_critical_wounds(this->player_ptr, Dice::roll(6, 8));
+        return cure_critical_wounds(this->player_ptr, 45);
+        /*return cure_critical_wounds(this->player_ptr, Dice::roll(6, 8));*/
     case SV_POTION_HEALING:
         return cure_critical_wounds(this->player_ptr, 300);
     case SV_POTION_STAR_HEALING:

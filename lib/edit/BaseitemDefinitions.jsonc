@@ -12345,7 +12345,7 @@
         "en": "& Wooden Torch~",
       },
       "symbol": {
-        "character": "~",
+        "character": "*",
         "color": "Brown",
       },
       "itemkind": {
@@ -12376,7 +12376,7 @@
         "en": "& Brass Lantern~",
       },
       "symbol": {
-        "character": "~",
+        "character": "*",
         "color": "Light Brown",
       },
       "itemkind": {
