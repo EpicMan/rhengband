@@ -161,35 +161,35 @@ void do_cmd_go_up(PlayerType *player_ptr)
     } else {
         auto &fcms = FloorChangeModesStore::get_instace();
         fcms->set({ FloorChangeMode::SAVE_FLOORS, FloorChangeMode::UP });
-        up_num = 1;
+        //up_num = 1;
         if (terrain.flags.has(TerrainCharacteristics::SHAFT)) {
             fcms->set(FloorChangeMode::SHAFT);
-            up_num *= 2;
+        //    up_num *= 2;
         }
 
-        if (floor.dun_level - up_num < floor.get_dungeon_definition().mindepth) {
+        //if (floor.dun_level - up_num < floor.get_dungeon_definition().mindepth) {
             up_num = floor.dun_level;
-        }
+        //}
     }
 
     if (record_stair) {
         exe_write_diary(floor, DiaryKind::STAIR, 0 - up_num, _("階段を上った", "climbed up the stairs to"));
     }
 
-    if (up_num == floor.dun_level) {
+    /*if (up_num == floor.dun_level) {*/
         if (is_echizen(player_ptr)) {
             msg_print(_("なんだこの階段は！", "What's this STAIRWAY!"));
         } else {
-            msg_print(_("地上に戻った。", "You go back to the surface."));
+            msg_print(_("地上に戻った。", "You enter a maze of staircases to the surface."));
         }
         player_ptr->word_recall = 0;
-    } else {
+    /*} else {
         if (is_echizen(player_ptr)) {
             msg_print(_("なんだこの階段は！", "What's this STAIRWAY!"));
         } else {
             msg_print(_("階段を上って新たなる迷宮へと足を踏み入れた。", "You enter a maze of up staircases."));
         }
-    }
+    }*/
 
     sound(SoundKind::STAIRWAY);
 

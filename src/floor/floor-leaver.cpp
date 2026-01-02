@@ -29,6 +29,7 @@
 #include "target/projection-path-calculator.h"
 #include "view/display-messages.h"
 #include "world/world.h"
+#include <system/dungeon/dungeon-record.h>
 
 static void check_riding_preservation(PlayerType *player_ptr)
 {
@@ -328,14 +329,20 @@ static void jump_floors(FloorType &floor)
     }
 
     const auto &dungeon = floor.get_dungeon_definition();
+    auto &dungeon_record = DungeonRecords::get_instance().get_record(floor.dungeon_id);
+
     if (fcms->has(FloorChangeMode::DOWN)) {
         if (!floor.is_underground()) {
-            move_num = dungeon.mindepth;
+            if (dungeon_record.has_entered()) {
+                move_num = dungeon_record.get_max_level();
+            } else {
+                move_num = dungeon.mindepth;
+            }
         }
     } else if (fcms->has(FloorChangeMode::UP)) {
-        if (floor.dun_level + move_num < dungeon.mindepth) {
+        //if (floor.dun_level + move_num < dungeon.mindepth) {
             move_num = -floor.dun_level;
-        }
+        //}
     }
 
     floor.dun_level += move_num;
