@@ -161,15 +161,24 @@ void do_cmd_go_up(PlayerType *player_ptr)
     } else {
         auto &fcms = FloorChangeModesStore::get_instace();
         fcms->set({ FloorChangeMode::SAVE_FLOORS, FloorChangeMode::UP });
-        //up_num = 1;
-        if (terrain.flags.has(TerrainCharacteristics::SHAFT)) {
-            fcms->set(FloorChangeMode::SHAFT);
-        //    up_num *= 2;
-        }
 
-        //if (floor.dun_level - up_num < floor.get_dungeon_definition().mindepth) {
+        if (permanent_descent) {
+            if (terrain.flags.has(TerrainCharacteristics::SHAFT)) {
+                fcms->set(FloorChangeMode::SHAFT);
+            }
+
             up_num = floor.dun_level;
-        //}
+        } else {
+            up_num = 1;
+            if (terrain.flags.has(TerrainCharacteristics::SHAFT)) {
+                fcms->set(FloorChangeMode::SHAFT);
+                up_num *= 2;
+            }
+
+            if (floor.dun_level - up_num < floor.get_dungeon_definition().mindepth) {
+                up_num = floor.dun_level;
+            }            
+        }
     }
 
     if (record_stair) {

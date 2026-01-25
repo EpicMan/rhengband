@@ -253,6 +253,8 @@ const std::vector<GameOption> option_info = {
 
     { &powerup_home, true, 4, 3, "powerup_home", _("我が家を拡張する(*)", "Increase capacity of your home (*)"), GameOptionPage::BIRTH },
 
+    { &permanent_descent, true, 4, 3, "permanent_descent", _("より浅いレベルには移動できません(*)", "Cannot go to a shallower level (*)"), GameOptionPage::BIRTH },
+
     { &keep_savefile, true, 4, 4, "keep_savefile", _("同一のセーブファイルでゲームを開始する", "Start game with same savefile thet is loaded"), GameOptionPage::BIRTH },
 
     // GameOption(bool *value, bool norm, uint8_t set, uint8_t bits, std::string &&text, std::string &&description, const tl::optional<GameOptionPage> &page = tl::nullopt);
