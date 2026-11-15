@@ -62,6 +62,7 @@ struct term_type {
     bool never_bored{}; //!< Flag "never_bored" Never call the "TERM_XTRA_BORED" action
     bool never_frosh{}; //!< Flag "never_frosh" Never call the "TERM_XTRA_FROSH" action
     bool never_fresh{}; //!< Flag "never_fresh" Never redraw the Term
+    bool never_events{}; //!< Flag "never_events" This "term" never produces input events by itself
 
     byte attr_blank{}; //!< Value "attr_blank" Use this "attr" value for "blank" grids
     char char_blank{}; //!< Value "char_blank" Use this "char" value for "blank" grids
@@ -157,7 +158,10 @@ private:
  * with the second parameter depending on the "action" itself.  Many
  * of the actions shown below are optional on at least one platform.
  *
- * The "TERM_XTRA_EVENT" action uses "v" to "wait" for an event
+ * The "TERM_XTRA_EVENT" action uses "v" to "wait" for an event.
+ * When "v" is false, it must return zero if it processed a pending event,
+ * and non-zero if no event was pending; callers repeat the call until it
+ * returns non-zero in order to drain the queue.
  * The "TERM_XTRA_SHAPE" action uses "v" to "show" the cursor
  * The "TERM_XTRA_FROSH" action uses "v" for the index of the row
  * The "TERM_XTRA_SOUND" action uses "v" for the index of a sound
@@ -167,29 +171,41 @@ private:
  *
  * The other actions do not need a "v" code, so "zero" is used.
  */
-#define TERM_XTRA_EVENT 1 /* Process some pending events */
-#define TERM_XTRA_FLUSH 2 /* Flush all pending events */
-#define TERM_XTRA_CLEAR 3 /* Clear the entire window */
-#define TERM_XTRA_SHAPE 4 /* Set cursor shape (optional) */
-#define TERM_XTRA_FROSH 5 /* Flush one row (optional) */
-#define TERM_XTRA_FRESH 6 /* Flush all rows (optional) */
-#define TERM_XTRA_NOISE 7 /* Make a noise (optional) */
-#define TERM_XTRA_SOUND 8 /* Make a sound (optional) */
-#define TERM_XTRA_BORED 9 /* Handle stuff when bored (optional) */
-#define TERM_XTRA_REACT 10 /* React to global changes (optional) */
-#define TERM_XTRA_ALIVE 11 /* Change the "hard" level (optional) */
-#define TERM_XTRA_LEVEL 12 /* Change the "soft" level (optional) */
-#define TERM_XTRA_DELAY 13 /* Delay some milliseconds (optional) */
-#define TERM_XTRA_MUSIC_BASIC 14 /* Play a music(basic) (optional) */
-#define TERM_XTRA_MUSIC_DUNGEON 15 /* Play a music(dungeon) (optional) */
-#define TERM_XTRA_MUSIC_QUEST 16 /* Play a music(quest) (optional) */
-#define TERM_XTRA_MUSIC_TOWN 17 /* Play a music(floor) (optional) */
-#define TERM_XTRA_MUSIC_MONSTER 18 /* Play a music(monster) (optional) */
-#define TERM_XTRA_MUSIC_MUTE 19
-#define TERM_XTRA_SCENE 20 /* React to scene changes (optional) */
+constexpr auto TERM_XTRA_EVENT = 1; /* Process some pending events */
+constexpr auto TERM_XTRA_FLUSH = 2; /* Flush all pending events */
+constexpr auto TERM_XTRA_CLEAR = 3; /* Clear the entire window */
+constexpr auto TERM_XTRA_SHAPE = 4; /* Set cursor shape (optional) */
+constexpr auto TERM_XTRA_FROSH = 5; /* Flush one row (optional) */
+constexpr auto TERM_XTRA_FRESH = 6; /* Flush all rows (optional) */
+constexpr auto TERM_XTRA_NOISE = 7; /* Make a noise (optional) */
+constexpr auto TERM_XTRA_SOUND = 8; /* Make a sound (optional) */
+constexpr auto TERM_XTRA_BORED = 9; /* Handle stuff when bored (optional) */
+constexpr auto TERM_XTRA_REACT = 10; /* React to global changes (optional) */
+constexpr auto TERM_XTRA_ALIVE = 11; /* Change the "hard" level (optional) */
+constexpr auto TERM_XTRA_LEVEL = 12; /* Change the "soft" level (optional) */
+constexpr auto TERM_XTRA_DELAY = 13; /* Delay some milliseconds (optional) */
+constexpr auto TERM_XTRA_MUSIC_BASIC = 14; /* Play a music(basic) (optional) */
+constexpr auto TERM_XTRA_MUSIC_DUNGEON = 15; /* Play a music(dungeon) (optional) */
+constexpr auto TERM_XTRA_MUSIC_QUEST = 16; /* Play a music(quest) (optional) */
+constexpr auto TERM_XTRA_MUSIC_TOWN = 17; /* Play a music(floor) (optional) */
+constexpr auto TERM_XTRA_MUSIC_MONSTER = 18; /* Play a music(monster) (optional) */
+constexpr auto TERM_XTRA_MUSIC_MUTE = 19;
+constexpr auto TERM_XTRA_SCENE = 20; /* React to scene changes (optional) */
 
 /**** Available Variables ****/
 extern term_type *game_term;
+
+/*!
+ * @brief キー入力待ちの間に繰り返し呼ばれるフック
+ * @details
+ * 設定されている場合、term_inkey()はフロントエンドに入力待ちをブロックさせず、
+ * 保留中のイベントの取り出しと本フックの呼び出しを交互に行う。
+ * ゲームがキー入力を待っている間だけ別の仕事をさせたい場合に用いる。
+ * 未設定 (nullptr) の場合はフロントエンドが従来通りブロックして入力を待つ。
+ *
+ * 本フックは待ち続けるのではなく、短時間で戻ってくること。
+ */
+extern void (*term_inkey_wait_hook)();
 
 class DisplaySymbol;
 class DisplaySymbolPair;
@@ -197,7 +213,7 @@ void term_user();
 void term_xtra(int n, int v);
 
 void term_queue_char(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair);
-void term_queue_bigchar(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair);
+bool term_queue_bigchar(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair);
 
 void term_fresh();
 void term_fresh_force();
@@ -219,25 +235,25 @@ std::pair<int, int> term_get_size();
 std::pair<int, int> term_locate();
 DisplaySymbol term_what(int x, int y, const DisplaySymbol &ds);
 
-errr term_flush();
+void term_flush();
 errr term_key_push(int k);
-errr term_inkey(char *ch, bool wait, bool take);
+int term_key_queue_room();
+errr term_keys_push(std::string_view keys);
+char term_inkey(bool wait, bool take);
 
-errr term_save();
-errr term_load(bool load_all);
+void term_save();
+void term_load(bool should_load_all);
 
-errr term_exchange();
+void term_resize(int w, int h);
 
-errr term_resize(TERM_LEN w, TERM_LEN h);
+void term_activate(term_type *t);
 
-errr term_activate(term_type *t);
-
-errr term_init(term_type *t, TERM_LEN w, TERM_LEN h, int k);
+void term_init(term_type *t, int w, int h, int k);
 
 #ifdef JP
 void term_putstr_v(int x, int y_initial, size_t n, uint8_t color, std::string_view sv);
 #endif
 
-#ifndef WINDOWS
+#ifndef _WIN32
 errr term_nuke(term_type *t);
 #endif

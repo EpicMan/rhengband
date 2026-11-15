@@ -13,7 +13,7 @@
 #include "game-option/birth-options.h"
 #include "game-option/play-record-options.h"
 #include "game-option/special-options.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "io/write-diary.h"
 #include "main/sound-definitions-table.h"
 #include "main/sound-of-music.h"
@@ -22,30 +22,33 @@
 #include "monster/monster-describer.h"
 #include "monster/monster-description-types.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/dungeon/dungeon-list.h"
 #include "system/dungeon/dungeon-record.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/enums/dungeon/dungeon-id.h"
 #include "system/floor/floor-info.h"
-#include "system/floor/town-info.h"
 #include "system/floor/town-list.h"
+#include "system/floor/town-records.h"
 #include "system/floor/wilderness-grid.h"
 #include "system/grid-type-definition.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/services/dungeon-service.h"
 #include "target/projection-path-calculator.h"
 #include "target/target-checker.h"
 #include "target/target-setter.h"
 #include "target/target-types.h"
 #include "term/screen-processor.h"
-#include "term/z-form.h"
 #include "util/int-char-converter.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 #include <algorithm>
+#include <fmt/format.h>
 
 /*!
  * @brief プレイヤー及びモンスターをレベルテレポートさせる /
@@ -99,11 +102,11 @@ void teleport_level(PlayerType *player_ptr, MONSTER_IDX m_idx)
     if ((ironman_downward && (m_idx <= 0)) || (floor.dun_level <= dungeon.mindepth)) {
 #ifdef JP
         if (see_m) {
-            msg_format("%s^は床を突き破って沈んでいく。", m_name.data());
+            msg_print("{}は床を突き破って沈んでいく。", str_upcase_first(m_name));
         }
 #else
         if (see_m) {
-            msg_format("%s^ sink%s through the floor.", m_name.data(), (m_idx <= 0) ? "" : "s");
+            msg_print("{} sink{} through the floor.", str_upcase_first(m_name), (m_idx <= 0) ? "" : "s");
         }
 #endif
         if (m_idx <= 0) {
@@ -134,11 +137,11 @@ void teleport_level(PlayerType *player_ptr, MONSTER_IDX m_idx)
     } else if (inside_quest(floor.get_quest_id()) || (floor.dun_level >= dungeon.maxdepth)) {
 #ifdef JP
         if (see_m) {
-            msg_format("%s^は天井を突き破って宙へ浮いていく。", m_name.data());
+            msg_print("{}は天井を突き破って宙へ浮いていく。", str_upcase_first(m_name));
         }
 #else
         if (see_m) {
-            msg_format("%s^ rise%s up through the ceiling.", m_name.data(), (m_idx <= 0) ? "" : "s");
+            msg_print("{} rise{} up through the ceiling.", str_upcase_first(m_name), (m_idx <= 0) ? "" : "s");
         }
 #endif
 
@@ -159,11 +162,11 @@ void teleport_level(PlayerType *player_ptr, MONSTER_IDX m_idx)
     } else if (go_up) {
 #ifdef JP
         if (see_m) {
-            msg_format("%s^は天井を突き破って宙へ浮いていく。", m_name.data());
+            msg_print("{}は天井を突き破って宙へ浮いていく。", str_upcase_first(m_name));
         }
 #else
         if (see_m) {
-            msg_format("%s^ rise%s up through the ceiling.", m_name.data(), (m_idx <= 0) ? "" : "s");
+            msg_print("{} rise{} up through the ceiling.", str_upcase_first(m_name), (m_idx <= 0) ? "" : "s");
         }
 #endif
 
@@ -182,11 +185,11 @@ void teleport_level(PlayerType *player_ptr, MONSTER_IDX m_idx)
     } else {
 #ifdef JP
         if (see_m) {
-            msg_format("%s^は床を突き破って沈んでいく。", m_name.data());
+            msg_print("{}は床を突き破って沈んでいく。", str_upcase_first(m_name));
         }
 #else
         if (see_m) {
-            msg_format("%s^ sink%s through the floor.", m_name.data(), (m_idx <= 0) ? "" : "s");
+            msg_print("{} sink{} through the floor.", str_upcase_first(m_name), (m_idx <= 0) ? "" : "s");
         }
 #endif
 
@@ -243,11 +246,17 @@ bool teleport_level_other(PlayerType *player_ptr)
     const auto &monster = floor.m_list[target_m_idx];
     const auto &monrace = monster.get_monrace();
     const auto m_name = monster_desc(player_ptr, monster, 0);
-    msg_format(_("%s^の足を指さした。", "You gesture at %s^'s feet."), m_name.data());
+    msg_print(_("{}の足を指さした。", "You gesture at {} feet."), _(m_name, monster_desc(player_ptr, monster, MD_POSSESSIVE)));
 
     auto has_immune = monrace.resistance_flags.has_any_of(RFR_EFF_RESIST_NEXUS_MASK) || monrace.resistance_flags.has(MonsterResistanceType::RESIST_TELEPORT);
-    if (has_immune || (monrace.misc_flags.has(MonsterMiscType::QUESTOR)) || (monrace.level + randint1(50) > player_ptr->lev + randint1(60))) {
-        msg_print(_("しかし効果がなかった！", format("%s^ is unaffected!", m_name.data())));
+    auto is_unaffected = has_immune || monrace.misc_flags.has(MonsterMiscType::QUESTOR);
+    if (!is_unaffected) {
+        const auto resistance_power = monrace.level + randint1(50);
+        is_unaffected = resistance_power > player_ptr->lev + randint1(60);
+    }
+
+    if (is_unaffected) {
+        msg_print(_("しかし効果がなかった！", "{} is unaffected!"), str_upcase_first(m_name));
     } else {
         teleport_level(player_ptr, target_m_idx);
     }
@@ -276,13 +285,16 @@ bool tele_town(PlayerType *player_ptr)
     clear_bldg(4, 10);
 
     auto num = 0;
-    const int towns_size = towns_info.size();
-    for (auto i = 1; i < towns_size; i++) {
-        if ((i == VALID_TOWNS) || (i == SECRET_TOWN) || (i == player_ptr->town_num) || !(player_ptr->visit & (1UL << (i - 1)))) {
+    const auto &world = AngbandWorld::get_instance();
+    const auto &towns = TownList::get_instance();
+    const auto towns_size = towns.size();
+    const auto &town_records = TownRecords::get_instance();
+    for (size_t i = 1; i < towns_size; i++) {
+        if ((i == VALID_TOWNS) || (i == SECRET_TOWN) || (i == world.get_town_index()) || !town_records.has_visited(to_town_id(i))) {
             continue;
         }
 
-        const auto buf = format("%c) %-20s", I2A(i - 1), towns_info[i].name.data());
+        const auto buf = fmt::format("{:c}) {:<20}", I2A(i - 1), fmt::bytes(towns.get_town(i).get_name()));
         prt(buf, 5 + i, 5);
         num++;
     }
@@ -294,22 +306,23 @@ bool tele_town(PlayerType *player_ptr)
         return false;
     }
 
-    prt(_("どこに行きますか:", "Where do you want to go: "), 0, 0);
+    constexpr auto prompt = _("どこに行きますか:", "Where do you want to go: ");
+    prt(prompt, 0, 0);
     char key;
     while (true) {
-        key = inkey();
+        key = input_key_with_context(InputKind::COMMAND_CHAR, prompt);
 
         if (key == ESCAPE) {
             screen_load();
             return false;
         }
 
-        if ((key < 'a') || (key > ('a' + towns_size - 2))) {
+        if ((key < 'a') || (key > static_cast<char>('a' + towns_size - 2))) {
             continue;
         }
 
-        const auto town_num = key - 'a' + 1;
-        if ((town_num == player_ptr->town_num) || (town_num == VALID_TOWNS) || (town_num == SECRET_TOWN) || !(player_ptr->visit & (1UL << (key - 'a')))) {
+        const size_t town_num = key - 'a' + 1;
+        if ((town_num == world.get_town_index()) || (town_num == VALID_TOWNS) || (town_num == SECRET_TOWN) || !town_records.has_visited(to_town_id(town_num))) {
             continue;
         }
 
@@ -340,17 +353,17 @@ void reserve_alter_reality(PlayerType *player_ptr, TIME_EFFECT turns)
         return;
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (player_ptr->alter_reality || turns == 0) {
         player_ptr->alter_reality = 0;
         msg_print(_("景色が元に戻った...", "The view around you returns to normal..."));
-        rfu.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+        dur.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
         return;
     }
 
     player_ptr->alter_reality = turns;
     msg_print(_("回りの景色が変わり始めた...", "The view around you begins to change..."));
-    rfu.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+    dur.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
 }
 
 /*!
@@ -369,8 +382,8 @@ static tl::optional<DungeonId> choose_dungeon(std::string_view note, int row, in
         }
 
         const auto &dungeons = DungeonList::get_instance();
-        constexpr auto fmt = _("まだ%sに入ったことはない。", "You haven't entered %s yet.");
-        msg_format(fmt, dungeons.get_dungeon(DungeonId::ANGBAND).name.data());
+        constexpr auto fmt = _("まだ{}に入ったことはない。", "You haven't entered {} yet.");
+        msg_print(fmt, dungeons.get_dungeon(DungeonId::ANGBAND).name);
         msg_erase();
         return tl::nullopt;
     }
@@ -386,10 +399,11 @@ static tl::optional<DungeonId> choose_dungeon(std::string_view note, int row, in
         prt(_("      選べるダンジョンがない。", "      No dungeon is available."), row, col);
     }
 
-    prt(format(_("どのダンジョン%sしますか:", "Which dungeon do you %s?: "), note.data()), 0, 0);
+    const auto prompt = fmt::format(_("どのダンジョン{}しますか:", "Which dungeon do you {}?: "), note);
+    prt(prompt, 0, 0);
     const auto ids = dungeon_records.collect_entered_dungeon_ids();
     while (true) {
-        const auto key = inkey();
+        const auto key = input_key_with_context(InputKind::COMMAND_CHAR, prompt);
         if ((key == ESCAPE) || ids.empty()) {
             screen_load();
             return tl::nullopt;
@@ -434,11 +448,11 @@ bool recall_player(PlayerType *player_ptr, TIME_EFFECT turns)
         }
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (player_ptr->word_recall || turns == 0) {
         player_ptr->word_recall = 0;
         msg_print(_("張りつめた大気が流れ去った...", "A tension leaves the air around you..."));
-        rfu.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+        dur.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
         return true;
     }
 
@@ -453,7 +467,7 @@ bool recall_player(PlayerType *player_ptr, TIME_EFFECT turns)
 
     player_ptr->word_recall = turns;
     msg_print(_("回りの大気が張りつめてきた...", "The air about you becomes charged..."));
-    rfu.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+    dur.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
     return true;
 }
 
@@ -475,8 +489,8 @@ bool free_level_recall(PlayerType *player_ptr)
         }
     }
 
-    const auto mes = _("%sの何階にテレポートしますか？", "Teleport to which level of %s? ");
-    const auto amt = input_quantity(max_depth, format(mes, dungeon.name.data()));
+    constexpr auto fmt = _("{}の何階にテレポートしますか？", "Teleport to which level of {}? ");
+    const auto amt = input_quantity(max_depth, fmt::format(fmt, dungeon.name));
     if (amt <= 0) {
         return false;
     }
@@ -492,7 +506,7 @@ bool free_level_recall(PlayerType *player_ptr)
     }
 
     msg_print(_("回りの大気が張りつめてきた...", "The air about you becomes charged..."));
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
     return true;
 }
 
@@ -529,9 +543,9 @@ bool reset_recall(PlayerType *player_ptr)
         exe_write_diary(*player_ptr->current_floor_ptr, DiaryKind::TRUMP, enum2i(*select_dungeon), note);
     }
 #ifdef JP
-    msg_format("%sの帰還レベルを %d 階にセット。", dungeon.name.data(), *reset_level);
+    msg_print("{}の帰還レベルを {} 階にセット。", dungeon.name, *reset_level);
 #else
-    msg_format("Recall depth of %s set to level %d (%d').", dungeon.name.data(), *reset_level, *reset_level * 50);
+    msg_print("Recall depth of {} set to level {} ({}').", dungeon.name, *reset_level, *reset_level * 50);
 #endif
     return true;
 }

@@ -9,6 +9,7 @@
 #include "flavor/flavor-describer.h"
 #include "floor/floor-object.h"
 #include "floor/geometry.h"
+#include "grid/grid.h"
 #include "monster-race/race-flags-resistance.h"
 #include "monster-race/race-resistance-mask.h"
 #include "monster/monster-describer.h"
@@ -18,14 +19,15 @@
 #include "monster/smart-learn-types.h"
 #include "object-enchant/tr-types.h"
 #include "object/object-mark-types.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/bit-flags-calculator.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include <string_view>
 
@@ -134,7 +136,7 @@ static void monster_pickup_object(PlayerType *player_ptr, turn_flags *turn_flags
         if (turn_flags_ptr->do_take && monrace.behavior_flags.has(MonsterBehaviorType::STUPID)) {
             turn_flags_ptr->did_take_item = true;
             if (monster.ml && player_can_see_bold(player_ptr, ny, nx)) {
-                msg_format(_("%s^は%sを拾おうとしたが、だめだった。", "%s^ tries to pick up %s, but fails."), m_name.data(), o_name.data());
+                msg_print(_("{}は{}を拾おうとしたが、だめだった。", "{} tries to pick up {}, but fails."), str_upcase_first(m_name), o_name);
             }
         }
 
@@ -144,7 +146,7 @@ static void monster_pickup_object(PlayerType *player_ptr, turn_flags *turn_flags
     if (turn_flags_ptr->do_take) {
         turn_flags_ptr->did_take_item = true;
         if (player_can_see_bold(player_ptr, ny, nx)) {
-            msg_format(_("%s^が%sを拾った。", "%s^ picks up %s."), m_name.data(), o_name.data());
+            msg_print(_("{}が{}を拾った。", "{} picks up {}."), str_upcase_first(m_name), o_name);
         }
 
         excise_object_idx(*player_ptr->current_floor_ptr, this_o_idx);
@@ -153,7 +155,10 @@ static void monster_pickup_object(PlayerType *player_ptr, turn_flags *turn_flags
         o_ptr->iy = o_ptr->ix = 0;
         o_ptr->held_m_idx = m_idx;
         monster.hold_o_idx_list.add(*player_ptr->current_floor_ptr, this_o_idx);
-        RedrawingFlagsUpdater::get_instance().set_flag(SubWindowRedrawingFlag::FOUND_ITEMS);
+
+        // 拾われたアイテムがマップに残らないように描き直す (モンスターが見えていなければ、床などが見える)
+        lite_spot(player_ptr, { ny, nx });
+        DeferredUpdateRequests::get_instance().set_flag(SubWindowRedrawingFlag::FOUND_ITEMS);
         return;
     }
 
@@ -163,7 +168,7 @@ static void monster_pickup_object(PlayerType *player_ptr, turn_flags *turn_flags
 
     turn_flags_ptr->did_kill_item = true;
     if (floor.has_los_at({ ny, nx })) {
-        msg_format(_("%s^が%sを破壊した。", "%s^ destroys %s."), m_name.data(), o_name.data());
+        msg_print(_("{}が{}を破壊した。", "{} destroys {}."), str_upcase_first(m_name), o_name);
     }
 
     delete_object_idx(player_ptr, this_o_idx);

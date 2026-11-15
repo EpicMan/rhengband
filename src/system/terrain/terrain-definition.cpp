@@ -17,15 +17,9 @@ const std::unordered_map<TerrainCharacteristics, EnumClassFlagGroup<TerrainActio
     { TerrainCharacteristics::BASH, { TerrainAction::CRASH_GLASS } },
     { TerrainCharacteristics::DISARM, { TerrainAction::DESTROY } },
     { TerrainCharacteristics::TUNNEL, { TerrainAction::DESTROY, TerrainAction::CRASH_GLASS } },
-    { TerrainCharacteristics::HURT_ROCK, { TerrainAction::DESTROY, TerrainAction::CRASH_GLASS } },
-    { TerrainCharacteristics::HURT_DISI, { TerrainAction::DESTROY, TerrainAction::NO_DROP, TerrainAction::CRASH_GLASS } },
+    { TerrainCharacteristics::STONE, { TerrainAction::DESTROY, TerrainAction::CRASH_GLASS } },
+    { TerrainCharacteristics::CAN_DISINTEGRATE, { TerrainAction::DESTROY, TerrainAction::NO_DROP, TerrainAction::CRASH_GLASS } },
 };
-}
-
-TerrainType::TerrainType()
-    : symbol_definitions(DEFAULT_SYMBOLS)
-    , symbol_configs(DEFAULT_SYMBOLS)
-{
 }
 
 bool TerrainType::has(TerrainCharacteristics tc, TerrainAction ta)
@@ -43,6 +37,18 @@ bool TerrainType::has(TerrainCharacteristics tc, TerrainAction ta)
 bool TerrainType::is_permanent_wall() const
 {
     return this->flags.has_all_of({ TerrainCharacteristics::WALL, TerrainCharacteristics::PERMANENT });
+}
+
+bool TerrainType::can_damage_player() const
+{
+    return this->flags.has_any_of({
+               TerrainCharacteristics::LAVA,
+               TerrainCharacteristics::COLD_PUDDLE,
+               TerrainCharacteristics::ELEC_PUDDLE,
+               TerrainCharacteristics::ACID_PUDDLE,
+               TerrainCharacteristics::POISON_PUDDLE,
+           }) ||
+           this->flags.has_all_of({ TerrainCharacteristics::WATER, TerrainCharacteristics::DEEP });
 }
 
 /*!
@@ -70,6 +76,64 @@ bool TerrainType::has(TerrainCharacteristics tc) const
     return this->flags.has(tc);
 }
 
+bool TerrainType::init_trap_type(TrapType type)
+{
+    if (this->flags.has_not(TerrainCharacteristics::TRAP)) {
+        return false;
+    }
+
+    this->trap_type = type;
+    return true;
+}
+
+bool TerrainType::init_pattern_tile_type(PatternTileType type)
+{
+    if (this->flags.has_not(TerrainCharacteristics::PATTERN)) {
+        return false;
+    }
+
+    this->pattern_tile_type = type;
+    return true;
+}
+
+bool TerrainType::init_store_sale_type(StoreSaleType type)
+{
+    if (this->flags.has_not(TerrainCharacteristics::STORE)) {
+        return false;
+    }
+
+    this->store_sale_type = type;
+    return true;
+}
+
+bool TerrainType::init_building_type(BuildingType type)
+{
+    if (this->flags.has_not(TerrainCharacteristics::BLDG)) {
+        return false;
+    }
+
+    this->building_type = type;
+    return true;
+}
+
+bool TerrainType::init_conversion_type(TerrainConversionType type, int index)
+{
+    if (this->flags.has_not(TerrainCharacteristics::CONVERT)) {
+        return false;
+    }
+
+    if (type == TerrainConversionType::STREAM) {
+        if (index < 0) {
+            return false;
+        }
+
+        this->stream_index = index;
+    }
+    this->conversion_type = type;
+
+    return true;
+}
+
 /*!
  * @brief 地形のライティング状況をリセットする
  * @param is_config 設定値ならばtrue、定義値ならばfalse (定義値が入るのは初期化時のみ)
@@ -85,7 +149,7 @@ void TerrainType::reset_lighting(bool is_config)
     this->reset_lighting_graphics(symbols);
 }
 
-void TerrainType::reset_lighting_ascii(std::map<int, DisplaySymbol> &symbols)
+void TerrainType::reset_lighting_ascii(TerrainSymbols &symbols)
 {
     const auto color_standard = symbols[F_LIT_STANDARD].color;
     const auto character_standard = symbols[F_LIT_STANDARD].character;
@@ -96,7 +160,7 @@ void TerrainType::reset_lighting_ascii(std::map<int, DisplaySymbol> &symbols)
     }
 }
 
-void TerrainType::reset_lighting_graphics(std::map<int, DisplaySymbol> &symbols)
+void TerrainType::reset_lighting_graphics(TerrainSymbols &symbols)
 {
     const auto color_standard = symbols[F_LIT_STANDARD].color;
     const auto character_standard = symbols[F_LIT_STANDARD].character;

@@ -11,7 +11,7 @@
 #include "player/player-status-flags.h"
 #include "specific-object/death-scythe.h"
 #include "sv-definition/sv-weapon-types.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
@@ -172,7 +172,7 @@ bool process_attack_hit(PlayerType *player_ptr, player_attack_type *pa_ptr, int 
         process_death_scythe_reflection(player_ptr, pa_ptr);
     } else {
         sound(SoundKind::MISS);
-        msg_format(_("ミス！ %sにかわされた。", "You miss %s."), pa_ptr->m_name);
+        msg_print(_("ミス！ {}にかわされた。", "You miss {}."), pa_ptr->m_name);
     }
 
     return false;

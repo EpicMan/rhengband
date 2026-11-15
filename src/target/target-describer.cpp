@@ -1,13 +1,14 @@
 #include "target/target-describer.h"
 #include "action/travel-execution.h"
+#include "bot/bot-json-output.h"
 #include "core/stuff-handler.h"
+#include "core/window-redrawer.h"
 #include "dungeon/quest.h"
 #include "flavor/flavor-describer.h"
 #include "floor/geometry.h"
 #include "floor/object-scanner.h"
 #include "game-option/input-options.h"
 #include "grid/grid.h"
-#include "info-reader/fixed-map-parser.h"
 #include "io/cursor.h"
 #include "io/input-key-acceptor.h"
 #include "monster/monster-describer.h"
@@ -18,12 +19,14 @@
 #include "system/building-type-definition.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/dungeon/dungeon-list.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/enums/grid-flow.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/floor/floor-info.h"
-#include "system/floor/town-info.h"
 #include "system/floor/town-list.h"
 #include "system/grid-type-definition.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
@@ -34,6 +37,7 @@
 #include "term/screen-processor.h"
 #include "timed-effect/timed-effects.h"
 #include "tracking/lore-tracker.h"
+#include "util/enum-converter.h"
 #include "view/display-lore.h"
 #include "view/display-messages.h"
 #include "window/display-sub-windows.h"
@@ -101,12 +105,15 @@ void GridExamination::set_terrain_id(TerrainTag tag)
 
 bool show_gold_on_floor = false;
 
-/*
- * Evaluate number of kill needed to gain level
+/*!
+ * @brief 注視コマンドに表示する「レベルアップまでに倒す必要のある数」を求める
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param monster 対象のモンスター
+ * @return 表示文字列 ("**" / "??" / 3桁の数)
  */
-static std::string evaluate_monster_exp(PlayerType *player_ptr, const MonsterEntity &monster)
+std::string evaluate_monster_exp(PlayerType *player_ptr, const MonsterEntity &monster)
 {
-    const auto &monrace = monster.get_appearance_monrace();
+    const auto &monrace = monster.get_apparent_monrace();
     if ((player_ptr->lev >= PY_MAX_LEVEL) || PlayerRace(player_ptr).equals(PlayerRaceType::ANDROID)) {
         return "**";
     }
@@ -167,15 +174,15 @@ static void describe_target(PlayerType *player_ptr, GridExamination *ge_ptr)
 
 static ProcessResult describe_hallucinated_target(PlayerType *player_ptr, GridExamination *ge_ptr)
 {
-    if (!player_ptr->effects()->hallucination().is_hallucinated()) {
+    if (!player_ptr->effects()->hallucination().is_active()) {
         return ProcessResult::PROCESS_CONTINUE;
     }
 
     concptr name = _("何か奇妙な物", "something strange");
 #ifdef JP
-    const auto out_val = format("%s%s%s%s [%s]", ge_ptr->s1, name, ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
+    const auto out_val = fmt::format("{}{}{}{} [{}]", ge_ptr->s1, name, ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
 #else
-    const auto out_val = format("%s%s%s%s [%s]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, name, ge_ptr->info);
+    const auto out_val = fmt::format("{}{}{}{} [{}]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, name, ge_ptr->info);
 #endif
     prt(out_val, 0, 0);
     move_cursor_relative(ge_ptr->y, ge_ptr->x);
@@ -189,9 +196,10 @@ static ProcessResult describe_hallucinated_target(PlayerType *player_ptr, GridEx
 
 static bool describe_grid_lore(PlayerType *player_ptr, GridExamination *ge_ptr)
 {
+    BotDrawnScreenScope bot_screen;
     screen_save();
     screen_roff(player_ptr, ge_ptr->m_ptr->ap_r_idx, MONSTER_LORE_NORMAL);
-    term_addstr(-1, TERM_WHITE, format(_("  [r思 %s%s]", "  [r,%s%s]"), ge_ptr->x_info, ge_ptr->info));
+    term_addstr(-1, TERM_WHITE, fmt::format(_("  [r思 {}{}]", "  [r,{}{}]"), ge_ptr->x_info, ge_ptr->info));
     ge_ptr->query = inkey();
     screen_load();
     return ge_ptr->query != 'r';
@@ -214,11 +222,9 @@ static void describe_grid_monster(PlayerType *player_ptr, GridExamination *ge_pt
         std::string acount = evaluate_monster_exp(player_ptr, *ge_ptr->m_ptr);
         const auto mon_desc = ge_ptr->m_ptr->build_looking_description(true);
 #ifdef JP
-        const auto out_val = format("[%s]%s%s(%s)%s%s [r思 %s%s]", acount.data(), ge_ptr->s1, m_name.data(), mon_desc.data(), ge_ptr->s2, ge_ptr->s3,
-            ge_ptr->x_info, ge_ptr->info);
+        const auto out_val = fmt::format("[{}]{}{}({}){}{} [r思 {}{}]", acount, ge_ptr->s1, m_name, mon_desc, ge_ptr->s2, ge_ptr->s3, ge_ptr->x_info, ge_ptr->info);
 #else
-        const auto out_val = format("[%s]%s%s%s%s(%s) [r, %s%s]", acount.data(), ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, m_name.data(), mon_desc.data(),
-            ge_ptr->x_info, ge_ptr->info);
+        const auto out_val = fmt::format("[{}]{}{}{}{}({}) [r, {}{}]", acount, ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, m_name, mon_desc, ge_ptr->x_info, ge_ptr->info);
 #endif
         prt(out_val, 0, 0);
         move_cursor_relative(ge_ptr->y, ge_ptr->x);
@@ -233,7 +239,7 @@ static void describe_grid_monster(PlayerType *player_ptr, GridExamination *ge_pt
 
 static void describe_monster_person(GridExamination *ge_ptr)
 {
-    const auto &monrace = ge_ptr->m_ptr->get_appearance_monrace();
+    const auto &monrace = ge_ptr->m_ptr->get_apparent_monrace();
     ge_ptr->s1 = _("それは", "It is ");
     if (monrace.is_female()) {
         ge_ptr->s1 = _("彼女は", "She is ");
@@ -255,9 +261,9 @@ static short describe_monster_item(PlayerType *player_ptr, GridExamination *ge_p
         const auto &item = *player_ptr->current_floor_ptr->o_list[this_o_idx];
         const auto item_name = describe_flavor(player_ptr, item, 0);
 #ifdef JP
-        const auto out_val = format("%s%s%s%s[%s]", ge_ptr->s1, item_name.data(), ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
+        const auto out_val = fmt::format("{}{}{}{}[{}]", ge_ptr->s1, item_name, ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
 #else
-        const auto out_val = format("%s%s%s%s [%s]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, item_name.data(), ge_ptr->info);
+        const auto out_val = fmt::format("{}{}{}{} [{}]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, item_name, ge_ptr->info);
 #endif
         prt(out_val, 0, 0);
         move_cursor_relative(ge_ptr->y, ge_ptr->x);
@@ -290,7 +296,8 @@ static short describe_grid(PlayerType *player_ptr, GridExamination *ge_ptr)
     ge_ptr->boring = false;
     LoreTracker::get_instance().set_trackee(ge_ptr->m_ptr->ap_r_idx);
     health_track(player_ptr, ge_ptr->g_ptr->m_idx);
-    handle_stuff(player_ptr);
+    redraw_stuff(player_ptr);
+    window_stuff(player_ptr);
     describe_grid_monster(player_ptr, ge_ptr);
     if ((ge_ptr->query != '\r') && (ge_ptr->query != '\n') && (ge_ptr->query != ' ') && (ge_ptr->query != 'x')) {
         return ge_ptr->query;
@@ -324,9 +331,9 @@ static short describe_footing(PlayerType *player_ptr, GridExamination *ge_ptr)
     const auto &item = *player_ptr->current_floor_ptr->o_list[ge_ptr->floor_item_index[0]];
     const auto item_name = describe_flavor(player_ptr, item, 0);
 #ifdef JP
-    const auto out_val = format("%s%s%s%s[%s]", ge_ptr->s1, item_name.data(), ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
+    const auto out_val = fmt::format("{}{}{}{}[{}]", ge_ptr->s1, item_name, ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
 #else
-    const auto out_val = format("%s%s%s%s [%s]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, item_name.data(), ge_ptr->info);
+    const auto out_val = fmt::format("{}{}{}{} [{}]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, item_name, ge_ptr->info);
 #endif
     prt(out_val, 0, 0);
     move_cursor_relative(ge_ptr->y, ge_ptr->x);
@@ -416,9 +423,9 @@ static short describe_footing_sight(PlayerType *player_ptr, GridExamination *ge_
     ge_ptr->boring = false;
     const auto item_name = describe_flavor(player_ptr, item, 0);
 #ifdef JP
-    const auto out_val = format("%s%s%s%s[%s]", ge_ptr->s1, item_name.data(), ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
+    const auto out_val = fmt::format("{}{}{}{}[{}]", ge_ptr->s1, item_name, ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
 #else
-    const auto out_val = format("%s%s%s%s [%s]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, item_name.data(), ge_ptr->info);
+    const auto out_val = fmt::format("{}{}{}{} [{}]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, item_name, ge_ptr->info);
 #endif
     prt(out_val, 0, 0);
     move_cursor_relative(ge_ptr->y, ge_ptr->x);
@@ -458,23 +465,16 @@ static std::string decide_target_floor(PlayerType *player_ptr, GridExamination *
 {
     auto &floor = *player_ptr->current_floor_ptr;
     if (ge_ptr->terrain_ptr->flags.has(TerrainCharacteristics::QUEST_ENTER)) {
-        const auto old_quest = floor.quest_number;
         const auto &quests = QuestList::get_instance();
         const auto quest_id = i2enum<QuestId>(ge_ptr->g_ptr->special);
         const auto &quest = quests.get_quest(quest_id);
-        constexpr auto fmt = _("クエスト「%s」(%d階相当)", "the entrance to the quest '%s'(level %d)");
+        constexpr auto fmt = _("クエスト「{}」({}階相当)", "the entrance to the quest '{}'(level {})");
 
-        quest_text_lines.clear();
-
-        floor.quest_number = quest_id;
-        init_flags = INIT_NAME_ONLY;
-        parse_fixed_map(player_ptr, QUEST_DEFINITION_LIST, 0, 0, 0, 0);
-        floor.quest_number = old_quest;
-        return format(fmt, quest.name.data(), quest.level);
+        return fmt::format(fmt, quest.name, quest.level);
     }
 
     if (ge_ptr->terrain_ptr->flags.has(TerrainCharacteristics::BLDG) && !floor.inside_arena) {
-        return buildings[ge_ptr->terrain_ptr->subtype].name;
+        return buildings[enum2i(ge_ptr->terrain_ptr->building_type)].name;
     }
 
     if (ge_ptr->terrain_ptr->flags.has(TerrainCharacteristics::ENTRANCE)) {
@@ -484,7 +484,7 @@ static std::string decide_target_floor(PlayerType *player_ptr, GridExamination *
     }
 
     if (ge_ptr->terrain_ptr->flags.has(TerrainCharacteristics::TOWN)) {
-        return towns_info[ge_ptr->g_ptr->special].name;
+        return TownList::get_instance().get_town(ge_ptr->g_ptr->special).get_name();
     }
 
     if (AngbandWorld::get_instance().is_wild_mode() && (ge_ptr->matches_terrain(TerrainTag::FLOOR))) {
@@ -498,26 +498,23 @@ static std::string describe_grid_monster_all(GridExamination *ge_ptr)
 {
     if (!AngbandWorld::get_instance().wizard) {
 #ifdef JP
-        return format("%s%s%s%s[%s]", ge_ptr->s1, ge_ptr->name.data(), ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
+        return fmt::format("{}{}{}{}[{}]", ge_ptr->s1, ge_ptr->name, ge_ptr->s2, ge_ptr->s3, ge_ptr->info);
 #else
-        return format("%s%s%s%s [%s]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, ge_ptr->name.data(), ge_ptr->info);
+        return fmt::format("{}{}{}{} [{}]", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, ge_ptr->name, ge_ptr->info);
 #endif
     }
 
     std::string f_idx_str;
     if (ge_ptr->g_ptr->mimic) {
-        f_idx_str = format("%d/%d", ge_ptr->g_ptr->feat, ge_ptr->g_ptr->mimic);
+        f_idx_str = fmt::format("{}/{}", ge_ptr->g_ptr->feat, ge_ptr->g_ptr->mimic);
     } else {
         f_idx_str = std::to_string(ge_ptr->g_ptr->feat);
     }
 
 #ifdef JP
-    return format("%s%s%s%s[%s] %x %s %d %d %d (%d,%d) %d", ge_ptr->s1, ge_ptr->name.data(), ge_ptr->s2, ge_ptr->s3, ge_ptr->info,
-        (uint)ge_ptr->g_ptr->info, f_idx_str.data(), ge_ptr->g_ptr->dists[GridFlow::NORMAL], ge_ptr->g_ptr->costs[GridFlow::NORMAL], ge_ptr->g_ptr->when,
-        ge_ptr->y, ge_ptr->x, Travel::get_instance().get_cost({ ge_ptr->y, ge_ptr->x }));
+    return fmt::format("{}{}{}{}[{}] {:x} {} {} {} {} ({},{}) {}", ge_ptr->s1, ge_ptr->name, ge_ptr->s2, ge_ptr->s3, ge_ptr->info, ge_ptr->g_ptr->info, f_idx_str, ge_ptr->g_ptr->get_distance(GridFlow::NORMAL), ge_ptr->g_ptr->get_cost(GridFlow::NORMAL), ge_ptr->g_ptr->when, ge_ptr->y, ge_ptr->x, Travel::get_instance().get_cost({ ge_ptr->y, ge_ptr->x }));
 #else
-    return format("%s%s%s%s [%s] %x %s %d %d %d (%d,%d)", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, ge_ptr->name.data(), ge_ptr->info, ge_ptr->g_ptr->info,
-        f_idx_str.data(), ge_ptr->g_ptr->dists[GridFlow::NORMAL], ge_ptr->g_ptr->costs[GridFlow::NORMAL], ge_ptr->g_ptr->when, ge_ptr->y, ge_ptr->x);
+    return fmt::format("{}{}{}{} [{}] {:x} {} {} {} {} ({},{})", ge_ptr->s1, ge_ptr->s2, ge_ptr->s3, ge_ptr->name, ge_ptr->info, ge_ptr->g_ptr->info, f_idx_str, ge_ptr->g_ptr->get_distance(GridFlow::NORMAL), ge_ptr->g_ptr->get_cost(GridFlow::NORMAL), ge_ptr->g_ptr->when, ge_ptr->y, ge_ptr->x);
 #endif
 }
 

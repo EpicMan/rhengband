@@ -103,8 +103,8 @@ void build_stores(PlayerType *player_ptr, const Pos2D &pos_ug, const std::vector
         const auto &terrains = TerrainList::get_instance();
         const auto end = terrains.end();
         const auto it = std::find_if(terrains.begin(), end,
-            [subtype = stores[i]](const TerrainType &terrain) {
-                return terrain.flags.has(TerrainCharacteristics::STORE) && (i2enum<StoreSaleType>(static_cast<int>(terrain.subtype)) == subtype);
+            [store_sale_type = stores[i]](const TerrainType &terrain) {
+                return terrain.flags.has(TerrainCharacteristics::STORE) && (terrain.store_sale_type == store_sale_type);
             });
         if (it == end) {
             continue;
@@ -139,7 +139,7 @@ Pos2DVec UndergroundBuilding::pick_door_direction() const
 
 void UndergroundBuilding::set_area(int height, int width, int max_height, int max_width)
 {
-    const Pos2D center(rand_range(2, height - 3), rand_range(2, width - 3));
+    const Pos2D center{ rand_range(2, height - 3), rand_range(2, width - 3) };
     auto top = center.y - randint1(max_height);
     top = std::max(top, 1);
     auto left = center.x - randint1(max_width);

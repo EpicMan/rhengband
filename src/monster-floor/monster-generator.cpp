@@ -28,6 +28,7 @@
 #include "target/projection-path-calculator.h"
 #include "view/display-messages.h"
 #include "wizard/wizard-messages.h"
+#include <fmt/format.h>
 
 /*!
  * @brief モンスター1体を目標地点に可能な限り近い位置に生成する
@@ -183,7 +184,7 @@ static void place_monster_group(PlayerType *player_ptr, const Pos2D &pos_center,
         for (auto i = 0; (i < 8) && (positions.size() < total_size); i++) {
             //!< @details 要素数が変わると参照がダングリング状態になるので毎回取得する必要がある.
             const auto &pos_neighbor = positions.at(n);
-            const auto pos = scatter(player_ptr, pos_neighbor, 4, PROJECT_NONE);
+            const auto pos = scatter(floor, pos_neighbor, 4, PROJECT_NONE);
             if (!floor.can_generate_monster_at(pos) || (p_pos == pos)) {
                 continue;
             }
@@ -210,6 +211,7 @@ static void place_monster_group(PlayerType *player_ptr, const Pos2D &pos_center,
 tl::optional<MONSTER_IDX> place_specific_monster(PlayerType *player_ptr, POSITION y, POSITION x, MonraceId r_idx, BIT_FLAGS mode, tl::optional<MONSTER_IDX> summoner_m_idx)
 {
     const Pos2D pos(y, x);
+    const auto &floor = *player_ptr->current_floor_ptr;
     const auto &monrace = MonraceList::get_instance().get_monrace(r_idx);
     if (!(mode & PM_NO_KAGE) && one_in_(333)) {
         mode |= PM_KAGE;
@@ -235,13 +237,13 @@ tl::optional<MONSTER_IDX> place_specific_monster(PlayerType *player_ptr, POSITIO
             constexpr auto scatter_max = 40;
             int d;
             for (d = scatter_min; d <= scatter_max; d++) {
-                const auto pos_neighbor = scatter(player_ptr, pos, d, PROJECT_NONE);
+                const auto pos_neighbor = scatter(floor, pos, d, PROJECT_NONE);
                 if (place_monster_one(player_ptr, pos_neighbor.y, pos_neighbor.x, reinforce.get_monrace_id(), mode, *m_idx)) {
                     break;
                 }
             }
             if (d > scatter_max) {
-                msg_format_wizard(player_ptr, CHEAT_MONSTER, _("護衛の指定生成に失敗しました。", "Failed fixed escorts."));
+                msg_print_wizard(player_ptr, CHEAT_MONSTER, _("護衛の指定生成に失敗しました。", "Failed fixed escorts."));
             }
         }
     }
@@ -254,11 +256,10 @@ tl::optional<MONSTER_IDX> place_specific_monster(PlayerType *player_ptr, POSITIO
         return m_idx;
     }
 
-    const auto &floor = *player_ptr->current_floor_ptr;
     const auto p_pos = player_ptr->get_position();
     for (auto i = 0; i < 32; i++) {
         constexpr auto d = 3;
-        const auto pos_neighbor = scatter(player_ptr, pos, d, PROJECT_NONE);
+        const auto pos_neighbor = scatter(floor, pos, d, PROJECT_NONE);
         if (!floor.can_generate_monster_at(pos_neighbor) || (p_pos == pos_neighbor)) {
             continue;
         }
@@ -364,7 +365,7 @@ bool alloc_horde(PlayerType *player_ptr, POSITION y, POSITION x, summon_specific
     const auto m_idx = floor.get_grid(pos).m_idx;
     const auto &monentity = floor.m_list[m_idx];
     for (auto attempts = randint1(10) + 5; attempts > 0; attempts--) {
-        const auto pos_scat = scatter(player_ptr, pos, 5, PROJECT_NONE);
+        const auto pos_scat = scatter(floor, pos, 5, PROJECT_NONE);
         (void)(*summon_specific)(player_ptr, pos_scat.y, pos_scat.x, floor.dun_level + 5, SUMMON_KIN, PM_ALLOW_GROUP, m_idx);
         pos = pos_scat;
     }
@@ -376,7 +377,7 @@ bool alloc_horde(PlayerType *player_ptr, POSITION y, POSITION x, summon_specific
     const auto &monraces = MonraceList::get_instance();
     const auto is_chameleon = monentity.mflag2.has(MonsterConstantFlagType::CHAMELEON);
     const auto &monrace = is_chameleon ? monentity.get_monrace() : monraces.get_monrace(*monrace_id);
-    msg_format(_("モンスターの大群(%c)", "Monster horde (%c)."), monrace.symbol_definition.character);
+    msg_print(_("モンスターの大群({:c})", "Monster horde ({:c})."), monrace.symbol_definition.character);
     return true;
 }
 
@@ -402,32 +403,55 @@ bool alloc_guardian(PlayerType *player_ptr, bool def_val)
     }
 
     const auto p_pos = player_ptr->get_position();
-    auto try_count = 4000;
-    while (try_count > 0) {
-        const auto pos = Pos2D(randint1(floor.height - 4), randint1(floor.width - 4)) + Pos2DVec(2, 2);
+    for (auto try_count = 4000; try_count > 0; try_count--) {
+        const auto pos = Pos2D{ randint1(floor.height - 4), randint1(floor.width - 4) } + Pos2DVec(2, 2);
         if (!floor.can_generate_monster_at(pos) || (p_pos == pos)) {
-            try_count++;
             continue;
         }
 
         if (!monster_can_cross_terrain(player_ptr, floor.get_grid(pos).feat, monrace, 0)) {
-            try_count++;
             continue;
         }
 
         if (place_specific_monster(player_ptr, pos.y, pos.x, dungeon.final_guardian, (PM_ALLOW_GROUP | PM_NO_KAGE | PM_NO_PET))) {
             return true;
         }
-
-        try_count--;
     }
 
     return false;
 }
 
 /*!
+ * @brief モンスターを配置する位置をランダムに探す
+ * @param floor フロアへの参照
+ * @param p_pos プレイヤーの位置
+ * @param min_dis プレイヤーから離れるべき最小距離
+ * @param max_dis プレイヤーから離れるべき最大距離
+ * @return 配置できる位置。規定回数の試行で見つからなければ tl::nullopt
+ */
+static tl::optional<Pos2D> decide_monster_allocation_position(const FloorType &floor, const Pos2D &p_pos, int min_dis, int max_dis)
+{
+    for (auto attempts_left = 10000; attempts_left > 0; attempts_left--) {
+        const auto y = randint0(floor.height);
+        const auto x = randint0(floor.width);
+        const Pos2D pos(y, x);
+        const auto can_place = floor.is_underground() ? floor.can_generate_monster_at(pos) : floor.is_empty_at(pos);
+        if (!can_place || (pos == p_pos)) {
+            continue;
+        }
+
+        const auto dist = Grid::calc_distance(pos, p_pos);
+        if ((min_dis < dist) && (dist <= max_dis)) {
+            return pos;
+        }
+    }
+
+    return tl::nullopt;
+}
+
+/*!
  * @brief ダンジョンの初期配置モンスターを生成1回生成する / Attempt to allocate a random monster in the dungeon.
- * @param dis プレイヤーから離れるべき最小距離
+ * @param min_dis プレイヤーから離れるべき最小距離
  * @param mode 生成オプション
  * @param summon_specific 特定モンスター種別を生成するための関数ポインタ
  * @param max_dis プレイヤーから離れるべき最大距離 (デバッグ用)
@@ -439,30 +463,9 @@ bool alloc_monster(PlayerType *player_ptr, int min_dis, BIT_FLAGS mode, summon_s
         return true;
     }
 
-    const auto p_pos = player_ptr->get_position();
-    auto &floor = *player_ptr->current_floor_ptr;
-    Pos2D pos(0, 0);
-    auto attempts_left = 10000;
-    while (attempts_left--) {
-        pos.y = randint0(floor.height);
-        pos.x = randint0(floor.width);
-        if (floor.is_underground()) {
-            if (!floor.can_generate_monster_at(pos) || (p_pos == pos)) {
-                continue;
-            }
-        } else {
-            if (!floor.is_empty_at(pos) || (pos == p_pos)) {
-                continue;
-            }
-        }
-
-        const auto dist = Grid::calc_distance(pos, p_pos);
-        if ((min_dis < dist) && (dist <= max_dis)) {
-            break;
-        }
-    }
-
-    if (!attempts_left) {
+    const auto &floor = *player_ptr->current_floor_ptr;
+    const auto pos = decide_monster_allocation_position(floor, player_ptr->get_position(), min_dis, max_dis);
+    if (!pos) {
         if (cheat_xtra || cheat_hear) {
             msg_print(_("警告！新たなモンスターを配置できません。小さい階ですか？", "Warning! Could not allocate a new monster. Small level?"));
         }
@@ -471,8 +474,8 @@ bool alloc_monster(PlayerType *player_ptr, int min_dis, BIT_FLAGS mode, summon_s
     }
 
     if (randint1(5000) <= floor.dun_level) {
-        return alloc_horde(player_ptr, pos.y, pos.x, summon_specific);
+        return alloc_horde(player_ptr, pos->y, pos->x, summon_specific);
     }
 
-    return place_random_monster(player_ptr, pos.y, pos.x, (mode | PM_ALLOW_GROUP)).has_value();
+    return place_random_monster(player_ptr, pos->y, pos->x, (mode | PM_ALLOW_GROUP)).has_value();
 }

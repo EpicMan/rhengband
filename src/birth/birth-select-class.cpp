@@ -1,15 +1,16 @@
 #include "birth/birth-select-class.h"
 #include "birth/birth-util.h"
-#include "io/input-key-acceptor.h"
+#include "core/asking-player.h"
+#include "io/input-context.h"
 #include "player-info/class-info.h"
 #include "player-info/race-info.h"
+#include "system/inner-game-data.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
-#include "term/z-form.h"
 #include "util/int-char-converter.h"
 #include "util/string-processor.h"
-#include "world/world.h"
+#include <fmt/format.h>
 #include <sstream>
 
 static std::string birth_class_label(int cs, concptr sym)
@@ -45,7 +46,7 @@ static void enumerate_class_list(char *sym)
         }
 
         auto cs = i2enum<PlayerClassType>(n);
-        c_put_str(AngbandWorld::get_instance().get_birth_class_color(cs), birth_class_label(n, sym), 13 + (n / 4), 2 + 19 * (n % 4));
+        c_put_str(InnerGameData::get_instance().get_birth_class_color(cs), birth_class_label(n, sym), 13 + (n / 4), 2 + 19 * (n % 4));
     }
 }
 
@@ -56,7 +57,7 @@ static std::string display_class_stat(int cs, int *os, const std::string &cur, c
     }
 
     auto pclass = i2enum<PlayerClassType>(*os);
-    c_put_str(AngbandWorld::get_instance().get_birth_class_color(pclass), cur, 13 + (*os / 4), 2 + 19 * (*os % 4));
+    c_put_str(InnerGameData::get_instance().get_birth_class_color(pclass), cur, 13 + (*os / 4), 2 + 19 * (*os % 4));
     put_str("                                   ", 3, 40);
     auto result = birth_class_label(cs, sym);
     if (cs == PLAYER_CLASS_TYPE_MAX) {
@@ -70,11 +71,11 @@ static std::string display_class_stat(int cs, int *os, const std::string &cur, c
         c_put_str(TERM_L_BLUE, cp_ptr->title, 3, 40);
         put_str(_("の職業修正", ": Class modification"), 3, 40 + cp_ptr->title->length());
         put_str(_("腕力 知能 賢さ 器用 耐久 魅力 経験 ", "Str  Int  Wis  Dex  Con  Chr   EXP "), 4, 40);
-        const auto stats = format("%+3d  %+3d  %+3d  %+3d  %+3d  %+3d %+4d%% ", cp_ptr->c_adj[0], cp_ptr->c_adj[1], cp_ptr->c_adj[2], cp_ptr->c_adj[3], cp_ptr->c_adj[4], cp_ptr->c_adj[5], cp_ptr->c_exp);
+        const auto stats = fmt::format("{:+3}  {:+3}  {:+3}  {:+3}  {:+3}  {:+3} {:+4}% ", cp_ptr->c_adj[0], cp_ptr->c_adj[1], cp_ptr->c_adj[2], cp_ptr->c_adj[3], cp_ptr->c_adj[4], cp_ptr->c_adj[5], cp_ptr->c_exp);
         c_put_str(TERM_L_BLUE, stats, 5, 40);
 
         put_str("HD", 6, 40);
-        const auto hd = format("%+3d", cp_ptr->c_mhp);
+        const auto hd = fmt::format("{:+3}", cp_ptr->c_mhp);
         c_put_str(TERM_L_BLUE, hd, 6, 42);
 
         put_str(_("隠密", "Stealth"), 6, 47);
@@ -82,7 +83,7 @@ static std::string display_class_stat(int cs, int *os, const std::string &cur, c
         if (i2enum<PlayerClassType>(cs) == PlayerClassType::BERSERKER) {
             stealth = " xx";
         } else {
-            stealth = format(" %+2d", cp_ptr->c_stl);
+            stealth = fmt::format(" {:+2}", cp_ptr->c_stl);
         }
         c_put_str(TERM_L_BLUE, stealth, 6, _(51, 54));
     }
@@ -138,10 +139,10 @@ static bool select_class(PlayerType *player_ptr, concptr sym, int *k)
             break;
         }
 
-        const auto buf = format(_("職業を選んで下さい (%c-%c) ('='初期オプション設定, 灰色:勝利済): ", "Choose a class (%c-%c) ('=' for options, Gray is winner): "), sym[0], sym[PLAYER_CLASS_TYPE_MAX - 1]);
+        const auto buf = fmt::format(_("職業を選んで下さい ({:c}-{:c}) ('='初期オプション設定, 灰色:勝利済): ", "Choose a class ({:c}-{:c}) ('=' for options, Gray is winner): "), sym[0], sym[PLAYER_CLASS_TYPE_MAX - 1]);
 
         put_str(buf, 10, 6);
-        char c = inkey();
+        const auto c = input_key_with_context({ InputKind::BIRTH, buf, BirthInputDetails{ BirthStep::CLASS } });
         if (c == 'Q') {
             birth_quit();
         }

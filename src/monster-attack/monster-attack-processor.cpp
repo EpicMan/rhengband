@@ -81,7 +81,7 @@ static bool exe_monster_attack_to_monster(PlayerType *player_ptr, MONSTER_IDX m_
         return false;
     }
 
-    if ((monrace.behavior_flags.has_not(MonsterBehaviorType::KILL_BODY)) && is_original_ap_and_seen(player_ptr, monster)) {
+    if (monrace.behavior_flags.has(MonsterBehaviorType::KILL_BODY) && is_original_ap_and_seen(player_ptr, monster)) {
         monrace.r_behavior_flags.set(MonsterBehaviorType::KILL_BODY);
     }
 
@@ -143,7 +143,7 @@ bool process_monster_attack_to_monster(PlayerType *player_ptr, turn_flags *turn_
     if (do_move_body) {
         turn_flags_ptr->do_move = true;
         turn_flags_ptr->did_move_body = true;
-        (void)set_monster_csleep(player_ptr, grid.m_idx, 0);
+        (void)set_monster_csleep(*player_ptr->current_floor_ptr, grid.m_idx, 0);
     }
 
     return false;

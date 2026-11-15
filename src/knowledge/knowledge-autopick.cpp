@@ -14,6 +14,7 @@
 #include "io-dump/dump-util.h"
 #include "system/player-type-definition.h"
 #include "util/angband-files.h"
+#include <fmt/format.h>
 
 /*!
  * @brief 自動拾い設定ファイルをロードするコマンドのメインルーチン /
@@ -40,30 +41,27 @@ void do_cmd_knowledge_autopick(PlayerType *player_ptr)
     }
 
     if (autopick_list.empty()) {
-        fprintf(fff, _("自動破壊/拾いには何も登録されていません。", "No preference for auto picker/destroyer."));
+        fmt::print(fff, _("自動破壊/拾いには何も登録されていません。", "No preference for auto picker/destroyer."));
     } else {
-        fprintf(fff, _("   自動拾い/破壊には現在 %d行登録されています。\n\n", "   There are %d registered lines for auto picker/destroyer.\n\n"),
-            static_cast<int>(autopick_list.size()));
+        fmt::println(fff, _("   自動拾い/破壊には現在 {}行登録されています。\n", "   There are {} registered lines for auto picker/destroyer.\n"), static_cast<int>(autopick_list.size()));
     }
 
     for (const auto &entry : autopick_list) {
         std::string command;
-        const auto act = entry.action;
-        if (any_bits(act, DONT_AUTOPICK)) {
+        if (entry.action.has(AutopickMethod::NOT_AUTOPICK)) {
             command = _("放置", "Leave");
-        } else if (act & DO_AUTODESTROY) {
+        } else if (entry.action.has(AutopickMethod::AUTODESTROY)) {
             command = _("破壊", "Destroy");
-        } else if (act & DO_AUTOPICK) {
+        } else if (entry.action.has(AutopickMethod::AUTOPICK)) {
             command = _("拾う", "Pickup");
         } else {
             command = _("確認", "Query");
         }
 
-        const auto fmt = any_bits(act, DO_DISPLAY) ? "[%s]" : "(%s)";
-        fprintf(fff, "%11s", format(fmt, command.data()).data());
+        const auto command_str = entry.action.has(AutopickMethod::DISPLAY) ? fmt::format("[{}]", command) : fmt::format("({})", command);
+        fmt::print(fff, "{:>11}", fmt::bytes(command_str));
         const auto line = autopick_line_from_entry(entry);
-        fprintf(fff, " %s", line.data());
-        fprintf(fff, "\n");
+        fmt::println(fff, " {}", line);
     }
 
     angband_fclose(fff);

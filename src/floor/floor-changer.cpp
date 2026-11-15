@@ -30,24 +30,26 @@
 #include "monster/monster-update.h"
 #include "player-base/player-class.h"
 #include "spell-kind/spells-floor.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-record.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/enums/dungeon/dungeon-id.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/player-type-definition.h"
 #include "system/terrain/terrain-definition.h"
 #include "system/terrain/terrain-list.h"
+#include "target/target.h"
 #include "timed-effect/timed-effects.h"
 #include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
 #include "window/main-window-util.h"
 #include "world/world.h"
 #include <algorithm>
+#include <fmt/format.h>
 #include <range/v3/view.hpp>
 
 /*!
@@ -97,7 +99,7 @@ static std::pair<short, Pos2D> decide_pet_index(PlayerType *player_ptr, const in
     for (d = 1; d < A_MAX; d++) {
         int j;
         for (j = 1000; j > 0; j--) {
-            pos = scatter(player_ptr, p_pos, d, PROJECT_NONE);
+            pos = scatter(floor, p_pos, d, PROJECT_NONE);
             if (monster_can_enter(player_ptr, pos.y, pos.x, party_mon[current_monster].get_monrace(), 0)) {
                 break;
             }
@@ -156,7 +158,7 @@ static void place_pet(PlayerType *player_ptr)
         } else {
             const auto &monster = party_mon[current_monster];
             auto &monrace = monster.get_real_monrace();
-            msg_format(_("%sとはぐれてしまった。", "You have lost sight of %s."), monster_desc(player_ptr, monster, 0).data());
+            msg_print(_("{}とはぐれてしまった。", "You have lost sight of {}."), monster_desc(player_ptr, monster, 0));
             if (record_named_pet && monster.is_named()) {
                 exe_write_diary(floor, DiaryKind::NAMED_PET, RECORD_NAMED_PET_LOST_SIGHT, monster_desc(player_ptr, monster, MD_INDEF_VISIBLE));
             }
@@ -201,7 +203,7 @@ static void update_unique_artifact(const FloorType &floor, int16_t cur_floor_id)
         }
 
         if (item_ptr->is_fixed_artifact()) {
-            item_ptr->get_fixed_artifact().floor_id = cur_floor_id;
+            item_ptr->set_fixed_artifact_floor_id(cur_floor_id);
         }
     }
 }
@@ -276,12 +278,12 @@ static void reset_unique_by_floor_change(PlayerType *player_ptr)
 
         if (!monster.is_pet()) {
             monster.hp = monster.maxhp = monster.max_maxhp;
-            (void)set_monster_fast(player_ptr, i, 0);
-            (void)set_monster_slow(player_ptr, i, 0);
-            (void)set_monster_stunned(player_ptr, i, 0);
-            (void)set_monster_confused(player_ptr, i, 0);
-            (void)set_monster_monfear(player_ptr, i, 0);
-            (void)set_monster_invulner(player_ptr, i, 0, false);
+            (void)set_monster_fast(floor, i, 0);
+            (void)set_monster_slow(floor, i, 0);
+            (void)set_monster_stunned(floor, i, 0);
+            (void)set_monster_confused(floor, i, 0);
+            (void)set_monster_monfear(floor, i, 0);
+            (void)set_monster_invulner(floor, i, 0, false);
         }
 
         const auto &monrace = monster.get_real_monrace();
@@ -295,11 +297,23 @@ static void reset_unique_by_floor_change(PlayerType *player_ptr)
     }
 }
 
+/*!
+ * @brief 保存フロアの復帰時に生成するモンスターの試行数を制限する。
+ * @param requested_trials 不在時間と生成頻度から算出し、端数処理を済ませた試行数
+ * @return 0以上、番号0を除くフロア登録可能数以下の試行数。
+ * @details 最大1023回に制限する。成功数ではなく試行数に上限を設け、配置できない
+ * フロアでも長期不在に比例して生成処理を繰り返さない。
+ */
+GAME_TURN limit_loaded_floor_monster_trials(GAME_TURN requested_trials)
+{
+    return std::clamp(requested_trials, GAME_TURN{ 0 }, GAME_TURN{ MAX_FLOOR_MONSTERS - 1 });
+}
+
 static void allocate_loaded_floor(PlayerType *player_ptr, saved_floor_type *sf_ptr)
 {
     GAME_TURN tmp_last_visit = sf_ptr->last_visit;
     const auto &floor = *player_ptr->current_floor_ptr;
-    auto alloc_chance = floor.get_dungeon_definition().max_m_alloc_chance;
+    auto alloc_chance = floor.get_dungeon_definition().additional_monster_spawn_chance;
     const auto &world = AngbandWorld::get_instance();
     while (tmp_last_visit > world.game_turn) {
         tmp_last_visit -= TURNS_PER_TICK * TOWN_DAWN;
@@ -313,9 +327,8 @@ static void allocate_loaded_floor(PlayerType *player_ptr, saved_floor_type *sf_p
             continue;
         }
 
-        auto &artifact = item_ptr->get_fixed_artifact();
-        if (artifact.floor_id == new_floor_id) {
-            artifact.is_generated = true;
+        if (item_ptr->get_fixed_artifact_floor_id() == new_floor_id) {
+            item_ptr->set_fixed_artifact_generated(true);
         } else {
             delete_i_idx_list.push_back(static_cast<OBJECT_IDX>(i_idx));
         }
@@ -328,9 +341,8 @@ static void allocate_loaded_floor(PlayerType *player_ptr, saved_floor_type *sf_p
         alloc_times++;
     }
 
-    for (MONSTER_IDX i = 0; i < alloc_times; i++) {
-        (void)alloc_monster(player_ptr, 0, 0, summon_specific);
-    }
+    // 長期不在でも試行を登録可能数以内に制限し、集団配置で満杯になった場合も終了する。
+    attempt_loaded_floor_monsters(alloc_times, [&floor] { return floor.m_cnt < MAX_FLOOR_MONSTERS - 1; }, [player_ptr] { return alloc_monster(player_ptr, 0, 0, summon_specific); });
 }
 
 /*!
@@ -398,7 +410,7 @@ static void cut_off_the_upstair(PlayerType *player_ptr)
         return;
     }
 
-    const auto is_blind = player_ptr->effects()->blindness().is_blind();
+    const auto is_blind = player_ptr->effects()->blindness().is_active();
     const auto mes = is_blind
                          ? _("ゴトゴトと何か音がした。", "You hear some noises.")
                          : _("突然階段が塞がれてしまった！", "Suddenly the stairs is blocked!");
@@ -452,6 +464,13 @@ void change_floor(PlayerType *player_ptr)
     panel_col_min = 0;
     panel_col_max = 0;
     player_ptr->ambush_flag = false;
+
+    // ターゲットとペット・乗馬の攻撃対象は前の階のマスやモンスターの番号を指すので、階を替えるときに消す。
+    // 経路によっては先に消えていることもあるが、どの経路で階を替えても残らないよう、ここでまとめて消す。
+    // 読み込んで再開したときは、階を作り直さない限りここを通らず、セーブした値を使う
+    Target::clear_last_target();
+    player_ptr->pet_t_m_idx = 0;
+    player_ptr->riding_t_m_idx = 0;
     update_floor(player_ptr);
     place_pet(player_ptr);
     Travel::get_instance().reset_goal();

@@ -24,13 +24,13 @@
 #include "player/player-move.h"
 #include "player/player-status.h"
 #include "spell-kind/spells-launcher.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/grid-selector.h"
 #include "target/target-checker.h"
 #include "util/bit-flags-calculator.h"
@@ -58,7 +58,7 @@ bool teleport_swap(PlayerType *player_ptr, const Direction &dir)
         return false;
     }
 
-    if ((grid.is_icky()) || (Grid::calc_distance(pos, player_ptr->get_position()) > player_ptr->lev * 3 / 2 + 10)) {
+    if ((grid.is_no_teleport_dest()) || (Grid::calc_distance(pos, player_ptr->get_position()) > player_ptr->lev * 3 / 2 + 10)) {
         msg_print(_("失敗した。", "Failed to swap."));
         return false;
     }
@@ -66,7 +66,7 @@ bool teleport_swap(PlayerType *player_ptr, const Direction &dir)
     const auto &monster = player_ptr->current_floor_ptr->m_list[grid.m_idx];
     auto &monrace = monster.get_monrace();
 
-    (void)set_monster_csleep(player_ptr, grid.m_idx, 0);
+    (void)set_monster_csleep(*player_ptr->current_floor_ptr, grid.m_idx, 0);
 
     if (monrace.resistance_flags.has(MonsterResistanceType::RESIST_TELEPORT)) {
         msg_print(_("テレポートを邪魔された！", "Your teleportation is blocked!"));
@@ -146,7 +146,7 @@ bool teleport_away(PlayerType *player_ptr, MONSTER_IDX m_idx, POSITION dis, tele
                 continue;
             }
             if (!floor.is_in_quest() && !floor.inside_arena) {
-                if (floor.get_grid(m_pos).is_icky()) {
+                if (floor.get_grid(m_pos).is_no_teleport_dest()) {
                     continue;
                 }
             }
@@ -173,7 +173,7 @@ bool teleport_away(PlayerType *player_ptr, MONSTER_IDX m_idx, POSITION dis, tele
     lite_spot(player_ptr, m_pos);
 
     if (monster.get_monrace().brightness_flags.has_any_of(ld_mask)) {
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_LITE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_LITE);
     }
 
     return true;
@@ -249,7 +249,7 @@ void teleport_monster_to(PlayerType *player_ptr, MONSTER_IDX m_idx, POSITION ty,
     lite_spot(player_ptr, m_pos);
 
     if (monster.get_monrace().brightness_flags.has_any_of(ld_mask)) {
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_LITE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_LITE);
     }
 }
 
@@ -367,7 +367,7 @@ bool teleport_player_aux(PlayerType *player_ptr, POSITION dis, bool is_quantum_e
     sound(SoundKind::TELEPORT);
 #ifdef JP
     if (is_echizen(player_ptr)) {
-        msg_format("『こっちだぁ、%s』", player_ptr->name);
+        msg_print("『こっちだぁ、{}』", player_ptr->name);
     }
 #endif
     (void)move_player_effect(player_ptr, pos.y, pos.x, MPE_FORGET_FLOW | MPE_HANDLE_STUFF | MPE_DONT_PICKUP);
@@ -533,11 +533,8 @@ void teleport_away_followable(PlayerType *player_ptr, MONSTER_IDX m_idx)
     if (player_ptr->muta.has(PlayerMutationType::VTELEPORT) || PlayerClass(player_ptr).equals(PlayerClassType::IMITATOR)) {
         follow = true;
     } else {
-        ItemEntity *o_ptr;
-        INVENTORY_IDX i;
-
-        for (i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-            o_ptr = player_ptr->inventory[i].get();
+        for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+            const auto *o_ptr = player_ptr->inventory[i_idx].get();
             if (o_ptr->is_valid() && !o_ptr->is_cursed() && o_ptr->get_flags().has(TR_TELEPORT)) {
                 follow = true;
                 break;

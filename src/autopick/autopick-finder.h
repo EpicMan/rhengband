@@ -1,14 +1,15 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 
 class ItemEntity;
 class PlayerType;
-struct text_body_type;
+class AutopickTextBody;
 int find_autopick_list(PlayerType *player_ptr, const ItemEntity *o_ptr);
-void search_for_object(PlayerType *player_ptr, text_body_type *tb, const ItemEntity *o_ptr, bool forward);
-void search_for_string(text_body_type *tb, std::string_view search_str, bool forward);
+void search_for_object(PlayerType *player_ptr, AutopickTextBody *tb, const ItemEntity *o_ptr, bool forward);
+void search_for_string(AutopickTextBody *tb, std::string_view search_str, bool forward);
 
 enum class AutopickSearchResult {
     BACK = -1,
@@ -18,13 +19,13 @@ enum class AutopickSearchResult {
 
 class AutopickSearch {
 public:
-    AutopickSearch(ItemEntity *item_ptr, std::string_view search_str)
-        : item_ptr(item_ptr)
+    AutopickSearch(std::shared_ptr<ItemEntity> item, std::string_view search_str)
+        : item(item)
         , search_str(search_str)
     {
     }
 
-    ItemEntity *item_ptr;
+    std::shared_ptr<ItemEntity> item;
     std::string search_str;
     AutopickSearchResult result = AutopickSearchResult::CANCEL;
 };

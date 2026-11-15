@@ -8,7 +8,20 @@
 #include "util/flag-group.h"
 #include "util/point-2d.h"
 #include <map>
+#include <memory>
 #include <string>
+
+constexpr int MONSTER_MAXHP = 30000; //!< モンスターの最大HP
+
+/* Sub-alignment flags for neutral monsters */
+constexpr auto SUB_ALIGN_NEUTRAL = 0x0000; /*!< モンスターのサブアライメント:中立 */
+constexpr auto SUB_ALIGN_EVIL = 0x0001; /*!< モンスターのサブアライメント:悪 */
+constexpr auto SUB_ALIGN_GOOD = 0x0002; /*!< モンスターのサブアライメント:善 */
+
+enum class MonraceId : short;
+class FloorType;
+class MonraceDefinition;
+class MonsterEntityWriter;
 
 /*!
  * @brief Monster information, for a specific monster.
@@ -17,12 +30,6 @@
  * The "hold_o_idx" field points to the first object of a stack
  * of objects (if any) being carried by the monster (see above).
  */
-constexpr int MONSTER_MAXHP = 30000; //!< モンスターの最大HP
-
-enum class MonraceId : short;
-class FloorType;
-class MonraceDefinition;
-class MonsterEntityWriter;
 class MonsterEntity {
 public:
     friend class MonsterEntityWriter;
@@ -34,10 +41,6 @@ public:
     MonraceId ap_r_idx{}; /*!< モンスターの外見種族ID（あやしい影、たぬき、ジュラル星人誤認などにより変化する）Monster race appearance index */
     FloorType *current_floor_ptr{}; /*!< 所在フロアID（現状はFloorType構造体によるオブジェクトは1つしかないためソースコード設計上の意義以外はない）*/
 
-/* Sub-alignment flags for neutral monsters */
-#define SUB_ALIGN_NEUTRAL 0x0000 /*!< モンスターのサブアライメント:中立 */
-#define SUB_ALIGN_EVIL 0x0001 /*!< モンスターのサブアライメント:善 */
-#define SUB_ALIGN_GOOD 0x0002 /*!< モンスターのサブアライメント:悪 */
     BIT_FLAGS8 sub_align{}; /*!< 中立属性のモンスターが召喚主のアライメントに従い一時的に立っている善悪陣営 / Sub-alignment for a neutral monster */
 
     POSITION fy{}; /*!< 所在グリッドY座標 / Y location on map */
@@ -50,9 +53,9 @@ public:
     byte mspeed{}; /*!< モンスターの個体加速値 / Monster "speed" */
     ACTION_ENERGY energy_need{}; /*!< モンスター次ターンまでに必要な行動エネルギー / Monster "energy" */
     POSITION cdis{}; /*!< 現在のプレイヤーから距離(逐一計算を避けるためのテンポラリ変数) Current dis from player */
-    EnumClassFlagGroup<MonsterTemporaryFlagType> mflag{}; /*!< モンスター個体に与えられた特殊フラグ1 (セーブ不要) / Extra monster flags */
+    EnumClassFlagGroup<MonsterTemporaryFlagType> mflag{}; /*!< モンスター個体に与えられた一時的な特殊フラグ / Extra monster flags */
     EnumClassFlagGroup<MonsterConstantFlagType> mflag2{}; /*!< モンスター個体に与えられた特殊フラグ2 (セーブ必要) / Extra monster flags */
-    bool ml{}; /*!< モンスターがプレイヤーにとって視認できるか(処理のためのテンポラリ変数) Monster is "visible" */
+    bool ml{}; /*!< モンスターがプレイヤーにとって視認できるか Monster is "visible" */
     ObjectIndexList hold_o_idx_list{}; /*!< モンスターが所持しているアイテムのリスト / Object list being held (if any) */
     POSITION target_y{}; /*!< モンスターの攻撃目標対象Y座標 / Can attack !los player */
     POSITION target_x{}; /*!< モンスターの攻撃目標対象X座標 /  Can attack !los player */
@@ -77,10 +80,15 @@ public:
     bool is_original_ap() const;
     bool is_mimicry() const;
     bool is_valid() const;
+    MonraceId get_monrace_id() const;
     MonraceId get_real_monrace_id() const;
     MonraceDefinition &get_real_monrace() const;
-    MonraceDefinition &get_appearance_monrace() const;
+    MonraceDefinition &get_apparent_monrace() const;
+    std::shared_ptr<MonraceDefinition> get_apparent_monrace_shared();
+    std::shared_ptr<const MonraceDefinition> get_apparent_monrace_shared() const;
     MonraceDefinition &get_monrace() const;
+    std::shared_ptr<MonraceDefinition> get_monrace_shared();
+    std::shared_ptr<const MonraceDefinition> get_monrace_shared() const;
     short get_remaining_sleep() const;
     short get_remaining_acceleration() const;
     short get_remaining_deceleration() const;
@@ -122,6 +130,7 @@ public:
     void set_target(const Pos2D &pos);
     void reset_target();
     void set_friendly();
+    void increment_seen_count() const;
 
 private:
     MonsterEntity(const MonsterEntity &) = default;

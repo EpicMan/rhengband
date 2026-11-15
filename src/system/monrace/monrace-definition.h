@@ -1,7 +1,6 @@
 #pragma once
 
 #include "locale/localized-string.h"
-#include "monrace-message.h"
 #include "monster-race/monster-aura-types.h"
 #include "monster-race/race-ability-flags.h"
 #include "monster-race/race-behavior-flags.h"
@@ -17,6 +16,7 @@
 #include "monster-race/race-visual-flags.h"
 #include "monster-race/race-wilderness-flags.h"
 #include "system/angband.h"
+#include "system/monrace/monrace-message.h"
 #include "util/dice.h"
 #include "util/flag-group.h"
 #include "view/display-symbol.h"
@@ -86,10 +86,8 @@ enum class GridFlow : int;
 class MonraceDefinition {
 public:
     MonraceDefinition();
-    MonraceDefinition(const MonraceDefinition &) = delete;
     MonraceDefinition &operator=(const MonraceDefinition &) = delete;
     MonraceDefinition(MonraceDefinition &&) = default;
-    MonraceDefinition &operator=(MonraceDefinition &&) = delete;
 
     MonraceId idx{};
     LocalizedString name{}; //!< モンスターの名称
@@ -128,7 +126,6 @@ public:
     MONSTER_NUMBER max_num{}; //!< 階に最大存在できる数 / Maximum population allowed per level
     MONSTER_NUMBER cur_num{}; //!< 階に現在いる数 / Monster population on current level
     FLOOR_IDX floor_id{}; //!< 存在している保存階ID /  Location of unique monster
-    MONSTER_NUMBER r_sights{}; //!< 見えている数 / Count sightings of this monster
     MONSTER_NUMBER r_deaths{}; //!< このモンスターに殺された人数 / Count deaths from this monster
     MONSTER_NUMBER r_pkills{}; //!< このゲームで倒すのを見た数 / Count visible monsters killed in this life
     MONSTER_NUMBER r_akills{}; //!< このゲームで倒した数 / Count all monsters killed in this life
@@ -156,6 +153,7 @@ public:
     bool is_valid() const;
     bool is_male() const;
     bool is_female() const;
+    MonsterSex get_sex() const;
     bool has_living_flag() const;
     bool has_demon_flag() const;
     bool has_undead_flag() const;
@@ -168,8 +166,9 @@ public:
     tl::optional<bool> order_pet(const MonraceDefinition &other) const;
     std::string get_pronoun_of_summoned_kin() const;
     const MonraceDefinition &get_next() const;
+    std::shared_ptr<const MonraceDefinition> get_next_shared() const;
     bool is_bounty(bool unachieved_only) const;
-    int calc_power() const;
+    int64_t calc_power() const;
     int calc_figurine_value() const;
     int calc_capture_value() const;
     std::string build_eldritch_horror_message(std::string_view description) const;
@@ -245,6 +244,11 @@ public:
     const std::vector<MonsterSummon> &get_final_summons() const;
 
 private:
+    // Only the reader may stage and publish a value while retaining the shared object's identity.
+    friend class RaceReader;
+    MonraceDefinition(const MonraceDefinition &) = default;
+    MonraceDefinition &operator=(MonraceDefinition &&) = default;
+
     std::vector<DropArtifact> drop_artifacts; //!< 特定アーティファクトドロップリスト
     std::vector<Reinforce> reinforces; //!< 指定護衛リスト
     std::vector<MonsterSummon> final_summons; //!< 死亡召喚リスト

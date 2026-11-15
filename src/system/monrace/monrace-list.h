@@ -7,17 +7,23 @@
 #pragma once
 
 #include "util/abstract-map-wrapper.h"
-#include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <tl/optional.hpp>
+#include <utility>
 #include <vector>
+#include <xoshiro.h>
 
 enum class MonraceId : short;
-
+class LocalizedString;
 class MonraceDefinition;
-class MonraceList : public util::AbstractMapWrapper<MonraceId, MonraceDefinition> {
+namespace test {
+class MonraceListTestAccess;
+class FixedMapMonraceTestAccess;
+}
+class MonraceList : public util::AbstractMapWrapper<MonraceId, std::shared_ptr<MonraceDefinition>> {
 public:
     MonraceList(MonraceList &&) = delete;
     MonraceList(const MonraceList &) = delete;
@@ -34,10 +40,9 @@ public:
     MonraceDefinition &emplace(MonraceId monrace_id);
     MonraceDefinition &get_monrace(MonraceId monrace_id);
     const MonraceDefinition &get_monrace(MonraceId monrace_id) const;
+    std::shared_ptr<MonraceDefinition> get_monrace_shared(MonraceId monrace_id);
+    std::shared_ptr<const MonraceDefinition> get_monrace_shared(MonraceId monrace_id) const;
     const std::vector<MonraceId> &get_valid_monrace_ids() const;
-    std::vector<MonraceId> search(std::function<bool(const MonraceDefinition &)> filter, bool is_known_only = false) const;
-    std::vector<MonraceId> search_by_name(std::string_view name, bool is_known_only = false) const;
-    std::vector<MonraceId> search_by_symbol(char symbol, bool is_known_only) const;
     bool is_angel(MonraceId monrace_id) const;
     bool can_unify_separate(MonraceId monrace_id) const;
     void kill_unified_unique(MonraceId monrace_id);
@@ -51,24 +56,35 @@ public:
     bool order_level(MonraceId id1, MonraceId id2) const;
     bool order_level_unique(MonraceId id1, MonraceId id2) const;
     MonraceId pick_id_at_random() const;
+    MonraceId pick_id_at_random(xso::rng32 &rng) const;
     const MonraceDefinition &pick_monrace_at_random() const;
+    const MonraceDefinition &pick_monrace_at_random(xso::rng32 &rng) const;
     int calc_defeat_count() const;
     MonraceId select_figurine(int max_level) const;
+    const LocalizedString &get_name(MonraceId monrace_id) const;
+    const std::vector<std::pair<MonraceId, LocalizedString>> &get_normal_monster_names() const;
+    const std::vector<std::pair<MonraceId, LocalizedString>> &get_unique_monster_names() const;
 
     void reset_current_numbers();
     void reset_all_visuals();
-    tl::optional<std::string> probe_lore(MonraceId monrace_id);
     void kill_unique_monster(MonraceId monrace_id);
 
 private:
+    friend class test::MonraceListTestAccess;
+    friend class test::FixedMapMonraceTestAccess;
+
     MonraceList() = default;
 
     static MonraceList instance;
-    std::map<MonraceId, MonraceDefinition> monraces;
+    std::map<MonraceId, std::shared_ptr<MonraceDefinition>> monraces;
+    std::vector<std::shared_ptr<MonraceDefinition>> monraces_by_id; //!< 種族IDを添字にした monraces の索引 (無い種族は空). monraces を変えるときは必ず更新する
 
     const static std::map<MonraceId, std::set<MonraceId>> unified_uniques;
 
-    std::map<MonraceId, MonraceDefinition> &get_inner_container() override
+    const std::shared_ptr<MonraceDefinition> &find(MonraceId monrace_id) const;
+    void add_to_index(MonraceId monrace_id, const std::shared_ptr<MonraceDefinition> &monrace);
+
+    std::map<MonraceId, std::shared_ptr<MonraceDefinition>> &get_inner_container() override
     {
         return this->monraces;
     }

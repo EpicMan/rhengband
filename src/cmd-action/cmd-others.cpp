@@ -18,7 +18,7 @@
 #include "floor/geometry.h"
 #include "game-option/game-play-options.h"
 #include "grid/grid.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "io/input-key-requester.h"
 #include "io/write-diary.h"
 #include "main/music-definitions-table.h"
@@ -30,10 +30,11 @@
 #include "player/player-move.h"
 #include "player/special-defense-types.h"
 #include "status/action-setter.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
+#include "system/inner-game-data.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/target-getter.h"
 #include "term/screen-processor.h"
@@ -48,7 +49,7 @@ void do_cmd_search(PlayerType *player_ptr)
 {
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -89,7 +90,7 @@ static bool exe_alter(PlayerType *player_ptr)
     }
 
     if (terrain.flags.has(TerrainCharacteristics::CLOSE)) {
-        return exe_close(player_ptr, pos.y, pos.x);
+        return exe_close(player_ptr, pos);
     }
 
     if (terrain.flags.has(TerrainCharacteristics::DISARM)) {
@@ -110,7 +111,7 @@ void do_cmd_alter(PlayerType *player_ptr)
 
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -126,13 +127,14 @@ void do_cmd_alter(PlayerType *player_ptr)
  */
 static bool decide_suicide()
 {
-    if (AngbandWorld::get_instance().noscore) {
+    if (InnerGameData::get_instance().is_no_score()) {
         return true;
     }
 
-    prt(_("確認のため '@' を押して下さい。", "Please verify SUICIDE by typing the '@' sign: "), 0, 0);
+    constexpr auto prompt = _("確認のため '@' を押して下さい。", "Please verify SUICIDE by typing the '@' sign: ");
+    prt(prompt, 0, 0);
     flush();
-    int i = inkey();
+    const auto i = input_key_with_context(InputKind::CONFIRM, prompt);
     prt("", 0, 0);
     return i == '@';
 }
@@ -191,7 +193,7 @@ void do_cmd_suicide(PlayerType *player_ptr)
     player_ptr->leaving = true;
     if (world.total_winner) {
         accept_winner_message(player_ptr);
-        world.add_retired_class(player_ptr->pclass);
+        InnerGameData::get_instance().add_retired_class(player_ptr->pclass);
     } else {
         play_music(TERM_XTRA_MUSIC_BASIC, MUSIC_BASIC_GAMEOVER);
         const auto &floor = *player_ptr->current_floor_ptr;

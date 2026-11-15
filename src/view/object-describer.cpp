@@ -2,13 +2,14 @@
 #include "cmd-action/cmd-spell.h"
 #include "flavor/flavor-describer.h"
 #include "flavor/object-flavor-types.h"
-#include "object-enchant/special-object-flags.h"
+#include "floor/floor-object.h"
+#include "object/object-info.h"
 #include "object/tval-types.h"
 #include "perception/object-perception.h"
 #include "player-base/player-class.h"
 #include "player/player-realm.h"
 #include "spell/spell-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/term-color-types.h"
 #include "tracking/baseitem-tracker.h"
@@ -28,15 +29,36 @@ void inven_item_charges(const ItemEntity &item)
     if (item.pval <= 0) {
         msg_print("もう魔力が残っていない。");
     } else {
-        msg_format("あと %d 回分の魔力が残っている。", item.pval);
+        msg_print("あと {} 回分の魔力が残っている。", item.pval);
     }
 #else
     if (item.pval != 1) {
-        msg_format("You have %d charges remaining.", item.pval);
+        msg_print("You have {} charges remaining.", item.pval);
     } else {
-        msg_format("You have %d charge remaining.", item.pval);
+        msg_print("You have {} charge remaining.", item.pval);
     }
 #endif
+}
+
+/*!
+ * @brief 所持品または床上の魔道具の使用回数の残量を示すメッセージを表示する
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param is_inventory 所持品のアイテムならtrue、床上のアイテムならfalse
+ * @param item 残量を表示したいアイテム
+ * @details 効果でアイテムが削除されていることがあるため、まだ存在するときだけ表示する。
+ */
+void describe_item_charges(PlayerType *player_ptr, bool is_inventory, const std::shared_ptr<ItemEntity> &item)
+{
+    if (!find_current_i_idx(player_ptr, is_inventory, item)) {
+        return;
+    }
+
+    if (is_inventory) {
+        inven_item_charges(*item);
+        return;
+    }
+
+    floor_item_charges(*item);
 }
 
 /*!
@@ -51,12 +73,12 @@ void inven_item_describe(PlayerType *player_ptr, short i_idx)
     const auto item_name = describe_flavor(player_ptr, item, 0);
 #ifdef JP
     if (item.number <= 0) {
-        msg_format("もう%sを持っていない。", item_name.data());
+        msg_print("もう{}を持っていない。", item_name);
     } else {
-        msg_format("まだ %sを持っている。", item_name.data());
+        msg_print("まだ {}を持っている。", item_name);
     }
 #else
-    msg_format("You have %s.", item_name.data());
+    msg_print("You have {}.", item_name);
 #endif
 }
 

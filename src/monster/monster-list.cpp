@@ -14,6 +14,7 @@
 #include "game-option/cheat-options.h"
 #include "monster-floor/place-monster-types.h"
 #include "monster/monster-util.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
@@ -24,8 +25,8 @@
 #include "system/monrace/monrace-list.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/system-variables.h"
+#include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 #include <cmath>

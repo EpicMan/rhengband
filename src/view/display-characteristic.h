@@ -3,11 +3,13 @@
 #include "system/angband.h"
 
 /* Mode flags for displaying player flags */
-#define DP_WP 1 << 0L
-#define DP_CURSE 1 << 1L
-#define DP_LITE 1 << 2L
+constexpr auto DP_WP = 1 << 0;
+constexpr auto DP_CURSE = 1 << 1;
+constexpr auto DP_LITE = 1 << 2;
 
+class ItemEntity;
 class PlayerType;
+char get_equipment_curse_mark(const ItemEntity &item);
 void display_player_flag_info_1(PlayerType *player_ptr, void (*display_player_equippy)(PlayerType *, TERM_LEN, TERM_LEN, BIT_FLAGS16));
 void display_player_flag_info_2(PlayerType *player_ptr, void (*display_player_equippy)(PlayerType *, TERM_LEN, TERM_LEN, BIT_FLAGS16));
 void display_player_flag_info_3(PlayerType *player_ptr, void (*display_player_equippy)(PlayerType *, TERM_LEN, TERM_LEN, BIT_FLAGS16));

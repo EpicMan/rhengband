@@ -2,7 +2,6 @@
 #include "artifact/fixed-art-types.h"
 #include "core/window-redrawer.h"
 #include "object-enchant/item-feeling.h"
-#include "object-enchant/special-object-flags.h"
 #include "object/tval-types.h"
 #include "perception/object-perception.h"
 #include "player-base/player-race.h"
@@ -10,10 +9,10 @@
 #include "sv-definition/sv-lite-types.h"
 #include "sv-definition/sv-other-types.h"
 #include "system/baseitem/baseitem-key.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/string-processor.h"
 
 /*!
@@ -72,20 +71,17 @@ bool can_player_destroy_object(ItemEntity *o_ptr)
     }
 
     if (!o_ptr->is_known()) {
-        byte feel = FEEL_SPECIAL;
+        auto feel = FEEL_SPECIAL;
         if (o_ptr->is_cursed() || o_ptr->is_broken()) {
             feel = FEEL_TERRIBLE;
         }
 
-        o_ptr->feeling = feel;
-        o_ptr->ident |= IDENT_SENSE;
-        auto &rfu = RedrawingFlagsUpdater::get_instance();
-        rfu.set_flag(StatusRecalculatingFlag::COMBINATION);
-        static constexpr auto flags = {
-            SubWindowRedrawingFlag::INVENTORY,
-            SubWindowRedrawingFlag::EQUIPMENT,
-        };
-        rfu.set_flags(flags);
+        o_ptr->sense(feel);
+
+        // 感触を付ける処理 (apply_item_feeling()) と同じく、束の整理と一覧の描き直しを要求する。床の品のこともある
+        auto &dur = DeferredUpdateRequests::get_instance();
+        dur.request_inventory_arrangement();
+        dur.request_item_lists_redrawing();
         return false;
     }
 

@@ -5,25 +5,78 @@
  */
 
 #include "system/baseitem/baseitem-definition.h"
+#include "locale/language-switcher.h"
 #include "util/string-processor.h"
+#include <numeric>
+#include <string>
+#include <string_view>
 
 BaseitemDefinition::BaseitemDefinition()
     : bi_key(ItemKindType::NONE)
     , symbol_definition(DisplaySymbol(0, '\0'))
-    , symbol_config(DisplaySymbol(0, '\0'))
 {
+}
+
+/*!
+ * @brief 再読込時に省略可能な項目を保持したベースアイテム定義を複製する
+ * @details 必須項目のname・symbol・bi_key・level・weight・costは初期値のままにする。
+ * @return 必須項目を除いて複製した定義
+ */
+BaseitemDefinition BaseitemDefinition::clone_without_required_fields() const
+{
+    BaseitemDefinition cloned;
+    cloned.flavor_name = this->flavor_name;
+    cloned.text = this->text;
+    cloned.pval = this->pval;
+    cloned.ac = this->ac;
+    cloned.damage_dice = this->damage_dice;
+    cloned.to_h = this->to_h;
+    cloned.to_d = this->to_d;
+    cloned.to_a = this->to_a;
+    cloned.alloc_tables = this->alloc_tables;
+    cloned.natural_generation = this->natural_generation;
+    cloned.act_idx = this->act_idx;
+    cloned.flags = this->flags;
+    cloned.gen_flags = this->gen_flags;
+    cloned.easy_know = this->easy_know;
+    return cloned;
 }
 
 /*!
  * @brief 正常なベースアイテムかを判定する
  * @return 正常なベースアイテムか否か
- * @details ID 0は「何か」という異常アイテム
+ * @details ID 0は「異常アイテム」という名前の文字通り異常アイテムであり、個別に弾く
  * その他、ベースアイテムIDは歴史的事情により歯抜けが多数あり、それらは名前が空欄になるようにオブジェクトを生成している
  * @todo v3.1以降で歯抜けを埋めるようにベースアイテムを追加していきたい (詳細未定)
  */
 bool BaseitemDefinition::is_valid() const
 {
-    return (this->idx > 0) && !this->name.empty();
+    return !this->name.empty() && (this->name != _("異常アイテム", "Invalid item"));
+}
+
+/*!
+ * @brief 生成テーブルに出現率のある項目を持つかを判定する
+ * @details 希少度 (chance) が 0 の欄は使われていない欄と同じに扱う。
+ * @return 希少度の合計が正ならtrue
+ */
+bool BaseitemDefinition::has_allocation() const
+{
+    const auto sum_chances = std::accumulate(this->alloc_tables.begin(), this->alloc_tables.end(), 0, [](int sum, const auto &table) {
+        return sum + table.chance;
+    });
+    return sum_chances > 0;
+}
+
+/*!
+ * @brief 知識の一覧 (と bot の同じ一覧) に載せる候補かを判定する
+ * @details 生成テーブルを持つもの、または自然生成しないことが定義で明示されているものを候補とする。
+ * 生成テーブルも natural_generation: false も持たないもの (INSTA_ART の本体など) は候補にしない。
+ * 鑑定済みかどうかなど、ほかの表示の条件は呼び出し側で判定する。
+ * @return 候補ならtrue
+ */
+bool BaseitemDefinition::is_knowledge_candidate() const
+{
+    return this->has_allocation() || !this->natural_generation;
 }
 
 /*!
@@ -32,34 +85,40 @@ bool BaseitemDefinition::is_valid() const
  */
 std::string BaseitemDefinition::stripped_name() const
 {
-    const auto tokens = str_split(this->name, ' ');
-    std::stringstream ss;
-    for (const auto &token : tokens) {
-        if (token == "" || token == "~" || token == "&" || token == "#") {
+    // 名前の先頭の "& " は冠詞を付ける位置の印なので取り除く (describe_named_item() と同じ規則)。途中の "&" は名前の一部なので残す
+    std::string_view name_without_article = this->name;
+    if (name_without_article.starts_with("& ")) {
+        name_without_article.remove_prefix(2);
+    }
+
+    std::string stripped;
+    for (const auto &token : str_split(name_without_article, ' ')) {
+        if (token == "" || token == "~" || token == "#") {
             continue;
         }
 
         auto offset = 0;
         auto endpos = token.size();
-        auto is_kanji = false;
         if (token[0] == '~' || token[0] == '#') {
             offset++;
         }
-#ifdef JP
-        if (token.size() > 2) {
-            is_kanji = iskanji(token[endpos - 2]);
-        }
 
-#endif
-        if (!is_kanji && (token[endpos - 1] == '~' || token[endpos - 1] == '#')) {
+        // 末尾のバイトが2バイト文字の後半なら、'~' や '#' と同じ値でも取り除かない。
+        // 後半バイトは先頭バイトと同じ範囲の値もとるため、2バイト文字の位置は先頭から数えて求める
+        const auto ends_with_trail_byte = str_find_all_multibyte_chars(token).contains(static_cast<int>(endpos) - 2);
+        if (!ends_with_trail_byte && (token[endpos - 1] == '~' || token[endpos - 1] == '#')) {
             endpos--;
         }
 
-        ss << token.substr(offset, endpos);
+        if (!stripped.empty()) {
+            stripped.push_back(' ');
+        }
+
+        stripped.append(token, offset, endpos - offset);
     }
 
-    ss << " ";
-    return ss.str();
+    stripped.push_back(' ');
+    return stripped;
 }
 
 bool BaseitemDefinition::order_cost(const BaseitemDefinition &other) const
@@ -106,25 +165,22 @@ void BaseitemDefinition::decide_easy_know()
     }
 }
 
-/*!
- * @brief 試行状態を変える
- * @param state trueなら試行済、falseなら未試行に変える
- */
-void BaseitemDefinition::mark_trial(bool state)
+const DisplaySymbol &BaseitemDefinition::get_symbol() const
 {
-    this->tried = state;
+    return this->symbol_definition;
 }
 
-/*!
- * @brief 鑑定状態を変える
- * @param state trueなら鑑定済、falseなら未鑑定に変える
- */
-void BaseitemDefinition::mark_awareness(bool state)
+void BaseitemDefinition::init_symbol(const DisplaySymbol &ds)
 {
-    this->aware = state;
+    this->symbol_definition = ds;
 }
 
-void BaseitemDefinition::reset_visual()
+void BaseitemDefinition::init_color(uint8_t color)
 {
-    this->symbol_config = this->symbol_definition;
+    this->symbol_definition.color = color;
+}
+
+void BaseitemDefinition::init_character(char character)
+{
+    this->symbol_definition.character = character;
 }

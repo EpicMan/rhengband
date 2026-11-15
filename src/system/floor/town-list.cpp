@@ -1,4 +1,145 @@
 #include "system/floor/town-list.h"
-#include "system/floor/town-info.h"
+#include "io/files-util.h"
+#include "store/articles-on-sale.h"
+#include "store/store.h"
+#include "system/angband-exceptions.h"
+#include "system/baseitem/baseitem-list.h"
+#include "system/floor/town-records.h"
+#include "util/angband-files.h"
+#include <filesystem>
+#include <fmt/format.h>
+#include <range/v3/view.hpp>
+#include <set>
+#include <string>
 
-std::vector<TownInfo> towns_info;
+namespace {
+/*!
+ * @brief ユニークな町の数を数える
+ * @return ユニークな町の数
+ * @details 町定義ファイル名の先頭2文字は番号であることを利用してカウントする.
+ * 辺境の地を表すファイルは(01_*.jsonc) は3つあるのでユニークではない. また町番号は1から始まるので最後に加算する.
+ */
+size_t count_town_numbers()
+{
+    const auto path = path_build(ANGBAND_DIR_EDIT, "towns");
+    std::set<std::string> unique_towns;
+    for (const auto &entry : std::filesystem::directory_iterator(path)) {
+        const auto &filename = entry.path().filename().string();
+        if (!filename.ends_with(".jsonc")) {
+            continue;
+        }
+
+        unique_towns.insert(filename.substr(0, 2));
+    }
+
+    return unique_towns.size() + 1;
+}
+}
+
+TownList TownList::instance{};
+
+TownList &TownList::get_instance()
+{
+    return instance;
+}
+
+const TownInfo &TownList::get_town(size_t index) const
+{
+    if (index >= this->size()) {
+        THROW_EXCEPTION(std::out_of_range, fmt::format("Invalid town index: {}", index));
+    }
+
+    return this->towns[index];
+}
+
+TownInfo &TownList::get_town(size_t index)
+{
+    if (index >= this->size()) {
+        THROW_EXCEPTION(std::out_of_range, fmt::format("Invalid town index: {}", index));
+    }
+
+    return this->towns[index];
+}
+
+const TownInfo &TownList::get_town(TownId town_id) const
+{
+    return this->get_town(to_town_index(town_id));
+}
+
+TownInfo &TownList::get_town(TownId town_id)
+{
+    return this->get_town(to_town_index(town_id));
+}
+
+/*!
+ * @brief 我が家を得る
+ * @return 我が家
+ * @details 我が家は全ての町で内容を共有するため、辺境の地の店舗を返す.
+ */
+const Store &TownList::get_home() const
+{
+    return this->get_town(TownId::OUTPOST).get_store(StoreSaleType::HOME);
+}
+
+Store &TownList::get_home()
+{
+    return this->get_town(TownId::OUTPOST).get_store(StoreSaleType::HOME);
+}
+
+/*!
+ * @brief 博物館を得る
+ * @return 博物館
+ * @details 博物館は全ての町で内容を共有するため、辺境の地の店舗を返す.
+ */
+const Store &TownList::get_museum() const
+{
+    return this->get_town(TownId::OUTPOST).get_store(StoreSaleType::MUSEUM);
+}
+
+bool TownList::is_all_initialized() const
+{
+    for (const auto &town : this->towns | ranges::views::drop(1) | ranges::views::take(VALID_TOWNS - 1)) {
+        if (town.get_name().empty()) {
+            return false;
+        }
+    }
+
+    return this->get_town(TownId::OUTPOST).is_alias_initialized();
+}
+
+/*!
+ * @brief 町情報読み込みのメインルーチン
+ * @details 「我が家を拡張する」オプションのON/OFFとは無関係に、ON時の容量を確保しておく.
+ */
+void TownList::initialize()
+{
+    const auto &baseitems = BaseitemList::get_instance();
+    const auto town_numbers = count_town_numbers();
+    this->towns = std::vector<TownInfo>(town_numbers);
+    const auto outpost_index = to_town_index(TownId::OUTPOST);
+    for (size_t i = 1; i < town_numbers; i++) {
+        auto &town = this->towns[i];
+        for (auto sst : STORE_SALE_TYPE_LIST) {
+            auto &store = town.emplace(sst);
+            if ((i != outpost_index) && (sst == StoreSaleType::MUSEUM || sst == StoreSaleType::HOME)) {
+                continue;
+            }
+
+            store.stock_size = store_get_stock_capacity(sst);
+            std::vector<std::unique_ptr<ItemEntity>> stock;
+            for (auto j = 0; j < store.stock_size; j++) {
+                stock.push_back(std::make_unique<ItemEntity>());
+            }
+
+            store.stock = std::move(stock);
+            if ((sst == StoreSaleType::BLACK) || (sst == StoreSaleType::HOME) || (sst == StoreSaleType::MUSEUM)) {
+                continue;
+            }
+
+            for (const auto &bi_key : store_regular_sale_table.at(sst)) {
+                const auto bi_id = baseitems.lookup_baseitem_id(bi_key);
+                store.regular.push_back(bi_id);
+            }
+        }
+    }
+}

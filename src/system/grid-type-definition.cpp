@@ -2,21 +2,13 @@
 #include "monster/monster-util.h"
 #include "room/door-definition.h"
 #include "system/angband-system.h"
-#include "system/enums/grid-flow.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/terrain/terrain-definition.h"
 #include "system/terrain/terrain-list.h"
 #include "util/bit-flags-calculator.h"
 #include "util/enum-converter.h"
 #include "world/world.h"
-
-Grid::Grid()
-{
-    for (const auto gf : GRID_FLOW_RANGE) {
-        this->costs[gf] = 0;
-        this->dists[gf] = 0;
-    }
-}
+#include <fmt/format.h>
 
 /*!
  * @brief 2点間の距離をニュートン・ラプソン法で算出する / Distance between two points via Newton-Raphson technique
@@ -55,7 +47,7 @@ short Grid::get_terrain_id(TerrainKind tk) const
     case TerrainKind::MIMIC_RAW:
         return this->mimic;
     default:
-        THROW_EXCEPTION(std::logic_error, format("Invalid terrain kind is specified! %d", enum2i(tk)));
+        THROW_EXCEPTION(std::logic_error, fmt::format("Invalid terrain kind is specified! {}", enum2i(tk)));
     }
 }
 
@@ -95,9 +87,9 @@ bool Grid::is_solid() const
     return any_bits(this->info, CAVE_SOLID);
 }
 
-bool Grid::is_icky() const
+bool Grid::is_no_teleport_dest() const
 {
-    return any_bits(this->info, CAVE_ICKY);
+    return any_bits(this->info, CAVE_NO_TELEPORT_DEST);
 }
 
 bool Grid::is_lite() const
@@ -174,8 +166,8 @@ bool Grid::is_hidden_door() const
 
 bool Grid::is_acceptable_target() const
 {
-    auto is_acceptable = this->has(TerrainCharacteristics::LESS);
-    is_acceptable |= this->has(TerrainCharacteristics::MORE);
+    auto is_acceptable = this->has(TerrainCharacteristics::UP_STAIRS);
+    is_acceptable |= this->has(TerrainCharacteristics::DOWN_STAIRS);
     is_acceptable |= this->has(TerrainCharacteristics::QUEST_ENTER);
     is_acceptable |= this->has(TerrainCharacteristics::QUEST_EXIT);
     is_acceptable |= this->has(TerrainCharacteristics::STORE);
@@ -186,16 +178,6 @@ bool Grid::is_acceptable_target() const
 bool Grid::has_monster() const
 {
     return is_monster(this->m_idx);
-}
-
-uint8_t Grid::get_cost(GridFlow gf) const
-{
-    return this->costs.at(gf);
-}
-
-uint8_t Grid::get_distance(GridFlow gf) const
-{
-    return this->dists.at(gf);
 }
 
 bool Grid::has(TerrainCharacteristics tc) const
@@ -247,7 +229,7 @@ bool Grid::has_special_terrain() const
 bool Grid::can_block_disintegration() const
 {
     const auto can_reach = this->has(TerrainCharacteristics::PROJECTION);
-    auto can_disintegrate = this->has(TerrainCharacteristics::HURT_DISI);
+    auto can_disintegrate = this->has(TerrainCharacteristics::CAN_DISINTEGRATE);
     can_disintegrate &= !this->has(TerrainCharacteristics::PERMANENT);
     return !can_reach && !can_disintegrate;
 }
@@ -257,20 +239,6 @@ bool Grid::can_generate_monster() const
     auto is_empty_grid = this->is_empty();
     is_empty_grid &= AngbandWorld::get_instance().character_dungeon || !this->has(TerrainCharacteristics::TREE);
     return is_empty_grid;
-}
-
-void Grid::reset_costs()
-{
-    for (const auto gf : GRID_FLOW_RANGE) {
-        this->costs[gf] = 0;
-    }
-}
-
-void Grid::reset_dists()
-{
-    for (const auto gf : GRID_FLOW_RANGE) {
-        this->dists[gf] = 0;
-    }
 }
 
 bool Grid::has_los() const
@@ -294,7 +262,7 @@ TerrainType &Grid::get_terrain(TerrainKind tk)
     case TerrainKind::MIMIC_RAW:
         return terrains.get_terrain(this->mimic);
     default:
-        THROW_EXCEPTION(std::logic_error, format("Invalid terrain kind is specified! %d", enum2i(tk)));
+        THROW_EXCEPTION(std::logic_error, fmt::format("Invalid terrain kind is specified! {}", enum2i(tk)));
     }
 }
 
@@ -309,7 +277,7 @@ const TerrainType &Grid::get_terrain(TerrainKind tk) const
     case TerrainKind::MIMIC_RAW:
         return terrains.get_terrain(this->mimic);
     default:
-        THROW_EXCEPTION(std::logic_error, format("Invalid terrain kind is specified! %d", enum2i(tk)));
+        THROW_EXCEPTION(std::logic_error, fmt::format("Invalid terrain kind is specified! {}", enum2i(tk)));
     }
 }
 
@@ -340,7 +308,7 @@ void Grid::set_terrain_id(short terrain_id, TerrainKind tk)
         this->mimic = terrain_id;
         break;
     default:
-        THROW_EXCEPTION(std::logic_error, format("Invalid terrain kind is specified! %d", enum2i(tk)));
+        THROW_EXCEPTION(std::logic_error, fmt::format("Invalid terrain kind is specified! {}", enum2i(tk)));
     }
 }
 

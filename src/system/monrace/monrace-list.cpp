@@ -7,11 +7,10 @@
 #include "system/monrace/monrace-list.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/monrace/monrace-definition.h"
-#include "system/redrawing-flags-updater.h"
-#include "tracking/lore-tracker.h"
+#include "util/enum-converter.h"
 #include "util/probability-table.h"
-#include "util/string-processor.h"
 #include <algorithm>
+#include <range/v3/view.hpp>
 
 namespace {
 const std::set<MonraceId> DARK_ELF_RACES = {
@@ -43,7 +42,7 @@ const std::set<MonraceId> CHAPEL_RACES = {
     MonraceId::TOPAZ_MONK,
 };
 
-//!< @details 「Aシンボルだが天使ではない」モンスターのリスト.
+//! 「Aシンボルだが天使ではない」モンスターのリスト.
 const std::set<MonraceId> NON_ANGEL_RACES = {
     MonraceId::A_GOLD,
     MonraceId::A_SILVER,
@@ -101,7 +100,25 @@ bool MonraceList::is_chapel(MonraceId monrace_id)
 
 MonraceDefinition &MonraceList::emplace(MonraceId monrace_id)
 {
-    return this->monraces.emplace_hint(this->monraces.end(), monrace_id, MonraceDefinition{})->second;
+    auto &monrace = this->monraces.emplace_hint(this->monraces.end(), monrace_id, std::make_shared<MonraceDefinition>())->second;
+    this->add_to_index(monrace_id, monrace);
+    return *monrace;
+}
+
+/*!
+ * @brief 種族IDから種族定義を索引で引く
+ * @param monrace_id モンスター種族ID
+ * @return 種族定義
+ * @details 索引に無い種族IDは、従来どおり std::map::at() で std::out_of_range を投げる
+ */
+const std::shared_ptr<MonraceDefinition> &MonraceList::find(MonraceId monrace_id) const
+{
+    const auto index = static_cast<size_t>(enum2i(monrace_id));
+    if ((index < this->monraces_by_id.size()) && this->monraces_by_id[index]) {
+        return this->monraces_by_id[index];
+    }
+
+    return this->monraces.at(monrace_id);
 }
 
 /*!
@@ -112,7 +129,7 @@ MonraceDefinition &MonraceList::emplace(MonraceId monrace_id)
  */
 MonraceDefinition &MonraceList::get_monrace(MonraceId monrace_id)
 {
-    return this->monraces.at(monrace_id);
+    return *this->find(monrace_id);
 }
 
 /*!
@@ -123,7 +140,17 @@ MonraceDefinition &MonraceList::get_monrace(MonraceId monrace_id)
  */
 const MonraceDefinition &MonraceList::get_monrace(MonraceId monrace_id) const
 {
-    return this->monraces.at(monrace_id);
+    return *this->find(monrace_id);
+}
+
+std::shared_ptr<MonraceDefinition> MonraceList::get_monrace_shared(MonraceId monrace_id)
+{
+    return this->find(monrace_id);
+}
+
+std::shared_ptr<const MonraceDefinition> MonraceList::get_monrace_shared(MonraceId monrace_id) const
+{
+    return this->find(monrace_id);
 }
 
 const std::vector<MonraceId> &MonraceList::get_valid_monrace_ids() const
@@ -135,77 +162,6 @@ const std::vector<MonraceId> &MonraceList::get_valid_monrace_ids() const
 
     std::transform(++this->monraces.begin(), this->monraces.end(), std::back_inserter(valid_monraces), [](auto &x) { return x.first; });
     return valid_monraces;
-}
-
-/*!
- * @brief モンスターを引数で与えたフィルタ関数で検索する
- *
- * @param filter このフィルタ関数がtrueを返すモンスターを検索する
- * @param is_known_only trueならばプレイヤーが既知のモンスターのみを対象とする。falseならば全てのモンスターを対象とする。
- * @return std::vector<MonraceId> 検索結果のモンスター種族IDリスト
- */
-std::vector<MonraceId> MonraceList::search(std::function<bool(const MonraceDefinition &)> filter, bool is_known_only) const
-{
-    std::vector<MonraceId> result_ids;
-
-    for (const auto &[id, monrace] : this->monraces) {
-        if (!monrace.is_valid()) {
-            continue;
-        }
-
-        if (is_known_only && (monrace.r_sights == 0)) {
-            continue;
-        }
-
-        if (filter(monrace)) {
-            result_ids.push_back(id);
-        }
-    }
-
-    return result_ids;
-}
-
-/*!
- * @brief モンスターを名前で検索する
- *
- * 引数で与えた名前を含む(部分一致)モンスターを検索する。
- *
- * @param name 検索するモンスターの名前
- * @param is_known_only trueならばプレイヤーが既知のモンスターのみを対象とする。falseならば全てのモンスターを対象とする。
- * @return std::vector<MonraceId> 検索結果のモンスター種族IDリスト
- */
-std::vector<MonraceId> MonraceList::search_by_name(std::string_view name, bool is_known_only) const
-{
-    std::vector<MonraceId> result_ids;
-    const auto lowered_search_name = str_tolower(name);
-
-    auto filter = [&](const MonraceDefinition &monrace) {
-        const auto lowered_en_name = str_tolower(monrace.name.en_string());
-
-#ifdef JP
-        return str_find(lowered_en_name, lowered_search_name) || str_find(monrace.name.string(), lowered_search_name);
-#else
-        return str_find(lowered_en_name, lowered_search_name);
-#endif
-    };
-
-    return this->search(std::move(filter), is_known_only);
-}
-
-/*!
- * @brief モンスターのシンボルで検索する
- *
- * @param symbol 検索するモンスターのシンボル
- * @param is_known_only trueならばプレイヤーが既知のモンスターのみを対象とする。falseならば全てのモンスターを対象とする。
- * @return std::vector<MonraceId> 検索結果のモンスター種族IDリスト
- */
-std::vector<MonraceId> MonraceList::search_by_symbol(char symbol, bool is_known_only) const
-{
-    auto filter = [&](const MonraceDefinition &monrace) {
-        return monrace.symbol_char_is_any_of(std::string(1, symbol));
-    };
-
-    return this->search(std::move(filter), is_known_only);
 }
 
 bool MonraceList::is_angel(MonraceId monrace_id) const
@@ -348,11 +304,11 @@ MonraceId MonraceList::select_random_separated_unique_of(MonraceId monrace_id) c
 
 bool MonraceList::order(MonraceId id1, MonraceId id2, bool is_detailed) const
 {
-    const auto &monrace1 = this->monraces.at(id1);
-    const auto &monrace2 = this->monraces.at(id2);
+    const auto &monrace1 = this->find(id1);
+    const auto &monrace2 = this->find(id2);
     if (is_detailed) {
-        const auto pkills1 = monrace1.r_pkills;
-        const auto pkills2 = monrace2.r_pkills;
+        const auto pkills1 = monrace1->r_pkills;
+        const auto pkills2 = monrace2->r_pkills;
         if (pkills1 < pkills2) {
             return true;
         }
@@ -361,8 +317,8 @@ bool MonraceList::order(MonraceId id1, MonraceId id2, bool is_detailed) const
             return false;
         }
 
-        const auto tkills1 = monrace1.r_tkills;
-        const auto tkills2 = monrace2.r_tkills;
+        const auto tkills1 = monrace1->r_tkills;
+        const auto tkills2 = monrace2->r_tkills;
         if (tkills1 < tkills2) {
             return true;
         }
@@ -372,8 +328,8 @@ bool MonraceList::order(MonraceId id1, MonraceId id2, bool is_detailed) const
         }
     }
 
-    const auto level1 = monrace1.level;
-    const auto level2 = monrace2.level;
+    const auto level1 = monrace1->level;
+    const auto level2 = monrace2->level;
     if (level1 < level2) {
         return true;
     }
@@ -382,8 +338,8 @@ bool MonraceList::order(MonraceId id1, MonraceId id2, bool is_detailed) const
         return false;
     }
 
-    const auto exp1 = monrace1.mexp;
-    const auto exp2 = monrace2.mexp;
+    const auto exp1 = monrace1->mexp;
+    const auto exp2 = monrace2->mexp;
     if (exp1 < exp2) {
         return true;
     }
@@ -425,41 +381,57 @@ bool MonraceList::order_level_unique(MonraceId id1, MonraceId id2) const
 /*!
  * @brief (MonraceId::PLAYERを除く)実在するすべてのモンスター種族IDから等確率で1つ選択する
  *
+ * @param rng 乱数生成器
  * @return 選択したモンスター種族ID
  */
-MonraceId MonraceList::pick_id_at_random() const
+MonraceId MonraceList::pick_id_at_random(xso::rng32 &rng) const
 {
     static ProbabilityTable<MonraceId> table;
     if (table.empty()) {
         for (const auto &[monrace_id, monrace] : this->monraces) {
-            if (monrace.is_valid()) {
+            if (monrace->is_valid()) {
                 table.entry_item(monrace_id, 1);
             }
         }
     }
 
-    return table.pick_one_at_random();
+    return table.pick_one_at_random(rng);
+}
+
+/*!
+ * @brief ゲームの乱数生成器で、(MonraceId::PLAYERを除く)実在するすべてのモンスター種族IDから等確率で1つ選択する
+ *
+ * @return 選択したモンスター種族ID
+ */
+MonraceId MonraceList::pick_id_at_random() const
+{
+    return this->pick_id_at_random(get_game_rng());
+}
+
+const MonraceDefinition &MonraceList::pick_monrace_at_random(xso::rng32 &rng) const
+{
+    return *this->find(this->pick_id_at_random(rng));
 }
 
 const MonraceDefinition &MonraceList::pick_monrace_at_random() const
 {
-    return this->monraces.at(this->pick_id_at_random());
+    return this->pick_monrace_at_random(get_game_rng());
 }
 
 int MonraceList::calc_defeat_count() const
 {
     auto total = 0;
     for (const auto &[_, monrace] : this->monraces) {
-        if (monrace.kind_flags.has(MonsterKindType::UNIQUE)) {
-            if (monrace.is_dead_unique()) {
+        if (monrace->kind_flags.has(MonsterKindType::UNIQUE)) {
+            if (monrace->is_dead_unique()) {
                 total++;
             }
 
             continue;
         }
 
-        if (monrace.r_pkills > 0) {
-            total += monrace.r_pkills;
+        if (monrace->r_pkills > 0) {
+            total += monrace->r_pkills;
         }
     }
 
@@ -484,6 +456,43 @@ MonraceId MonraceList::select_figurine(int max_level) const
     }
 }
 
+const LocalizedString &MonraceList::get_name(MonraceId monrace_id) const
+{
+    return this->get_monrace(monrace_id).name;
+}
+
+const std::vector<std::pair<MonraceId, LocalizedString>> &MonraceList::get_normal_monster_names() const
+{
+    static std::vector<std::pair<MonraceId, LocalizedString>> normal_monster_names;
+    if (!normal_monster_names.empty()) {
+        return normal_monster_names;
+    }
+
+    for (const auto &[id, monrace] : this->monraces | ranges::views::drop(1)) {
+        if (monrace->kind_flags.has_not(MonsterKindType::UNIQUE) && monrace->population_flags.has_not(MonsterPopulationType::NAZGUL)) {
+            normal_monster_names.emplace_back(id, monrace->name);
+        }
+    }
+
+    return normal_monster_names;
+}
+
+const std::vector<std::pair<MonraceId, LocalizedString>> &MonraceList::get_unique_monster_names() const
+{
+    static std::vector<std::pair<MonraceId, LocalizedString>> unique_monster_names;
+    if (!unique_monster_names.empty()) {
+        return unique_monster_names;
+    }
+
+    for (const auto &[id, monrace] : this->monraces | ranges::views::drop(1)) {
+        if (monrace->kind_flags.has(MonsterKindType::UNIQUE) || monrace->population_flags.has(MonsterPopulationType::NAZGUL)) {
+            unique_monster_names.emplace_back(id, monrace->name);
+        }
+    }
+
+    return unique_monster_names;
+}
+
 /*!
  * @brief 現在フロアに存在している1種別辺りのモンスター数を全てリセットする
  * @todo そもそもcur_num はMonsterRaceInfo にいるべきではない、後で分離する
@@ -491,24 +500,25 @@ MonraceId MonraceList::select_figurine(int max_level) const
 void MonraceList::reset_current_numbers()
 {
     for (auto &[_, monrace] : this->monraces) {
-        monrace.reset_current_numbers();
+        monrace->reset_current_numbers();
     }
 }
 
 void MonraceList::reset_all_visuals()
 {
     for (auto &[_, monrace] : this->monraces) {
-        monrace.symbol_config = monrace.symbol_definition;
+        monrace->symbol_config = monrace->symbol_definition;
     }
 }
 
-tl::optional<std::string> MonraceList::probe_lore(MonraceId monrace_id)
+void MonraceList::add_to_index(MonraceId monrace_id, const std::shared_ptr<MonraceDefinition> &monrace)
 {
-    if (LoreTracker::get_instance().is_tracking(monrace_id)) {
-        RedrawingFlagsUpdater::get_instance().set_flag(SubWindowRedrawingFlag::MONSTER_LORE);
+    const auto index = static_cast<size_t>(enum2i(monrace_id));
+    if (index >= this->monraces_by_id.size()) {
+        this->monraces_by_id.resize(index + 1);
     }
 
-    return this->get_monrace(monrace_id).probe_lore();
+    this->monraces_by_id[index] = monrace;
 }
 
 /*

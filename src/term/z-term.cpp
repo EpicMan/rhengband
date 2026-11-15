@@ -1,4 +1,4 @@
-/*
+/*!
  * @brief Purpose: a generic, efficient, terminal window package -BEN-
  * Copyright (c) 1997 Ben Harrison
  *
@@ -13,25 +13,98 @@
 #include "game-option/special-options.h"
 #include "term/gameterm.h"
 #include "term/term-color-types.h"
+#include "term/tile-layout.h"
 #include "view/display-symbol.h"
 
-/* Special flags in the attr data */
-#define AF_BIGTILE2 0xf0
-#define AF_TILE1 0x80
+//! Special flags in the attr data
+constexpr auto AF_BIGTILE2 = 0xf0;
+constexpr auto AF_TILE1 = 0x80;
 
 #ifdef JP
-/*
+/*!
  * 全角文字対応。
  * 属性に全角文字の1バイト目、2バイト目も記憶。
  * By FIRST
  */
-#define AF_KANJI1 0x10
-#define AF_KANJI2 0x20
-#define AF_KANJIC 0x0f
+constexpr auto AF_KANJI1 = 0x10;
+constexpr auto AF_KANJI2 = 0x20;
+constexpr auto AF_KANJIC = 0x0f;
 #endif
 
-/* The current "term" */
+//! The current "term"
 term_type *game_term = nullptr;
+static const term_win *pict_source = nullptr;
+
+const term_win &term_pict_buffer()
+{
+    return pict_source ? *pict_source : *game_term->scr;
+}
+
+TermTileBlock term_tile_block_at(const term_win &screen, int x, int y)
+{
+    TermTileBlock normal{ x, y, use_bigtile ? 2 : 1, 1 };
+    const auto height = static_cast<int>(screen.a.size());
+    if (y < 0 || y >= height || x < 0 || x >= static_cast<int>(screen.a[y].size())) {
+        return normal;
+    }
+    auto ax = x;
+    auto ay = y;
+    if (term_is_zoom_continuation({ screen.a[y][x], screen.c[y][x] })) {
+        const auto offset = static_cast<unsigned char>(screen.c[y][x]) & 7;
+        ax -= offset & 3;
+        ay -= offset >> 2;
+    }
+    if (ax < 0 || ay < 0 || ay + 1 >= height || ax + 3 >= static_cast<int>(screen.a[ay].size()) || ax + 3 >= static_cast<int>(screen.a[ay + 1].size())) {
+        return normal;
+    }
+    if (!(screen.a[ay][ax] & 0x80) || !(screen.c[ay][ax] & 0x80) || term_is_tile_continuation({ screen.a[ay][ax], screen.c[ay][ax] })) {
+        return normal;
+    }
+    for (auto dy = 0; dy < 2; ++dy) {
+        for (auto dx = 0; dx < 4; ++dx) {
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            if (screen.a[ay + dy][ax + dx] != 0xf0 || static_cast<unsigned char>(screen.c[ay + dy][ax + dx]) != (0x80 | (dy << 2) | dx)) {
+                return normal;
+            }
+        }
+    }
+    return { ax, ay, 4, 2 };
+}
+
+static void mark_tile_block(const TermTileBlock &block)
+{
+    game_term->y1 = std::min<int>(game_term->y1, block.y);
+    game_term->y2 = std::max<int>(game_term->y2, block.y + block.height - 1);
+    for (auto row = block.y; row < block.y + block.height; ++row) {
+        game_term->x1[row] = std::min<int>(game_term->x1[row], block.x);
+        game_term->x2[row] = std::max<int>(game_term->x2[row], block.x + block.width - 1);
+    }
+}
+
+static bool clear_zoom_tile_at(int x, int y)
+{
+    const auto block = term_tile_block_at(*game_term->scr, x, y);
+    if (!block.zoomed()) {
+        return false;
+    }
+    for (auto dy = 0; dy < 2; ++dy) {
+        for (auto dx = 0; dx < 4; ++dx) {
+            const auto xx = block.x + dx;
+            const auto yy = block.y + dy;
+            game_term->scr->a[yy][xx] = game_term->attr_blank;
+            game_term->scr->c[yy][xx] = game_term->char_blank;
+            game_term->scr->ta[yy][xx] = 0;
+            game_term->scr->tc[yy][xx] = 0;
+        }
+    }
+    mark_tile_block(block);
+    return true;
+}
+
+//! キー入力待ちの間に繰り返し呼ばれるフック (詳細はz-term.hを参照)
+void (*term_inkey_wait_hook)() = nullptr;
 
 /*** Local routines ***/
 
@@ -110,7 +183,7 @@ TermCenteredOffsetSetter::~TermCenteredOffsetSetter()
     this->term->centered_hgt = this->orig_centered_hgt;
 }
 
-/*
+/*!
  * Initialize a "term_win" (using the given window size)
  */
 term_win::term_win(TERM_LEN w, TERM_LEN h)
@@ -123,7 +196,7 @@ term_win::term_win(TERM_LEN w, TERM_LEN h)
 
 std::unique_ptr<term_win> term_win::create(TERM_LEN w, TERM_LEN h)
 {
-    // privateコンストラクタを呼び出すための補助クラス
+    //! privateコンストラクタを呼び出すための補助クラス
     struct impl : term_win {
         impl(TERM_LEN w, TERM_LEN h)
             : term_win(w, h)
@@ -188,7 +261,7 @@ void term_xtra(int n, int v)
 
 /*** Fake hooks ***/
 
-/*
+/*!
  * Fake hook for "term_curs()" (see above)
  */
 static errr term_curs_hack(TERM_LEN x, TERM_LEN y)
@@ -200,7 +273,7 @@ static errr term_curs_hack(TERM_LEN x, TERM_LEN y)
     return -1;
 }
 
-/*
+/*!
  * Fake hook for "term_bigcurs()" (see above)
  */
 static errr term_bigcurs_hack(TERM_LEN x, TERM_LEN y)
@@ -208,7 +281,7 @@ static errr term_bigcurs_hack(TERM_LEN x, TERM_LEN y)
     return (*game_term->curs_hook)(x, y);
 }
 
-/*
+/*!
  * Fake hook for "term_wipe()" (see above)
  */
 static errr term_wipe_hack(TERM_LEN x, TERM_LEN y, int n)
@@ -221,7 +294,7 @@ static errr term_wipe_hack(TERM_LEN x, TERM_LEN y, int n)
     return -1;
 }
 
-/*
+/*!
  * Fake hook for "term_text()" (see above)
  */
 static errr term_text_hack(TERM_LEN x, TERM_LEN y, int n, TERM_COLOR a, concptr cp)
@@ -236,7 +309,7 @@ static errr term_text_hack(TERM_LEN x, TERM_LEN y, int n, TERM_COLOR a, concptr 
     return -1;
 }
 
-/*
+/*!
  * Fake hook for "term_pict()" (see above)
  */
 static errr term_pict_hack(TERM_LEN x, TERM_LEN y, int n, const TERM_COLOR *ap, concptr cp, const TERM_COLOR *tap, concptr tcp)
@@ -255,18 +328,20 @@ static errr term_pict_hack(TERM_LEN x, TERM_LEN y, int n, const TERM_COLOR *ap, 
 
 /*** Efficient routines ***/
 
-/*
+/*!
  * Mentally draw an attr/char at a given location
  * Assumes given location and values are valid.
+ * @return 画面の内容が変わったならtrue
  */
-static void term_queue_char_aux(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair)
+static bool term_queue_char_aux(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair, bool preserve_zoom = false)
 {
     if ((x < 0) || (x >= game_term->wid)) {
-        return;
+        return false;
     }
     if ((y < 0) || (y >= game_term->hgt)) {
-        return;
+        return false;
     }
+    const auto cleared_zoom = !preserve_zoom && clear_zoom_tile_at(x, y);
 
     const auto &scrn = game_term->scr;
 
@@ -283,7 +358,7 @@ static void term_queue_char_aux(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair 
     should_ignore &= *scr_taa == symbol_background.color;
     should_ignore &= *scr_tcc == symbol_background.character;
     if (should_ignore) {
-        return;
+        return cleared_zoom;
     }
 
     /* Save the "literal" information */
@@ -309,14 +384,47 @@ static void term_queue_char_aux(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair 
         game_term->x2[y] = x;
     }
 
+    // 行頭には左隣が無いので、変更範囲を広げない (x1 が負になり、後の描画で範囲外を読むのを防ぐ)
+    if (term_is_zoom_continuation({ *scr_aa, *scr_cc })) {
+        const auto offset = static_cast<unsigned char>(*scr_cc) & 7;
+        const auto ax = x - (offset & 3);
+        const auto ay = y - (offset >> 2);
+        if (ax >= 0 && ay >= 0 && ax + 3 < game_term->wid && ay + 1 < game_term->hgt) {
+            mark_tile_block({ ax, ay, 4, 2 });
+        }
+    } else
 #ifdef JP
-    if (((scrn->a[y][x] & AF_BIGTILE2) == AF_BIGTILE2) || (scrn->a[y][x] & AF_KANJI2))
+        if ((x > 0) && (((scrn->a[y][x] & AF_BIGTILE2) == AF_BIGTILE2) || (!(scrn->a[y][x] & AF_TILE1) && (scrn->a[y][x] & AF_KANJI2))))
 #else
-    if ((scrn->a[y][x] & AF_BIGTILE2) == AF_BIGTILE2)
+        if ((x > 0) && ((scrn->a[y][x] & AF_BIGTILE2) == AF_BIGTILE2))
 #endif
         if ((x - 1) < game_term->x1[y]) {
             game_term->x1[y]--;
         }
+
+    return true;
+}
+
+bool term_queue_scaled_bigchar(int x, int y, const DisplaySymbolPair &symbols, int scale)
+{
+    if (scale != 2 || !use_bigtile) {
+        return term_queue_bigchar(x, y, symbols);
+    }
+    const auto xx = x + game_term->offset_x;
+    const auto yy = y + game_term->offset_y;
+    if (xx < 0 || yy < 0 || xx + 3 >= game_term->wid || yy + 1 >= game_term->hgt) {
+        return false;
+    }
+    const auto graphic = (symbols.symbol_foreground.color & 0x80) && (symbols.symbol_foreground.character & 0x80);
+    auto changed = false;
+    for (auto dy = 0; dy < 2; ++dy) {
+        for (auto dx = 0; dx < 4; ++dx) {
+            const auto value = !graphic ? DisplaySymbolPair{ { 0, ' ' }, {} } : dx == 0 && dy == 0 ? symbols
+                                                                                                   : DisplaySymbolPair{ { 0xf0, static_cast<char>(0x80 | (dy << 2) | dx) }, {} };
+            changed |= term_queue_char_aux(xx + dx, yy + dy, value, graphic);
+        }
+    }
+    return changed;
 }
 
 void term_queue_char(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair)
@@ -324,13 +432,14 @@ void term_queue_char(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pai
     term_queue_char_aux(x + game_term->offset_x, y + game_term->offset_y, symbol_pair);
 }
 
-/*
+/*!
  * Bigtile version of term_queue_char().
  * If use_bigtile is FALSE, simply call term_queue_char().
  * Otherwise, mentally draw a pair of attr/char at a given location.
  * Assumes given location and values are valid.
+ * @return 画面の内容が変わったならtrue
  */
-void term_queue_bigchar(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair_initial)
+bool term_queue_bigchar(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_pair_initial)
 {
 #ifdef JP
     /*
@@ -352,8 +461,7 @@ void term_queue_bigchar(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_
 
     /* If non bigtile mode, call orginal function */
     if (!use_bigtile) {
-        term_queue_char_aux(ch_x, ch_y, symbol_pair_initial);
-        return;
+        return term_queue_char_aux(ch_x, ch_y, symbol_pair_initial);
     }
 
     /* A tile becomes a Bigtile */
@@ -394,11 +502,12 @@ void term_queue_bigchar(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_
     }
 
     /* Display pair of attr/char */
-    term_queue_char_aux(ch_x, ch_y, symbol_pair);
-    term_queue_char_aux(ch_x + 1, ch_y, { { color, character }, {} });
+    const auto is_changed_left = term_queue_char_aux(ch_x, ch_y, symbol_pair);
+    const auto is_changed_right = term_queue_char_aux(ch_x + 1, ch_y, { { color, character }, {} });
+    return is_changed_left || is_changed_right;
 }
 
-/*
+/*!
  * Mentally draw some attr/chars at a given location
  *
  * Assumes that (x,y) is a valid location, that the first "n" characters
@@ -409,6 +518,9 @@ void term_queue_bigchar(TERM_LEN x, TERM_LEN y, const DisplaySymbolPair &symbol_
 static void term_queue_chars(TERM_LEN x, TERM_LEN y, int n, TERM_COLOR a, std::string_view sv)
 {
     TERM_LEN x1 = -1, x2 = -1;
+    for (auto offset = 0; offset < n && x + offset < game_term->wid && static_cast<size_t>(offset) < sv.size(); ++offset) {
+        clear_zoom_tile_at(x + offset, y);
+    }
 
     auto &scr_aa = game_term->scr->a[y];
 #ifdef JP
@@ -431,9 +543,9 @@ static void term_queue_chars(TERM_LEN x, TERM_LEN y, int n, TERM_COLOR a, std::s
     /*
      * 全角文字の右半分から文字を表示する場合、
      * 重なった文字の左部分を消去。
-     * 表示開始位置が左端でないと仮定。
+     * 行頭には左隣が無いので何もしない。
      */
-    if ((scr_aa[x] & AF_KANJI2) && (scr_aa[x] & AF_BIGTILE2) != AF_BIGTILE2) {
+    if ((x > 0) && !(scr_aa[x] & AF_TILE1) && (scr_aa[x] & AF_KANJI2)) {
         scr_cc[x - 1] = ' ';
         scr_aa[x - 1] &= AF_KANJIC;
         x1 = x2 = x - 1;
@@ -447,14 +559,15 @@ static void term_queue_chars(TERM_LEN x, TERM_LEN y, int n, TERM_COLOR a, std::s
         /* check */
         if (!(a & AF_TILE1) && iskanji(*s)) {
             char nc1 = *s++;
-            char nc2 = *s;
 
-            byte na1 = (a | AF_KANJI1);
-            byte na2 = (a | AF_KANJI2);
-
-            if ((--n == 0) || !nc2) {
+            // 後半バイトを描く余地が無いか、文字列が前半バイトで終わっている (view の終端か NUL) なら、前半バイトだけでは描かずに終える
+            if ((--n == 0) || (s == sv.end()) || (*s == '\0')) {
                 break;
             }
+
+            char nc2 = *s;
+            byte na1 = (a | AF_KANJI1);
+            byte na2 = (a | AF_KANJI2);
 
             if (scr_aa[x++] == na1 && scr_aa[x] == na2 && scr_cc[x - 1] == nc1 && scr_cc[x] == nc2 && (scr_taa[x - 1] == 0) && (scr_taa[x] == 0) && (scr_tcc[x - 1] == 0) && (scr_tcc[x] == 0)) {
                 continue;
@@ -538,7 +651,7 @@ static void term_queue_chars(TERM_LEN x, TERM_LEN y, int n, TERM_COLOR a, std::s
 
 /*** Refresh routines ***/
 
-/*
+/*!
  * Flush a row of the current window (see "term_fresh")
  * Display text using "term_pict()"
  */
@@ -656,7 +769,7 @@ static void term_fresh_row_pict(TERM_LEN y, TERM_LEN x1, TERM_LEN x2)
     }
 }
 
-/*
+/*!
  * Flush a row of the current window (see "term_fresh")
  *
  * Display text using "term_text()" and "term_wipe()",
@@ -778,6 +891,15 @@ static void term_fresh_row_both(TERM_LEN y, int x1, int x2)
 
         /* 2nd byte of bigtile */
         if ((na & AF_BIGTILE2) == AF_BIGTILE2) {
+            // 拡大タイルの下段には起点がないため、継続セルの手前で保留を区切る。
+            if (fn) {
+                if (fa || always_text) {
+                    (void)((*game_term->text_hook)(fx, y, fn, fa, &scr_cc[fx]));
+                } else {
+                    (void)((*game_term->wipe_hook)(fx, y, fn));
+                }
+                fn = 0;
+            }
             continue;
         }
 
@@ -858,7 +980,7 @@ static void term_fresh_row_both(TERM_LEN y, int x1, int x2)
     }
 }
 
-/*
+/*!
  * Flush a row of the current window (see "term_fresh")
  *
  * Display text using "term_text()" and "term_wipe()"
@@ -1020,7 +1142,7 @@ static void term_fresh_row_text(TERM_LEN y, TERM_LEN x1, TERM_LEN x2)
     }
 }
 
-/*
+/*!
  * @brief Actually perform all requested changes to the window
  */
 void term_fresh()
@@ -1101,15 +1223,20 @@ void term_fresh()
     if (game_term->soft_cursor) {
         /* Cursor was visible */
         if (!old->cu && old->cv) {
-            const auto tx = old->cx;
-            const auto ty = old->cy;
+            auto tx = old->cx;
+            auto ty = old->cy;
+            const auto old_block = term_tile_block_at(*old, tx, ty);
+            if (old_block.zoomed()) {
+                tx = old_block.x;
+                ty = old_block.y;
+            }
 
             const auto &old_aa = old->a[ty];
             const auto &old_cc = old->c[ty];
 
             const auto &old_taa = old->ta[ty];
             const auto &old_tcc = old->tc[ty];
-            DisplaySymbol ot(old_taa[tx], old_tcc[tx]);
+            pict_source = old.get();
             auto csize = 1;
 #ifdef JP
             if (tx + 1 < game_term->wid && !(old_aa[tx] & AF_TILE1) && iskanji(old_cc[tx])) {
@@ -1118,12 +1245,12 @@ void term_fresh()
 #endif
             /* Use "term_pict()" always */
             if (game_term->always_pict) {
-                (void)((*game_term->pict_hook)(tx, ty, csize, &old_aa[tx], &old_cc[tx], &ot.color, &ot.character));
+                (void)((*game_term->pict_hook)(tx, ty, csize, &old_aa[tx], &old_cc[tx], &old_taa[tx], &old_tcc[tx]));
             }
 
             /* Use "term_pict()" sometimes */
             else if (game_term->higher_pict && (old_aa[tx] & AF_TILE1) && (old_cc[tx] & 0x80)) {
-                (void)((*game_term->pict_hook)(tx, ty, 1, &old_aa[tx], &old_cc[tx], &ot.color, &ot.character));
+                (void)((*game_term->pict_hook)(tx, ty, 1, &old_aa[tx], &old_cc[tx], &old_taa[tx], &old_tcc[tx]));
             }
 
             /*
@@ -1149,6 +1276,8 @@ void term_fresh()
         /* Cursor will be invisible */
         term_xtra(TERM_XTRA_SHAPE, 0);
     }
+
+    pict_source = nullptr;
 
     /* Something to update */
     if (y1 <= y2) {
@@ -1250,7 +1379,7 @@ void term_fresh()
     }
 }
 
-/*
+/*!
  * @brief never_freshの値を無視して強制的にterm_freshを行う。
  */
 void term_fresh_force()
@@ -1263,7 +1392,7 @@ void term_fresh_force()
 
 /*** Output routines ***/
 
-/*
+/*!
  * Set the cursor visibility
  */
 void term_set_cursor(bool v)
@@ -1271,7 +1400,7 @@ void term_set_cursor(bool v)
     game_term->scr->cv = v;
 }
 
-/*
+/*!
  * Place the cursor at a given location
  *
  * Note -- "illegal" requests do not move the cursor.
@@ -1301,7 +1430,7 @@ errr term_gotoxy(TERM_LEN x, TERM_LEN y)
     return 0;
 }
 
-/*
+/*!
  * At a given location, place an attr/char
  * Do not change the cursor position
  * No visual changes until "term_fresh()".
@@ -1313,7 +1442,7 @@ void term_draw(int x, int y, const DisplaySymbol &symbol)
     }
 
     /* Paranoia -- illegal char */
-    if (symbol.has_character()) {
+    if (!symbol.has_character()) {
         return;
     }
 
@@ -1321,7 +1450,7 @@ void term_draw(int x, int y, const DisplaySymbol &symbol)
     term_queue_char_aux(game_term->scr->cx, game_term->scr->cy, { symbol, {} });
 }
 
-/*
+/*!
  * Using the given attr, add the given char at the cursor.
  *
  * We return "-2" if the character is "illegal". XXX XXX
@@ -1366,7 +1495,7 @@ void term_addch(const DisplaySymbol &symbol)
     game_term->scr->cu = 1;
 }
 
-/*
+/*!
  * Bigtile version of term_addch().
  *
  * If use_bigtile is FALSE, simply call term_addch() .
@@ -1406,7 +1535,7 @@ void term_add_bigch(const DisplaySymbol &symbol)
     game_term->scr->cu = 1;
 }
 
-/*
+/*!
  * At the current location, using an attr, add a string
  *
  * We also take a length "n", using negative values to imply
@@ -1460,7 +1589,7 @@ errr term_addstr(int n, TERM_COLOR a, std::string_view sv)
     return res;
 }
 
-/*
+/*!
  * Move to a location and, using an attr, add a char
  */
 void term_putch(int x, int y, const DisplaySymbol &symbol)
@@ -1474,7 +1603,7 @@ void term_putch(int x, int y, const DisplaySymbol &symbol)
     term_addch(symbol);
 }
 
-/*
+/*!
  * Move to a location and, using an attr, add a string
  */
 void term_putstr(int x, int y, int n, TERM_COLOR a, std::string_view sv)
@@ -1486,7 +1615,7 @@ void term_putstr(int x, int y, int n, TERM_COLOR a, std::string_view sv)
     term_addstr(n, a, sv);
 }
 
-/*
+/*!
  * Place cursor at (x,y), and clear the next "n" chars
  */
 void term_erase(int x, int y, tl::optional<int> n_opt)
@@ -1511,6 +1640,9 @@ void term_erase(int x, int y, tl::optional<int> n_opt)
     if (x + n > w) {
         n = w - x;
     }
+    for (auto column = x; column < x + n; ++column) {
+        clear_zoom_tile_at(column, y);
+    }
 
     /* Fast access */
     auto &scr_aa = game_term->scr->a[y];
@@ -1523,10 +1655,12 @@ void term_erase(int x, int y, tl::optional<int> n_opt)
     /*
      * 全角文字の右半分から文字を表示する場合、
      * 重なった文字の左部分を消去。
+     * 行頭には左隣が無いので何もしない。
      */
-    if (n > 0 && (((scr_aa[x] & AF_KANJI2) && !(scr_aa[x] & AF_TILE1)) || (scr_aa[x] & AF_BIGTILE2) == AF_BIGTILE2))
+    if (n > 0 && x > 0 && (((scr_aa[x] & AF_KANJI2) && !(scr_aa[x] & AF_TILE1)) || (scr_aa[x] & AF_BIGTILE2) == AF_BIGTILE2))
 #else
-    if (n > 0 && (scr_aa[x] & AF_BIGTILE2) == AF_BIGTILE2)
+    /* 大きなタイルの右半分から消去する場合は左半分も消去する。行頭には左隣が無いので何もしない */
+    if (n > 0 && x > 0 && (scr_aa[x] & AF_BIGTILE2) == AF_BIGTILE2)
 #endif
     {
         x--;
@@ -1591,7 +1725,7 @@ void term_erase(int x, int y, tl::optional<int> n_opt)
     }
 }
 
-/*
+/*!
  * Clear the entire window, and move to the top left corner
  *
  * Note the use of the special "total_erase" code
@@ -1637,7 +1771,7 @@ void term_clear()
     game_term->total_erase = true;
 }
 
-/*
+/*!
  * Redraw (and refresh) the whole window.
  */
 void term_redraw()
@@ -1646,7 +1780,7 @@ void term_redraw()
     term_fresh();
 }
 
-/*
+/*!
  * @brief Redraw part of a window.
  *
  * 今のところX11からしか呼ばれていない.
@@ -1669,6 +1803,26 @@ void term_redraw_section(int x1, int y1, int x2, int y2)
     if (x1 < 0) {
         x1 = 0;
     }
+    if (x1 > x2 || y1 > y2) {
+        return;
+    }
+    // 拡大タイルの一部を再描画するときは、起点のセルも対象に含める。
+    auto expanded = true;
+    while (expanded) {
+        const std::array<int, 4> before{ { x1, y1, x2, y2 } };
+        for (auto row = y1; row <= y2; ++row) {
+            for (auto col = x1; col <= x2; ++col) {
+                const auto block = term_tile_block_at(*game_term->scr, col, row);
+                if (block.zoomed()) {
+                    x1 = std::min(x1, block.x);
+                    y1 = std::min(y1, block.y);
+                    x2 = std::max(x2, block.x + 3);
+                    y2 = std::max(y2, block.y + 1);
+                }
+            }
+        }
+        expanded = before != std::array<int, 4>{ { x1, y1, x2, y2 } };
+    }
 
     /* Set y limits */
     game_term->y1 = y1;
@@ -1678,19 +1832,25 @@ void term_redraw_section(int x1, int y1, int x2, int y2)
     for (auto i = game_term->y1; i <= game_term->y2; i++) {
         auto x1j = x1;
         auto x2j = x2;
-#ifdef JP
         if (x1j > 0) {
-            if (game_term->scr->a[i][x1j] & AF_KANJI2) {
+            auto right_half = (game_term->scr->a[i][x1j] & AF_BIGTILE2) == AF_BIGTILE2 && !term_is_zoom_continuation({ game_term->scr->a[i][x1j], game_term->scr->c[i][x1j] });
+#ifdef JP
+            right_half |= !(game_term->scr->a[i][x1j] & AF_TILE1) && (game_term->scr->a[i][x1j] & AF_KANJI2);
+#endif
+            if (right_half) {
                 x1j--;
             }
         }
 
         if (x2j < game_term->wid - 1) {
-            if (game_term->scr->a[i][x2j] & AF_KANJI1) {
+            auto left_half = (game_term->scr->a[i][x2j + 1] & AF_BIGTILE2) == AF_BIGTILE2 && !term_is_zoom_continuation({ game_term->scr->a[i][x2j + 1], game_term->scr->c[i][x2j + 1] });
+#ifdef JP
+            left_half |= !(game_term->scr->a[i][x2j] & AF_TILE1) && (game_term->scr->a[i][x2j] & AF_KANJI1);
+#endif
+            if (left_half) {
                 x2j++;
             }
         }
-#endif
         game_term->x1[i] = x1j;
         game_term->x2[i] = x2j;
 
@@ -1707,7 +1867,7 @@ void term_redraw_section(int x1, int y1, int x2, int y2)
 
 /*** Access routines ***/
 
-/*
+/*!
  * Extract the cursor visibility
  */
 int term_get_cursor()
@@ -1715,7 +1875,7 @@ int term_get_cursor()
     return game_term->scr->cv;
 }
 
-/*
+/*!
  * Extract the current window size
  */
 std::pair<int, int> term_get_size()
@@ -1723,7 +1883,7 @@ std::pair<int, int> term_get_size()
     return { game_term->centered_wid.value_or(game_term->wid), game_term->centered_hgt.value_or(game_term->hgt) };
 }
 
-/*
+/*!
  * Extract the current cursor location
  */
 std::pair<int, int> term_locate()
@@ -1733,7 +1893,7 @@ std::pair<int, int> term_locate()
     return { x, y };
 }
 
-/*
+/*!
  * At a given location, determine the "current" attr and char
  * Note that this refers to what will be on the window after the
  * next call to "term_fresh()".  It may or may not already be there.
@@ -1754,20 +1914,19 @@ DisplaySymbol term_what(int x, int y, const DisplaySymbol &ds)
 
 /*** Input routines ***/
 
-/*
+/*!
  * Flush and forget the input
  */
-errr term_flush(void)
+void term_flush()
 {
     /* Flush all events */
     term_xtra(TERM_XTRA_FLUSH, 0);
 
     /* Forget all keypresses */
     game_term->key_head = game_term->key_tail = 0;
-    return 0;
 }
 
-/*
+/*!
  * Add a keypress to the FRONT of the "queue"
  */
 errr term_key_push(int k)
@@ -1792,91 +1951,140 @@ errr term_key_push(int k)
     return 1;
 }
 
-/*
- * Check for a pending keypress on the key queue.
- *
- * Store the keypress, if any, in "ch", and return "0".
- * Otherwise store "zero" in "ch", and return "1".
- *
- * Wait for a keypress if "wait" is true.
- *
- * Remove the keypress if "take" is true.
+/*!
+ * @brief キューにあと何個キーを積めるか数える
+ * @return 積めるキーの数
+ * @details
+ * term_key_push()は空きが無くなっても積むことを拒否せず、循環キューを一周して
+ * 先に積んだキーを壊すため、まとめて積む場合は事前に空きを確かめる必要がある。
+ * キューの大きさはフロントエンドが決めるため、一度に積める量もそれに従う。
  */
-errr term_inkey(char *ch, bool wait, bool take)
+int term_key_queue_room()
 {
-    /* Assume no key */
-    (*ch) = '\0';
+    const auto size = game_term->key_size;
+    if (size == 0) {
+        return 0;
+    }
 
+    const auto pending = (game_term->key_head + size - game_term->key_tail) % size;
+    return size - 1 - pending;
+}
+
+/*!
+ * @brief キー列をキューへまとめて積む
+ * @param keys 積むキー列
+ * @return 全て積めた場合0、空きが足りず1つも積まなかった場合は非0
+ * @details
+ * term_key_push()はキューの先頭へ挿入するため、正しい順序で消費させるには
+ * 末尾から逆順に積む必要がある。逆順に積む都合上、途中で空きが尽きると
+ * 失われるのはキー列の先頭側になる。意味の異なる操作を実行させないよう、
+ * 全て積めない場合は1つも積まない。
+ */
+errr term_keys_push(std::string_view keys)
+{
+    if (std::cmp_greater(keys.size(), term_key_queue_room())) {
+        return 1;
+    }
+
+    for (auto it = keys.rbegin(); it != keys.rend(); ++it) {
+        (void)term_key_push(static_cast<unsigned char>(*it));
+    }
+
+    return 0;
+}
+
+/*!
+ * @brief 保留中のイベントを1件だけ取り出す
+ * @return 取り出した場合0、保留中のイベントが無い場合または取り出せない場合は非0
+ * @details
+ * term_xtra()は戻り値を捨てるため、イベントを取り切ったか否かを判定できない。
+ * ポーリングによる入力待ちでは打ち切る条件が要るため、ここだけフックを直接呼ぶ。
+ */
+static errr take_pending_event()
+{
+    if (!game_term->xtra_hook) {
+        return 1;
+    }
+
+    return (*game_term->xtra_hook)(TERM_XTRA_EVENT, false);
+}
+
+/*!
+ * @brief Check for a pending keypress on the key queue.
+ * @param wait Wait for a keypress.
+ * @param take Remove the keypress.
+ * @return Keypress or zero.
+ */
+char term_inkey(bool wait, bool take)
+{
     /* get bored */
     if (!game_term->never_bored) {
         /* Process random events */
         term_xtra(TERM_XTRA_BORED, 0);
     }
 
-    /* Wait */
     if (wait) {
-        /* Process pending events while necessary */
         while (game_term->key_head == game_term->key_tail) {
-            /* Process events (wait for one) */
-            term_xtra(TERM_XTRA_EVENT, true);
-        }
-    }
+            if (term_inkey_wait_hook == nullptr) {
+                term_xtra(TERM_XTRA_EVENT, true);
+                continue;
+            }
 
-    /* Do not Wait */
-    else {
-        /* Process pending events if necessary */
-        if (game_term->key_head == game_term->key_tail) {
-            /* Process events (do not wait) */
-            term_xtra(TERM_XTRA_EVENT, false);
+            // フックに仕事をさせるため、フロントエンドをブロックさせずに
+            // 保留中のイベントを取り切ってから制御を渡す
+            while ((game_term->key_head == game_term->key_tail) && (take_pending_event() == 0)) {
+                ;
+            }
+
+            // キーが届いていれば外側のループが抜ける。無駄に待たせないようフックは呼ばない
+            if (game_term->key_head == game_term->key_tail) {
+                (*term_inkey_wait_hook)();
+            }
         }
+    } else if (game_term->key_head == game_term->key_tail) {
+        term_xtra(TERM_XTRA_EVENT, false);
     }
 
     /* No keys are ready */
     if (game_term->key_head == game_term->key_tail) {
-        return 1;
+        return '\0';
     }
 
-    /* Extract the next keypress */
-    (*ch) = game_term->key_queue[game_term->key_tail];
-
     /* If requested, advance the queue, wrap around if necessary */
+    const auto res = game_term->key_queue[game_term->key_tail];
     if (take && (++game_term->key_tail == game_term->key_size)) {
         game_term->key_tail = 0;
     }
 
-    return 0;
+    return res;
 }
 
 /*** Extra routines ***/
 
-/*
+/*!
  * Save the "requested" screen into the "memorized" screen
  *
  * Every "term_save()" should match exactly one "term_load()"
  */
-errr term_save(void)
+void term_save()
 {
-    /* Push stack */
     game_term->mem_stack.push(game_term->scr->clone());
-
-    return 0;
 }
 
-/*
+/*!
  * Restore the "requested" contents (see above).
  *
  * Every "term_save()" should match exactly one "term_load()"
  */
-errr term_load(bool load_all)
+void term_load(bool should_load_all)
 {
-    TERM_LEN w = game_term->wid;
-    TERM_LEN h = game_term->hgt;
-
+    const auto w = game_term->wid;
+    const auto h = game_term->hgt;
     if (game_term->mem_stack.empty()) {
-        return 0;
+        return;
     }
 
-    if (load_all) {
+    if (should_load_all) {
         // 残り1つを残して読み捨てる
         while (game_term->mem_stack.size() > 1) {
             game_term->mem_stack.pop();
@@ -1891,7 +2099,7 @@ errr term_load(bool load_all)
     game_term->mem_stack.pop();
 
     /* Assume change */
-    for (TERM_LEN y = 0; y < h; y++) {
+    for (auto y = 0; y < h; y++) {
         /* Assume change */
         game_term->x1[y] = 0;
         game_term->x2[y] = w - 1;
@@ -1900,57 +2108,26 @@ errr term_load(bool load_all)
     /* Assume change */
     game_term->y1 = 0;
     game_term->y2 = h - 1;
-    return 0;
 }
 
-/*
- * Exchange the "requested" screen with the "tmp" screen
- */
-errr term_exchange(void)
-{
-    TERM_LEN w = game_term->wid;
-    TERM_LEN h = game_term->hgt;
-
-    /* Create */
-    if (!game_term->tmp) {
-        /* Allocate window */
-        game_term->tmp = term_win::create(w, h);
-    }
-
-    /* Swap */
-    game_term->scr.swap(game_term->tmp);
-
-    /* Assume change */
-    for (TERM_LEN y = 0; y < h; y++) {
-        /* Assume change */
-        game_term->x1[y] = 0;
-        game_term->x2[y] = w - 1;
-    }
-
-    /* Assume change */
-    game_term->y1 = 0;
-    game_term->y2 = h - 1;
-    return 0;
-}
-
-/*
+/*!
  * React to a new physical window size.
  */
-errr term_resize(TERM_LEN w, TERM_LEN h)
+void term_resize(int w, int h)
 {
     /* Resizing is forbidden */
     if (game_term->fixed_shape) {
-        return -1;
+        return;
     }
 
     /* Ignore illegal changes */
     if ((w < 1) || (h < 1)) {
-        return -1;
+        return;
     }
 
     /* Ignore non-changes */
     if ((game_term->wid == w) && (game_term->hgt == h) && (arg_bigtile == use_bigtile)) {
-        return 1;
+        return;
     }
 
     use_bigtile = arg_bigtile;
@@ -1974,7 +2151,7 @@ errr term_resize(TERM_LEN w, TERM_LEN h)
     game_term->total_erase = true;
 
     /* Assume change */
-    for (int i = 0; i < h; i++) {
+    for (auto i = 0; i < h; i++) {
         /* Assume change */
         game_term->x1[i] = 0;
         game_term->x2[i] = w - 1;
@@ -1988,11 +2165,9 @@ errr term_resize(TERM_LEN w, TERM_LEN h)
     if (game_term->resize_hook) {
         game_term->resize_hook();
     }
-
-    return 0;
 }
 
-/*
+/*!
  * Activate a new Term (and deactivate the current Term)
  *
  * This function is extremely important, and also somewhat bizarre.
@@ -2001,11 +2176,11 @@ errr term_resize(TERM_LEN w, TERM_LEN h)
  * To "create" a valid "term", one should do "term_init(t)", then
  * set the various flags and hooks, and then do "term_activate(t)".
  */
-errr term_activate(term_type *t)
+void term_activate(term_type *t)
 {
     /* already done */
     if (game_term == t) {
-        return 1;
+        return;
     }
 
     /* Deactivate the old Term */
@@ -2034,17 +2209,15 @@ errr term_activate(term_type *t)
     if (game_term) {
         term_xtra(TERM_XTRA_LEVEL, 1);
     }
-
-    return 0;
 }
 
-/*
+/*!
  * Initialize a term, using a window of the given size.
  * Also prepare the "input queue" for "k" keypresses
  * By default, the cursor starts out "invisible"
  * By default, we "erase" using "black spaces"
  */
-errr term_init(term_type *t, TERM_LEN w, TERM_LEN h, int k)
+void term_init(term_type *t, int w, int h, int k)
 {
     /* Wipe it */
     *t = term_type{};
@@ -2096,11 +2269,10 @@ errr term_init(term_type *t, TERM_LEN w, TERM_LEN h, int k)
     t->wipe_hook = term_wipe_hack;
     t->text_hook = term_text_hack;
     t->pict_hook = term_pict_hack;
-    return 0;
 }
 
 #ifdef JP
-/*
+/*!
  * Move to a location and, using an attr, add a string vertically
  */
 void term_putstr_v(int x, int y_initial, size_t n, uint8_t color, std::string_view sv)
@@ -2119,7 +2291,7 @@ void term_putstr_v(int x, int y_initial, size_t n, uint8_t color, std::string_vi
 
             i++;
             y++;
-            if (sv[i] == '\0') {
+            if ((i >= sv.length()) || (sv[i] == '\0')) {
                 break;
             }
 
@@ -2135,7 +2307,7 @@ void term_putstr_v(int x, int y_initial, size_t n, uint8_t color, std::string_vi
 }
 #endif
 
-#ifndef WINDOWS
+#ifndef _WIN32
 errr term_nuke(term_type *t)
 {
     if (t->active_flag) {

@@ -2,9 +2,9 @@
 #include "artifact/random-art-effects.h"
 #include "load/old/item-flag-types-savefile50.h"
 #include "save/save-util.h"
-#include "system/baseitem/baseitem-definition.h"
-#include "system/baseitem/baseitem-list.h"
-#include "system/item-entity.h"
+#include "system/baseitem/baseitem-record.h"
+#include "system/baseitem/baseitem-records.h"
+#include "system/item/item-entity.h"
 #include "util/bit-flags-calculator.h"
 #include "util/enum-converter.h"
 
@@ -59,7 +59,7 @@ static BIT_FLAGS write_item_flags(const ItemEntity &item)
         set_bits(flags, SaveDataItemFlagType::DS);
     }
 
-    if (item.ident) {
+    if (item.any_identification_flag()) {
         set_bits(flags, SaveDataItemFlagType::IDENT);
     }
 
@@ -167,7 +167,7 @@ static void write_item_info(const ItemEntity &item, const BIT_FLAGS flags)
     }
 
     if (any_bits(flags, SaveDataItemFlagType::IDENT)) {
-        wr_byte(item.ident);
+        wr_FlagGroup(item.get_identification_flags(), wr_byte);
     }
 
     if (any_bits(flags, SaveDataItemFlagType::MARKED)) {
@@ -275,14 +275,23 @@ void wr_item(const ItemEntity &item)
 void wr_perception(short bi_id)
 {
     byte tmp8u = 0;
-    const auto &baseitem = BaseitemList::get_instance().get_baseitem(bi_id);
-    if (baseitem.aware) {
+    const auto &baseitem_record = BaseitemRecords::get_instance().get_record(bi_id);
+    if (baseitem_record.is_aware()) {
         tmp8u |= 0x01;
     }
 
-    if (baseitem.tried) {
+    if (baseitem_record.is_tried()) {
         tmp8u |= 0x02;
     }
 
     wr_byte(tmp8u);
+}
+
+void wr_baseitem_records()
+{
+    const auto count = static_cast<uint16_t>(BaseitemRecords::get_instance().size());
+    wr_u16b(count);
+    for (uint16_t index = 0; index < count; index++) {
+        wr_perception(static_cast<short>(index));
+    }
 }

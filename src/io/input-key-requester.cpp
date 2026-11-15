@@ -11,13 +11,14 @@
 #include "game-option/map-screen-options.h"
 #include "inventory/inventory-slot-types.h"
 #include "io/cursor.h"
+#include "io/input-context.h"
 #include "io/input-key-acceptor.h"
 #include "io/macro-configurations-store.h"
 #include "main/sound-of-music.h"
 #include "player-base/player-class.h"
 #include "save/save.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h" //!< @todo 相互依存している、後で何とかする.
 #include "util/int-char-converter.h"
@@ -26,6 +27,7 @@
 #include "window/display-sub-windows.h"
 #include "window/main-window-util.h"
 #include "world/world.h"
+#include <fmt/format.h>
 
 bool use_menu;
 
@@ -113,7 +115,12 @@ short InputKeyRequestor::get_command()
     num_more = 0;
     inkey_flag = true;
     term_fresh();
-    short cmd = inkey(true);
+    short cmd;
+    {
+        const InputContextScope input_context({ InputKind::COMMAND, "", CommandInputDetails{ this->shopping } });
+        cmd = inkey(true);
+    }
+
     if (!this->shopping && command_menu && ((cmd == '\r') || (cmd == '\n') || (cmd == 'x') || (cmd == 'X')) && !keymap_actions_map[this->mode][(byte)(cmd)]) {
         cmd = this->inkey_from_menu();
     }
@@ -174,7 +181,7 @@ char InputKeyRequestor::input_repeat_num()
         auto cmd = inkey();
         if ((cmd == 0x7F) || (cmd == KTRL('H'))) {
             command_arg = command_arg / 10;
-            prt(format(_("回数: %d", "Count: %d"), command_arg), 0, 0);
+            prt(fmt::format(_("回数: {}", "Count: {}"), command_arg), 0, 0);
             continue;
         }
 
@@ -186,7 +193,7 @@ char InputKeyRequestor::input_repeat_num()
                 command_arg = command_arg * 10 + D2I(cmd);
             }
 
-            prt(format(_("回数: %d", "Count: %d"), command_arg), 0, 0);
+            prt(fmt::format(_("回数: {}", "Count: {}"), command_arg), 0, 0);
             continue;
         }
 
@@ -194,6 +201,12 @@ char InputKeyRequestor::input_repeat_num()
     }
 }
 
+/*!
+ * @brief 回数の入力 (0 に続けて数字) を処理する
+ * @param cmd 入力したキー。回数の入力を終えたキーに置き換え、「コマンド:」でコマンドを入力したときはさらにそのコマンドに置き換える
+ * @return コマンドの入力をやり直すなら true、cmd をコマンドとして処理するなら false
+ * @details 回数をスペースや Enter で終えたときは「コマンド:」でコマンドを尋ね、取り消したときだけ回数を消してやり直す。
+ */
 bool InputKeyRequestor::process_repeat_num(short &cmd)
 {
     if (cmd != '0') {
@@ -206,20 +219,23 @@ bool InputKeyRequestor::process_repeat_num(short &cmd)
     cmd = this->input_repeat_num();
     if (command_arg == 0) {
         command_arg = 99;
-        prt(format(_("回数: %d", "Count: %d"), command_arg), 0, 0);
+        prt(fmt::format(_("回数: {}", "Count: {}"), command_arg), 0, 0);
     }
 
     if (old_arg != 0) {
         command_arg = old_arg;
-        prt(format(_("回数: %d", "Count: %d"), command_arg), 0, 0);
+        prt(fmt::format(_("回数: {}", "Count: {}"), command_arg), 0, 0);
     }
 
     if ((cmd != ' ') && (cmd != '\n') && (cmd != '\r')) {
         return false;
     }
 
-    const auto ret_cmd = input_command(_("コマンド: ", "Command: "));
-    cmd = ret_cmd.value_or(ESCAPE);
+    if (const auto ret_cmd = input_command(_("コマンド: ", "Command: "))) {
+        cmd = *ret_cmd;
+        return false;
+    }
+
     command_arg = 0;
     return true;
 }
@@ -305,8 +321,8 @@ int InputKeyRequestor::get_caret_command() const
 void InputKeyRequestor::sweep_confirmation_equipments()
 {
     auto caret_command = this->get_caret_command();
-    for (auto i = enum2i(INVEN_MAIN_HAND); i < INVEN_TOTAL; i++) {
-        auto &item = *this->player_ptr->inventory[i];
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        auto &item = *this->player_ptr->inventory[i_idx];
         if (!item.is_valid() || !item.is_inscribed()) {
             continue;
         }

@@ -18,6 +18,8 @@
 #include "system/terrain/terrain-definition.h"
 #include "target/projection-path-calculator.h"
 #include "timed-effect/timed-effects.h"
+#include "util/bit-flags-calculator.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 #include <range/v3/view.hpp>
@@ -60,10 +62,10 @@ static void cave_temp_room_lite(PlayerType *player_ptr, const std::vector<Pos2D>
             }
 
             if (monster.is_asleep() && evaluate_percent(chance)) {
-                (void)set_monster_csleep(player_ptr, grid.m_idx, 0);
+                (void)set_monster_csleep(*player_ptr->current_floor_ptr, grid.m_idx, 0);
                 if (monster.ml) {
                     const auto m_name = monster_desc(player_ptr, monster, 0);
-                    msg_format(_("%s^が目を覚ました。", "%s^ wakes up."), m_name.data());
+                    msg_print(_("{}が目を覚ました。", "{} wakes up."), str_upcase_first(m_name));
                 }
             }
         }
@@ -293,7 +295,7 @@ void unlite_room(PlayerType *player_ptr, const Pos2D &pos_start)
  */
 bool starlight(PlayerType *player_ptr, bool magic)
 {
-    if (!player_ptr->effects()->blindness().is_blind() && !magic) {
+    if (!player_ptr->effects()->blindness().is_active() && !magic) {
         msg_print(_("杖の先が明るく輝いた...", "The end of the staff glows brightly..."));
     }
 
@@ -303,7 +305,7 @@ bool starlight(PlayerType *player_ptr, bool magic)
         Pos2D pos(0, 0);
         auto attempts = 1000;
         while (attempts--) {
-            pos = scatter(player_ptr, p_pos, 4, PROJECT_LOS);
+            pos = scatter(*player_ptr->current_floor_ptr, p_pos, 4, PROJECT_LOS);
             if (!player_ptr->current_floor_ptr->has_terrain_characteristics(pos, TerrainCharacteristics::PROJECTION)) {
                 continue;
             }
@@ -334,7 +336,7 @@ bool lite_area(PlayerType *player_ptr, int dam, int rad)
         return false;
     }
 
-    if (!player_ptr->effects()->blindness().is_blind()) {
+    if (!player_ptr->effects()->blindness().is_active()) {
         msg_print(_("白い光が辺りを覆った。", "You are surrounded by a white light."));
     }
 
@@ -355,7 +357,7 @@ bool lite_area(PlayerType *player_ptr, int dam, int rad)
  */
 bool unlite_area(PlayerType *player_ptr, int dam, int rad)
 {
-    if (!player_ptr->effects()->blindness().is_blind()) {
+    if (!player_ptr->effects()->blindness().is_active()) {
         msg_print(_("暗闇が辺りを覆った。", "Darkness surrounds you."));
     }
 

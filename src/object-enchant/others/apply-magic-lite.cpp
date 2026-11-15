@@ -3,7 +3,7 @@
 #include "inventory/inventory-slot-types.h"
 #include "object-enchant/object-ego.h"
 #include "sv-definition/sv-lite-types.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 
 LiteEnchanter::LiteEnchanter(PlayerType *player_ptr, ItemEntity *o_ptr, int power)
@@ -36,6 +36,10 @@ void LiteEnchanter::apply_magic()
     }
 
     if ((this->power == 2) || ((this->power == 1) && one_in_(3))) {
+        if (const auto &ego = this->get_specific_ego_request()) {
+            this->o_ptr->ego_idx = *ego;
+            return;
+        }
         while (!this->o_ptr->is_ego()) {
             this->give_ego_index();
         }

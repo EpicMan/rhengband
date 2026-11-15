@@ -25,8 +25,6 @@ public:
     BaseitemDefinition(BaseitemDefinition &&) = default;
     BaseitemDefinition &operator=(BaseitemDefinition &&) = delete;
 
-    short idx{};
-
     std::string name; /*!< ベースアイテム名 */
     std::string text; /*!< 解説テキスト */
     std::string flavor_name; /*!< 未確定名 */
@@ -55,24 +53,23 @@ public:
     };
 
     std::array<alloc_table, 4> alloc_tables{}; /*!< ベースアイテムの生成テーブル */
-    DisplaySymbol symbol_definition; //!< 定義上のシンボル (色/文字).
+    bool natural_generation = true; /*!< 生成テーブルによる自然生成の対象か (false なら生成テーブルを持たず、特定の経路でだけ作られる) */
     bool easy_know{}; /*!< ベースアイテムが初期からベース名を判断可能かどうか / This object is always known (if aware) */
     RandomArtActType act_idx{}; /*!< 発動能力のID /  Activative ability index */
 
+    BaseitemDefinition clone_without_required_fields() const;
     bool is_valid() const;
+    bool has_allocation() const;
+    bool is_knowledge_candidate() const;
     std::string stripped_name() const;
     bool order_cost(const BaseitemDefinition &other) const;
     void decide_easy_know();
 
-    /* @todo ここから下はBaseitemDefinitions.txt に依存しないミュータブルなフィールド群なので、将来的に分離予定 */
+    const DisplaySymbol &get_symbol() const;
+    void init_symbol(const DisplaySymbol &ds);
+    void init_color(uint8_t color);
+    void init_character(char character);
 
-    DisplaySymbol symbol_config; //!< ユーザ個別の設定シンボル (色/文字).
-
-    short flavor{}; /*!< 未鑑定名の何番目を当てるか(0は未鑑定名なし) / Special object flavor (or zero) */
-    bool aware{}; /*!< ベースアイテムが鑑定済かどうか /  The player is "aware" of the item's effects */
-    bool tried{}; /*!< ベースアイテムを未鑑定のまま試したことがあるか /  The player has "tried" one of the items */
-
-    void mark_trial(bool state);
-    void mark_awareness(bool state);
-    void reset_visual();
+private:
+    DisplaySymbol symbol_definition; //!< 定義上のシンボル (色/文字).
 };

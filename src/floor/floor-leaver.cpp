@@ -1,5 +1,4 @@
 #include "floor/floor-leaver.h"
-#include "dungeon/quest.h"
 #include "floor/floor-mode-changer.h"
 #include "floor/floor-save-util.h"
 #include "floor/floor-save.h"
@@ -12,24 +11,26 @@
 #include "monster-floor/monster-remover.h"
 #include "monster/monster-describer.h"
 #include "monster/monster-description-types.h"
-#include "pet/pet-util.h"
 #include "save/floor-writer.h"
 #include "spell-class/spells-mirror-master.h"
-#include "system/artifact-type-definition.h"
 #include "system/dungeon/dungeon-definition.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/enums/dungeon/dungeon-id.h"
 #include "system/floor/floor-info.h"
 #include "system/floor/wilderness-grid.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
+#include "system/monster-entity.h"
 #include "system/player-type-definition.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/projection-path-calculator.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
-#include <system/dungeon/dungeon-record.h>
+#include <fmt/format.h>
 
 static void check_riding_preservation(PlayerType *player_ptr)
 {
@@ -37,14 +38,16 @@ static void check_riding_preservation(PlayerType *player_ptr)
         return;
     }
 
-    const auto &monster = player_ptr->current_floor_ptr->m_list[player_ptr->riding];
+    const auto riding_m_idx = player_ptr->riding;
+    const auto &monster = player_ptr->current_floor_ptr->m_list[riding_m_idx];
     if (monster.has_parent()) {
-        player_ptr->ride_monster(0);
-        player_ptr->pet_extra_flags &= ~(PF_TWO_HANDS);
-        player_ptr->riding_ryoute = player_ptr->old_riding_ryoute = false;
+        player_ptr->dismount();
     } else {
         party_mon[0] = monster.clone();
-        delete_monster_idx(player_ptr, player_ptr->riding);
+        // 新しい階で乗り直すので、両手持ちの設定などは戻さずに降りてから消す。
+        // 乗ったまま消すと、delete_monster_idx() が dismount() で設定を戻してしまう
+        player_ptr->ride_monster(0);
+        delete_monster_idx(player_ptr, riding_m_idx);
     }
 }
 
@@ -131,7 +134,7 @@ static void preserve_pet(PlayerType *player_ptr)
 
         if (is_seen(player_ptr, monster)) {
             const auto m_name = monster_desc(player_ptr, monster, 0);
-            msg_format(_("%sは消え去った！", "%s^ disappears!"), m_name.data());
+            msg_print(_("{}は消え去った！", "{} disappears!"), str_upcase_first(m_name));
         }
 
         delete_monster_idx(player_ptr, i);
@@ -155,7 +158,7 @@ static void locate_connected_stairs(PlayerType *player_ptr, FloorType &floor, sa
         const auto &terrain = grid.get_terrain();
         auto ok = false;
         if (fcms->has(FloorChangeMode::UP)) {
-            if (terrain.flags.has_all_of({ TerrainCharacteristics::LESS, TerrainCharacteristics::STAIRS }) && terrain.flags.has_not(TerrainCharacteristics::SPECIAL)) {
+            if (terrain.flags.has_all_of({ TerrainCharacteristics::UP_STAIRS, TerrainCharacteristics::STAIRS }) && terrain.flags.has_not(TerrainCharacteristics::SPECIAL)) {
                 ok = true;
                 if (grid.special && grid.special == sf_ptr->upper_floor_id) {
                     sx = pos.x;
@@ -163,7 +166,7 @@ static void locate_connected_stairs(PlayerType *player_ptr, FloorType &floor, sa
                 }
             }
         } else if (fcms->has(FloorChangeMode::DOWN)) {
-            if (terrain.flags.has_all_of({ TerrainCharacteristics::MORE, TerrainCharacteristics::STAIRS }) && terrain.flags.has_not(TerrainCharacteristics::SPECIAL)) {
+            if (terrain.flags.has_all_of({ TerrainCharacteristics::DOWN_STAIRS, TerrainCharacteristics::STAIRS }) && terrain.flags.has_not(TerrainCharacteristics::SPECIAL)) {
                 ok = true;
                 if (grid.special && grid.special == sf_ptr->lower_floor_id) {
                     sx = pos.x;
@@ -279,14 +282,14 @@ static void preserve_info(PlayerType *player_ptr)
         delete_monster_idx(player_ptr, i);
     }
 
-    for (short i = 0; i < INVEN_PACK; i++) {
-        auto *o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        auto *o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
 
         if (o_ptr->is_fixed_artifact()) {
-            o_ptr->get_fixed_artifact().floor_id = 0;
+            o_ptr->set_fixed_artifact_floor_id(tl::nullopt);
         }
     }
 }
@@ -329,29 +332,13 @@ static void jump_floors(FloorType &floor)
     }
 
     const auto &dungeon = floor.get_dungeon_definition();
-    if (permanent_descent) {
-        auto &dungeon_record = DungeonRecords::get_instance().get_record(floor.dungeon_id);
-
-        if (fcms->has(FloorChangeMode::DOWN)) {
-            if (!floor.is_underground()) {
-                if (dungeon_record.has_entered()) {
-                    move_num = dungeon_record.get_max_level();
-                } else {
-                    move_num = dungeon.mindepth;
-                }
-            }
-        } else if (fcms->has(FloorChangeMode::UP)) {
-                move_num = -floor.dun_level;
-            }
-    } else {
-        if (fcms->has(FloorChangeMode::DOWN)) {
-            if (!floor.is_underground()) {
-                move_num = dungeon.mindepth;
-            }
-        } else if (fcms->has(FloorChangeMode::UP)) {
-            if (floor.dun_level + move_num < dungeon.mindepth) {
-                move_num = -floor.dun_level;
-            }
+    if (fcms->has(FloorChangeMode::DOWN)) {
+        if (!floor.is_underground()) {
+            move_num = dungeon.mindepth;
+        }
+    } else if (fcms->has(FloorChangeMode::UP)) {
+        if (floor.dun_level + move_num < dungeon.mindepth) {
+            move_num = -floor.dun_level;
         }
     }
 
@@ -443,6 +430,14 @@ static void exe_leave_floor(PlayerType *player_ptr, saved_floor_type *sf_ptr)
     floor.forget_lite();
     floor.forget_view();
     floor.forget_mon_lite();
+
+    // 一時的なフラグと見えているかどうかはこの階にいる間だけのものなので、戻ったときに離れたときの状態で判定しないよう消してから保存する
+    for (short m_idx = 1; m_idx < floor.m_max; m_idx++) {
+        auto &monster = floor.m_list[m_idx];
+        monster.mflag.clear();
+        monster.ml = false;
+    }
+
     if (save_floor(player_ptr, sf_ptr, 0)) {
         return;
     }

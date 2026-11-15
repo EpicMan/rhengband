@@ -3,7 +3,7 @@
 #include "core/show-file.h"
 #include "game-option/play-record-options.h"
 #include "io/files-util.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "io/record-play-movie.h"
 #include "io/write-diary.h"
 #include "main/sound-of-music.h"
@@ -12,7 +12,6 @@
 #include "system/player-type-definition.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
-#include "term/z-form.h"
 #include "util/angband-files.h"
 #include "util/int-char-converter.h"
 #include "view/display-messages.h"
@@ -31,9 +30,9 @@ static void display_diary(PlayerType *player_ptr)
     const auto choice = Rand_external(subtitle_candidates.size());
     const auto &subtitle = subtitle_candidates[choice];
 #ifdef JP
-    const auto diary_title = format("「%s%s%sの伝説 -%s-」", ap_ptr->title.data(), ap_ptr->no ? "の" : "", player_ptr->name, subtitle.data());
+    const auto diary_title = fmt::format("「{}{}{}の伝説 -{}-」", ap_ptr->title, ap_ptr->no ? "の" : "", player_ptr->name, subtitle);
 #else
-    const auto diary_title = format("Legend of %s %s '%s'", ap_ptr->title.data(), player_ptr->name, subtitle.data());
+    const auto diary_title = fmt::format("Legend of {} {} '{}'", ap_ptr->title, player_ptr->name, subtitle);
 #endif
 
     std::stringstream ss;
@@ -92,10 +91,10 @@ static void do_cmd_erase_diary()
     auto *fff = angband_fopen(path, FileOpenMode::WRITE);
     if (fff) {
         angband_fclose(fff);
-        msg_format(_("記録を消去しました。", "deleted record."));
+        msg_print(_("記録を消去しました。", "deleted record."));
     } else {
         const auto &filename = path.string();
-        msg_format(_("%s の消去に失敗しました。", "failed to delete %s."), filename.data());
+        msg_print(_("{} の消去に失敗しました。", "failed to delete {}."), filename);
     }
 
     msg_erase();
@@ -118,8 +117,9 @@ void do_cmd_diary(PlayerType *player_ptr)
         prt(_("(3) 直前に入手又は鑑定したものを記録する", "(3) Record the last item you got or identified"), 6, 5);
         prt(_("(4) 記録を消去する", "(4) Delete your record"), 7, 5);
         prt(_("(R) プレイ動画を記録する/中止する", "(R) Record playing movie / or stop it"), 9, 5);
-        prt(_("コマンド:", "Command: "), 18, 0);
-        int i = inkey();
+        constexpr auto prompt = _("コマンド:", "Command: ");
+        prt(prompt, 18, 0);
+        const auto i = input_key_with_context(InputKind::COMMAND_CHAR, prompt);
         if (i == ESCAPE) {
             break;
         }

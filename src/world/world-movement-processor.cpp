@@ -10,14 +10,16 @@
 #include "main/sound-definitions-table.h"
 #include "main/sound-of-music.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/dungeon/dungeon-record.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/enums/dungeon/dungeon-id.h"
 #include "system/floor/floor-info.h"
 #include "system/floor/wilderness-grid.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/enum-range.h"
 #include "view/display-messages.h"
 #include "world/world.h"
@@ -71,7 +73,7 @@ void execute_recall(PlayerType *player_ptr)
     }
 
     player_ptr->word_recall--;
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
     if (player_ptr->word_recall != 0) {
         return;
     }
@@ -155,7 +157,7 @@ void execute_floor_reset(PlayerType *player_ptr)
     }
 
     player_ptr->alter_reality--;
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
     if (player_ptr->alter_reality != 0) {
         return;
     }

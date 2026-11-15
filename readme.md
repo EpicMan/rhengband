@@ -64,6 +64,8 @@
   ./hengband -g -- -b -n<ウィンドウ数>
   ```
 
+**効果音・BGM・タイル:** 効果音、BGM (mp3)、8x8 のタイルは、`lib/xtra` サブモジュールの [hengband.xtra](https://github.com/hengband/hengband.xtra) にあります。git でクローンした場合は `git submodule update --init lib/xtra` で入手できます。GitHub が自動で作るソースのアーカイブ (Source code) では `lib/xtra` が空のディレクトリになり、`make dist` で作ったアーカイブには容量の都合で BGM が含まれません。その場合は hengband.xtra を入手し、中身を `lib/xtra` に置いてください。setgid でインストールする場合 (`./configure --with-setgid=games` の後に `make install`) は、`./configure` の前に置いてください。
+
 ## 🎮 遊び方ガイド
 
 ### 冒険の第一歩
@@ -250,6 +252,8 @@ Windows/Macではメニューから、Linuxでは起動オプションでグラ�
 
 * **GitHubリポジトリ:** [https://github.com/hengband/hengband](https://github.com/hengband/hengband)
 * **Issue Tracker:** [https://github.com/hengband/hengband/issues](https://github.com/hengband/hengband/issues)
+* **ユニットテスト:** [src/test/README.md](src/test/README.md) — テストの実行方法と追加手順
+* **ゲーム制御サーバ:** [tools/bot/README.md](tools/bot/README.md) — 外部プログラムからゲームを操作・観測する
 
 ## 📚 その他の情報
 

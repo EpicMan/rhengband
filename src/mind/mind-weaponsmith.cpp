@@ -8,7 +8,7 @@
 #include "floor/floor-object.h"
 #include "game-option/text-display-options.h"
 #include "io/command-repeater.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "io/input-key-requester.h"
 #include "main/sound-of-music.h"
 #include "object-enchant/tr-types.h"
@@ -17,12 +17,11 @@
 #include "player-status/player-energy.h"
 #include "smith/object-smith.h"
 #include "smith/smith-types.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
-#include "term/z-form.h"
 #include "util/bit-flags-calculator.h"
 #include "util/int-char-converter.h"
 #include "view/display-messages.h"
@@ -72,11 +71,12 @@ static void display_essence(PlayerType *player_ptr)
         for (auto num = 0U, ei = page * essence_num_per_page; (num < essence_num_per_page) && (ei < essences.size()); ++num, ++ei) {
             auto name = Smith::get_essence_name(essences[ei]);
             auto amount = smith.get_essence_num_of_posessions(essences[ei]);
-            prt(format("%-11s %5d", name, amount), 2 + num % row_count, 8 + (num / row_count) * column_width);
+            prt(fmt::format("{:<11} {:5}", fmt::bytes(name), amount), 2 + num % row_count, 8 + (num / row_count) * column_width);
         }
 
-        prt(fmt::format(_("現在所持しているエッセンス {}/{}", "List of all essences you have. {}/{}"), (page + 1), page_max), 0, 0);
-        const auto key = inkey();
+        const auto prompt = fmt::format(_("現在所持しているエッセンス {}/{}", "List of all essences you have. {}/{}"), (page + 1), page_max);
+        prt(prompt, 0, 0);
+        const auto key = input_key_with_context(InputKind::COMMAND_CHAR, prompt);
         if (key == ESCAPE) {
             break;
         }
@@ -103,43 +103,30 @@ static void display_essence(PlayerType *player_ptr)
     screen_load();
 }
 
-static void set_smith_redrawing_flags()
-{
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags = {
-        StatusRecalculatingFlag::COMBINATION,
-        StatusRecalculatingFlag::REORDER,
-    };
-    rfu.set_flags(flags);
-    rfu.set_flag(SubWindowRedrawingFlag::INVENTORY);
-}
-
 /*!
  * @brief エッセンスの抽出処理
  * @param player_ptr プレイヤーへの参照ポインタ
  */
 static void drain_essence(PlayerType *player_ptr)
 {
-    auto q = _("どのアイテムから抽出しますか？", "Extract from which item? ");
-    auto s = _("抽出できるアイテムがありません。", "You have nothing you can extract from.");
-
-    short i_idx;
+    constexpr auto q = _("どのアイテムから抽出しますか？", "Extract from which item? ");
+    constexpr auto s = _("抽出できるアイテムがありません。", "You have nothing you can extract from.");
     constexpr auto options = USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT;
-    auto o_ptr = choose_object(player_ptr, &i_idx, q, s, options, FuncItemTester(&ItemEntity::is_weapon_armour_ammo));
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, options, FuncItemTester(&ItemEntity::is_weapon_armour_ammo));
+    if (!item) {
         return;
     }
 
-    if (o_ptr->is_known() && !o_ptr->is_nameless()) {
-        const auto item_name = describe_flavor(player_ptr, *o_ptr, (OD_OMIT_PREFIX | OD_NAME_ONLY));
-        if (!input_check(format(_("本当に%sから抽出してよろしいですか？", "Really extract from %s? "), item_name.data()))) {
+    if (item->is_known() && !item->is_nameless()) {
+        const auto item_name = describe_flavor(player_ptr, *item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
+        if (!input_check(fmt::format(_("本当に{}から抽出してよろしいですか？", "Really extract from {}? "), item_name))) {
             return;
         }
     }
 
     PlayerEnergy(player_ptr).set_player_turn_energy(100);
 
-    auto drain_result = Smith(player_ptr).drain_essence(o_ptr);
+    auto drain_result = Smith(player_ptr).drain_essence(item.get());
 
     if (drain_result.empty()) {
         msg_print(_("エッセンスは抽出できませんでした。", "You were not able to extract any essence."));
@@ -149,13 +136,15 @@ static void drain_essence(PlayerType *player_ptr)
         for (const auto &[essence, amount] : drain_result) {
             auto essence_name = Smith::get_essence_name(essence);
             msg_erase();
-            msg_format("%s...%d%s", essence_name, amount, _("。", ". "));
+            msg_print(_("{}...{}。", "{}...{}. "), essence_name, amount);
         }
     }
 
     /* Apply autodestroy/inscription to the drained item */
     autopick_alter_item(player_ptr, i_idx, true);
-    set_smith_redrawing_flags();
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_inventory_arrangement();
+    dur.request_item_lists_redrawing();
 }
 
 /*!
@@ -184,15 +173,15 @@ static COMMAND_CODE choose_essence(void)
             int i;
             for (i = 0; i < mode_max; i++) {
 #ifdef JP
-                prt(format(" %s %s", (menu_line == 1 + i) ? "》" : "  ", menu_name[i]), 2 + i, 14);
+                prt(fmt::format(" {} {}", (menu_line == 1 + i) ? "》" : "  ", menu_name[i]), 2 + i, 14);
 #else
-                prt(format(" %s %s", (menu_line == 1 + i) ? "> " : "  ", menu_name[i]), 2 + i, 14);
+                prt(fmt::format(" {} {}", (menu_line == 1 + i) ? "> " : "  ", menu_name[i]), 2 + i, 14);
 #endif
             }
 
-            prt(_("どの種類のエッセンス付加を行いますか？", "Choose from menu."), 0, 0);
-
-            choice = inkey();
+            constexpr auto prompt = _("どの種類のエッセンス付加を行いますか？", "Choose from menu.");
+            prt(prompt, 0, 0);
+            choice = input_key_with_context(InputKind::COMMAND_CHAR, prompt);
             switch (choice) {
             case ESCAPE:
             case 'z':
@@ -225,7 +214,7 @@ static COMMAND_CODE choose_essence(void)
         screen_save();
         while (mode == 0) {
             for (short i = 0; i < mode_max; i++) {
-                prt(format("  %c) %s", 'a' + i, menu_name[i]), 2 + i, 14);
+                prt(fmt::format("  {:c}) {}", 'a' + i, menu_name[i]), 2 + i, 14);
             }
 
             const auto new_choice = input_command(_("何を付加しますか:", "Command :"));
@@ -268,9 +257,9 @@ static void display_smith_effect_list(const Smith &smith, const std::vector<Smit
     }
 
 #ifdef JP
-    prt(format("   %-45s %6s/%s", "能力(必要エッセンス)", "所持数", "必要数"), 1, x);
+    prt(fmt::format("   {:<45} {:>6}/{}", fmt::bytes("能力(必要エッセンス)"), fmt::bytes("所持数"), "必要数"), 1, x);
 #else
-    prt(format("   %-44s %7s/%s", "Ability (needed essence)", "Possess", "Needs"), 1, x);
+    prt(fmt::format("   {:<44} {:>7}/{}", fmt::bytes("Ability (needed essence)"), fmt::bytes("Possess"), "Needs"), 1, x);
 #endif
 
     for (int ctr = 0U, ei = start_idx; ctr < line_max && ei < static_cast<int>(smith_effect_list.size()); ++ctr, ++ei) {
@@ -291,15 +280,15 @@ static void display_smith_effect_list(const Smith &smith, const std::vector<Smit
         title << Smith::get_effect_name(effect);
         title << "(" << Smith::get_need_essences_desc(effect) << ")";
 
-        char str[160];
+        std::string str;
         auto consumption = Smith::get_essence_consumption(effect);
         auto need_essences = Smith::get_need_essences(effect);
         if (need_essences.size() == 1) {
             auto essence = need_essences.front();
             auto amount = smith.get_essence_num_of_posessions(essence);
-            snprintf(str, sizeof(str), "%-49s %5d/%d", title.str().data(), amount, consumption);
+            str = fmt::format("{:<49} {:5}/{}", fmt::bytes(title.str()), amount, consumption);
         } else {
-            snprintf(str, sizeof(str), "%-49s  (\?\?)/%d", title.str().data(), consumption);
+            str = fmt::format("{:<49}  (\?\?)/{}", fmt::bytes(title.str()), consumption);
         }
 
         auto col = (smith.get_addable_count(effect) > 0) ? TERM_WHITE : TERM_RED;
@@ -329,19 +318,20 @@ static void add_essence(PlayerType *player_ptr, SmithCategoryType mode)
     if (effect_index < 0 || effect_index >= smith_effect_list_max) {
         flag = false;
         screen_save();
+        const auto first_label = I2A(0);
         while (!flag) {
             std::string prompt;
             if (page_max > 1) {
-                const auto page_str = format("%d/%d", page + 1, page_max);
-                prompt = format(_("(SPACEで次ページ, ESCで中断) どの能力を付加しますか？ %s", "(SPACE=next, ESC=exit) Add which ability? %s"), page_str.data());
+                prompt = fmt::format(_("(SPACEで次ページ, ESCで中断) どの能力を付加しますか？ {}/{}", "(SPACE=next, ESC=exit) Add which ability? {}/{}"), page + 1, page_max);
             } else {
-                prompt = format(_("(ESCで中断) どの能力を付加しますか？", "(ESC=exit) Add which ability? "));
+                prompt = _("(ESCで中断) どの能力を付加しますか？", "(ESC=exit) Add which ability? ");
             }
 
             display_smith_effect_list(smith, smith_effect_list, menu_line, page * effect_num_per_page, effect_num_per_page);
 
             const auto page_effect_num = std::min<int>(effect_num_per_page, smith_effect_list.size() - (page * effect_num_per_page));
-            const auto choice = input_command(prompt);
+            const auto last_label = I2A(page_effect_num - 1);
+            const auto choice = input_spell_choice(prompt, { .first_label = first_label, .last_label = last_label, .list = true, .menu = use_menu });
             if (!choice) {
                 break;
             }
@@ -417,8 +407,9 @@ static void add_essence(PlayerType *player_ptr, SmithCategoryType mode)
             }
 
             effect_index = page * effect_num_per_page + i;
-            /* Totally Illegal */
-            if ((effect_index < 0) || (effect_index >= smith_effect_list_max) || smith.get_addable_count(smith_effect_list[effect_index]) <= 0) {
+            // 表示しているページのラベルの外のキー (w〜z・最後のページの能力の無い行・記号など) で、ほかのページの能力を選ばない。
+            // 付加できない能力も選ばない
+            if ((i < 0) || (i >= page_effect_num) || smith.get_addable_count(smith_effect_list[effect_index]) <= 0) {
                 bell();
                 continue;
             }
@@ -442,19 +433,18 @@ static void add_essence(PlayerType *player_ptr, SmithCategoryType mode)
 
     constexpr auto q = _("どのアイテムを改良しますか？", "Improve which item? ");
     constexpr auto s = _("改良できるアイテムがありません。", "You have nothing to improve.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT), *item_tester);
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT), *item_tester);
+    if (!item) {
         return;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, (OD_OMIT_PREFIX | OD_NAME_ONLY));
-    const auto use_essence = Smith::get_essence_consumption(effect, o_ptr);
-    if (o_ptr->number > 1) {
-        msg_format(_("%d個あるのでエッセンスは%d必要です。", "For %d items, it will take %d essences."), o_ptr->number, use_essence);
+    const auto item_name = describe_flavor(player_ptr, *item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
+    const auto use_essence = Smith::get_essence_consumption(effect, item.get());
+    if (item->number > 1) {
+        msg_print(_("{}個あるのでエッセンスは{}必要です。", "For {} items, it will take {} essences."), item->number, use_essence);
     }
 
-    if (smith.get_addable_count(effect, o_ptr) == 0) {
+    if (smith.get_addable_count(effect, item.get()) == 0) {
         msg_print(_("エッセンスが足りない。", "You don't have enough essences."));
         return;
     }
@@ -463,25 +453,25 @@ static void add_essence(PlayerType *player_ptr, SmithCategoryType mode)
     const auto attribute_flags = Smith::get_effect_tr_flags(effect);
     auto add_essence_count = 1;
     if (attribute_flags.has_any_of(TR_PVAL_FLAG_MASK)) {
-        if (o_ptr->pval < 0) {
+        if (item->pval < 0) {
             msg_print(_("このアイテムの能力修正を強化することはできない。", "You cannot increase magic number of this item."));
             return;
         } else if (attribute_flags.has(TR_BLOWS)) {
-            if ((o_ptr->pval > 1) && !input_check(_("修正値は1になります。よろしいですか？", "The magic number of this weapon will become 1. Are you sure? "))) {
+            if ((item->pval > 1) && !input_check(_("修正値は1になります。よろしいですか？", "The magic number of this weapon will become 1. Are you sure? "))) {
                 return;
             }
-            o_ptr->pval = 1;
-        } else if (o_ptr->pval == 0) {
-            const auto limit = std::min(5, smith.get_addable_count(effect, o_ptr));
+            item->pval = 1;
+        } else if (item->pval == 0) {
+            const auto limit = std::min(5, smith.get_addable_count(effect, item.get()));
             const auto num_enchants = input_numerics<short>(prompt, 1, limit, 1);
             if (!num_enchants) {
                 return;
             }
 
-            o_ptr->pval = *num_enchants;
+            item->pval = *num_enchants;
         }
 
-        add_essence_count = o_ptr->pval;
+        add_essence_count = item->pval;
     } else if (effect == SmithEffectType::SLAY_GLOVE) {
         const auto max_val = player_ptr->lev / 7 + 3;
         const auto num_enchants = input_numerics(prompt, 1, max_val, 1);
@@ -492,24 +482,26 @@ static void add_essence(PlayerType *player_ptr, SmithCategoryType mode)
         add_essence_count = *num_enchants;
     }
 
-    msg_format(_("エッセンスを%d個使用します。", "It will take %d essences."), use_essence * add_essence_count);
+    msg_print(_("エッセンスを{}個使用します。", "It will take {} essences."), use_essence * add_essence_count);
 
-    if (smith.get_addable_count(effect, o_ptr) < add_essence_count) {
+    if (smith.get_addable_count(effect, item.get()) < add_essence_count) {
         msg_print(_("エッセンスが足りない。", "You don't have enough essences."));
         return;
     }
 
     PlayerEnergy(player_ptr).set_player_turn_energy(100);
 
-    if (!smith.add_essence(effect, o_ptr, add_essence_count)) {
+    if (!smith.add_essence(effect, item.get(), add_essence_count)) {
         msg_print(_("改良に失敗した。", "You failed to enchant."));
         return;
     }
 
     auto effect_name = Smith::get_effect_name(effect);
 
-    _(msg_format("%sに%sの能力を付加しました。", item_name.data(), effect_name), msg_format("You have added ability of %s to %s.", effect_name, item_name.data()));
-    set_smith_redrawing_flags();
+    msg_print(_("{0}に{1}の能力を付加しました。", "You have added ability of {1} to {0}."), item_name, effect_name);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_inventory_arrangement();
+    dur.request_item_lists_redrawing();
 }
 
 /*!
@@ -519,23 +511,24 @@ static void erase_essence(PlayerType *player_ptr)
 {
     constexpr auto q = _("どのアイテムのエッセンスを消去しますか？", "Remove from which item? ");
     constexpr auto s = _("エッセンスを付加したアイテムがありません。", "You have nothing with added essence to remove.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_INVEN | USE_FLOOR), FuncItemTester(&ItemEntity::is_smith));
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_INVEN | USE_FLOOR), FuncItemTester(&ItemEntity::is_smith));
+    if (!item) {
         return;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, (OD_OMIT_PREFIX | OD_NAME_ONLY));
-    if (!input_check(format(_("よろしいですか？ [%s]", "Are you sure? [%s]"), item_name.data()))) {
+    const auto item_name = describe_flavor(player_ptr, *item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
+    if (!input_check(fmt::format(_("よろしいですか？ [{}]", "Are you sure? [{}]"), item_name))) {
         return;
     }
 
     PlayerEnergy(player_ptr).set_player_turn_energy(100);
 
-    Smith(player_ptr).erase_essence(o_ptr);
+    Smith(player_ptr).erase_essence(item.get());
 
     msg_print(_("エッセンスを取り去った。", "You removed all essence you have added."));
-    set_smith_redrawing_flags();
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_inventory_arrangement();
+    dur.request_item_lists_redrawing();
 }
 
 /*!
@@ -571,23 +564,23 @@ void do_cmd_kaji(PlayerType *player_ptr, bool only_browse)
             }
 
             if (use_menu) {
+                const auto prompt = _(only_browse ? "どの種類の技術を調べますか？" : "どの種類の技術を使いますか？", "Choose command from menu.");
                 while (mode == 0) {
 #ifdef JP
-                    prt(format(" %s エッセンス一覧", (menu_line == 1) ? "》" : "  "), 2, 14);
-                    prt(format(" %s エッセンス抽出", (menu_line == 2) ? "》" : "  "), 3, 14);
-                    prt(format(" %s エッセンス消去", (menu_line == 3) ? "》" : "  "), 4, 14);
-                    prt(format(" %s エッセンス付加", (menu_line == 4) ? "》" : "  "), 5, 14);
-                    prt(format(" %s 武器/防具強化", (menu_line == 5) ? "》" : "  "), 6, 14);
-                    prt(format("どの種類の技術を%sますか？", only_browse ? "調べ" : "使い"), 0, 0);
+                    prt(fmt::format(" {} エッセンス一覧", (menu_line == 1) ? "》" : "  "), 2, 14);
+                    prt(fmt::format(" {} エッセンス抽出", (menu_line == 2) ? "》" : "  "), 3, 14);
+                    prt(fmt::format(" {} エッセンス消去", (menu_line == 3) ? "》" : "  "), 4, 14);
+                    prt(fmt::format(" {} エッセンス付加", (menu_line == 4) ? "》" : "  "), 5, 14);
+                    prt(fmt::format(" {} 武器/防具強化", (menu_line == 5) ? "》" : "  "), 6, 14);
 #else
-                    prt(format(" %s List essences", (menu_line == 1) ? "> " : "  "), 2, 14);
-                    prt(format(" %s Extract essence", (menu_line == 2) ? "> " : "  "), 3, 14);
-                    prt(format(" %s Remove essence", (menu_line == 3) ? "> " : "  "), 4, 14);
-                    prt(format(" %s Add essence", (menu_line == 4) ? "> " : "  "), 5, 14);
-                    prt(format(" %s Enchant weapon/armor", (menu_line == 5) ? "> " : "  "), 6, 14);
-                    prt(format("Choose command from menu."), 0, 0);
+                    prt(fmt::format(" {} List essences", (menu_line == 1) ? "> " : "  "), 2, 14);
+                    prt(fmt::format(" {} Extract essence", (menu_line == 2) ? "> " : "  "), 3, 14);
+                    prt(fmt::format(" {} Remove essence", (menu_line == 3) ? "> " : "  "), 4, 14);
+                    prt(fmt::format(" {} Add essence", (menu_line == 4) ? "> " : "  "), 5, 14);
+                    prt(fmt::format(" {} Enchant weapon/armor", (menu_line == 5) ? "> " : "  "), 6, 14);
 #endif
-                    const auto choice = inkey();
+                    prt(prompt, 0, 0);
+                    const auto choice = input_key_with_context(InputKind::COMMAND_CHAR, prompt);
                     switch (choice) {
                     case ESCAPE:
                     case 'z':
@@ -623,7 +616,7 @@ void do_cmd_kaji(PlayerType *player_ptr, bool only_browse)
                     prt(_("  c) エッセンス消去", "  c) Remove essence"), 4, 14);
                     prt(_("  d) エッセンス付加", "  d) Add essence"), 5, 14);
                     prt(_("  e) 武器/防具強化", "  e) Enchant weapon/armor"), 6, 14);
-                    std::string prompt = _(format("どの能力を%sますか:", only_browse ? "調べ" : "使い"), "Command :");
+                    std::string prompt = fmt::format(_("どの能力を{}ますか:", "Command :"), only_browse ? "調べ" : "使い");
                     const auto choice = input_command(prompt);
                     if (!choice) {
                         screen_load();

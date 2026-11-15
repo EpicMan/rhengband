@@ -24,12 +24,13 @@
 #include "core/asking-player.h"
 #include "core/window-redrawer.h"
 #include "flavor/flavor-describer.h"
+#include "flavor/flavor-util.h"
 #include "flavor/object-flavor-types.h"
 #include "floor/floor-object.h"
 #include "game-option/input-options.h"
 #include "inventory/inventory-object.h"
 #include "inventory/inventory-slot-types.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "io/input-key-requester.h"
 #include "locale/japanese.h"
 #include "mind/snipe-types.h"
@@ -44,6 +45,7 @@
 #include "object/item-use-flags.h"
 #include "perception/identification.h"
 #include "perception/object-perception.h"
+#include "perception/simple-perception.h"
 #include "player-base/player-class.h"
 #include "player-info/class-info.h"
 #include "player-info/race-types.h"
@@ -58,22 +60,24 @@
 #include "realm/realm-hex-numbers.h"
 #include "realm/realm-types.h"
 #include "status/action-setter.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/screen-processor.h"
-#include "term/z-form.h"
 #include "util/bit-flags-calculator.h"
 #include "util/int-char-converter.h"
 #include "util/string-processor.h"
 #include "view/display-inventory.h"
 #include "view/display-messages.h"
 #include "world/world.h"
+#include <fmt/format.h>
 
 /*!
  * @brief 持ち物一覧を表示するコマンドのメインルーチン / Display inventory_list
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param shopping 店の中のコマンドか (一覧の後に入力したキーは店のコマンドになる)
  */
-void do_cmd_inven(PlayerType *player_ptr)
+void do_cmd_inven(PlayerType *player_ptr, bool shopping)
 {
     command_wrk = false;
     if (easy_floor) {
@@ -86,13 +90,13 @@ void do_cmd_inven(PlayerType *player_ptr)
     const auto weight_lim = calc_weight_limit(player_ptr);
     const auto percentage = weight * 100 / weight_lim;
 #ifdef JP
-    const auto mes = format("持ち物： 合計 %3d.%1d kg (限界の%d%%) コマンド: ", lb_to_kg_integer(weight), lb_to_kg_fraction(weight), percentage);
+    const auto mes = fmt::format("持ち物： 合計 {:3}.{} kg (限界の{}%) コマンド: ", lb_to_kg_integer(weight), lb_to_kg_fraction(weight), percentage);
 #else
-    const auto mes = format("Inventory: carrying %d.%d pounds (%d%% of capacity). Command: ", weight / 10, weight % 10, percentage);
+    const auto mes = fmt::format("Inventory: carrying {}.{} pounds ({}% of capacity). Command: ", weight / 10, weight % 10, percentage);
 #endif
 
     prt(mes, 0, 0);
-    command_new = inkey();
+    command_new = input_key_with_context({ InputKind::COMMAND, mes, CommandInputDetails{ .shopping = shopping, .item_list = ItemSelectionArea::INVENTORY } });
     screen_load();
     if (command_new != ESCAPE) {
         command_see = true;
@@ -114,19 +118,19 @@ void do_cmd_drop(PlayerType *player_ptr)
 
     constexpr auto q = _("どのアイテムを落としますか? ", "Drop which item? ");
     constexpr auto s = _("落とせるアイテムを持っていない。", "You have nothing to drop.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_EQUIP | USE_INVEN | IGNORE_BOTHHAND_SLOT));
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_EQUIP | USE_INVEN | IGNORE_BOTHHAND_SLOT));
+    if (!item) {
         return;
     }
 
-    if ((i_idx >= INVEN_MAIN_HAND) && o_ptr->is_cursed()) {
+    if ((i_idx >= INVEN_MAIN_HAND) && item->is_cursed()) {
         msg_print(_("ふーむ、どうやら呪われているようだ。", "Hmmm, it seems to be cursed."));
+        sense_curse(player_ptr, i_idx);
         return;
     }
 
-    if (o_ptr->number > 1) {
-        amt = input_quantity(o_ptr->number);
+    if (item->number > 1) {
+        amt = input_quantity(item->number);
         if (amt <= 0) {
             return;
         }
@@ -139,7 +143,7 @@ void do_cmd_drop(PlayerType *player_ptr)
         calc_android_exp(player_ptr);
     }
 
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::EQUIPPY);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::EQUIPPY);
 }
 
 /*!
@@ -149,20 +153,19 @@ void do_cmd_observe(PlayerType *player_ptr)
 {
     constexpr auto q = _("どのアイテムを調べますか? ", "Examine which item? ");
     constexpr auto s = _("調べられるアイテムがない。", "You have nothing to examine.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT));
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT));
+    if (!item) {
         return;
     }
 
-    if (!o_ptr->is_fully_known()) {
+    if (!item->is_fully_known()) {
         msg_print(_("このアイテムについて特に知っていることはない。", "You have no special knowledge about that item."));
         return;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, 0);
-    msg_format(_("%sを調べている...", "Examining %s..."), item_name.data());
-    if (!screen_object(player_ptr, *o_ptr, SCROBJ_FORCE_DETAIL)) {
+    const auto item_name = describe_flavor(player_ptr, *item, 0);
+    msg_print(_("{}を調べている...", "Examining {}..."), item_name);
+    if (!screen_object(player_ptr, *item, SCROBJ_FORCE_DETAIL)) {
         msg_print(_("特に変わったところはないようだ。", "You see nothing special."));
     }
 }
@@ -175,32 +178,21 @@ void do_cmd_uninscribe(PlayerType *player_ptr)
 {
     constexpr auto q = _("どのアイテムの銘を消しますか? ", "Un-inscribe which item? ");
     constexpr auto s = _("銘を消せるアイテムがない。", "You have nothing to un-inscribe.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT));
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT));
+    if (!item) {
         return;
     }
 
-    if (!o_ptr->is_inscribed()) {
+    if (!item->is_inscribed()) {
         msg_print(_("このアイテムには消すべき銘がない。", "That item had no inscription to remove."));
         return;
     }
 
     msg_print(_("銘を消した。", "Inscription removed."));
-    o_ptr->inscription.reset();
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::COMBINATION,
-        StatusRecalculatingFlag::BONUS,
-    };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::FLOOR_ITEMS,
-        SubWindowRedrawingFlag::FOUND_ITEMS,
-    };
-    rfu.set_flags(flags_swrf);
+    item->inscription.reset();
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_inscription_change_updates();
+    dur.request_floor_item_lists_redrawing();
 }
 
 /*!
@@ -211,35 +203,29 @@ void do_cmd_inscribe(PlayerType *player_ptr)
 {
     constexpr auto q = _("どのアイテムに銘を刻みますか? ", "Inscribe which item? ");
     constexpr auto s = _("銘を刻めるアイテムがない。", "You have nothing to inscribe.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT));
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT));
+    if (!item) {
         return;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, OD_OMIT_INSCRIPTION);
-    msg_format(_("%sに銘を刻む。", "Inscribing %s."), item_name.data());
+    const auto item_name = describe_flavor(player_ptr, *item, OD_OMIT_INSCRIPTION);
+    msg_print(_("{}に銘を刻む。", "Inscribing {}."), item_name);
     msg_erase();
-    const auto initial_inscription = o_ptr->is_inscribed() ? *o_ptr->inscription : "";
+    const auto initial_inscription = item->is_inscribed() ? *item->inscription : "";
     const auto input_inscription = input_string(_("銘: ", "Inscription: "), MAX_INSCRIPTION, initial_inscription);
     if (!input_inscription) {
         return;
     }
 
-    o_ptr->inscription.emplace(*input_inscription);
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::COMBINATION,
-        StatusRecalculatingFlag::BONUS,
-    };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::FLOOR_ITEMS,
-        SubWindowRedrawingFlag::FOUND_ITEMS,
-    };
-    rfu.set_flags(flags_swrf);
+    // 銘を空にしたら、銘を消したことにする
+    if (input_inscription->empty()) {
+        item->inscription.reset();
+    } else {
+        item->inscription.emplace(*input_inscription);
+    }
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_inscription_change_updates();
+    dur.request_floor_item_lists_redrawing();
 }
 
 /*!
@@ -258,13 +244,12 @@ void do_cmd_use(PlayerType *player_ptr)
     constexpr auto q = _("どれを使いますか？", "Use which item? ");
     constexpr auto s = _("使えるものがありません。", "You have nothing to use.");
     const auto options = USE_INVEN | USE_EQUIP | USE_FLOOR | IGNORE_BOTHHAND_SLOT;
-    short i_idx;
-    const auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, options, FuncItemTester(item_tester_hook_use, player_ptr));
-    if (o_ptr == nullptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, options, FuncItemTester(item_tester_hook_use, player_ptr));
+    if (!item) {
         return;
     }
 
-    switch (o_ptr->bi_key.tval()) {
+    switch (item->bi_key.tval()) {
     case ItemKindType::SPIKE:
         do_cmd_spike(player_ptr);
         break;
@@ -314,8 +299,8 @@ void do_cmd_activate(PlayerType *player_ptr)
     PlayerClass(player_ptr).break_samurai_stance({ SamuraiStanceType::MUSOU, SamuraiStanceType::KOUKIJIN });
     constexpr auto q = _("どのアイテムを始動させますか? ", "Activate which item? ");
     constexpr auto s = _("始動できるアイテムを装備していない。", "You have nothing to activate.");
-    short i_idx;
-    if (!choose_object(player_ptr, &i_idx, q, s, (USE_EQUIP | IGNORE_BOTHHAND_SLOT), FuncItemTester(&ItemEntity::is_activatable))) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_EQUIP | IGNORE_BOTHHAND_SLOT), FuncItemTester(&ItemEntity::is_activatable));
+    if (!item) {
         return;
     }
 

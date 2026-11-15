@@ -19,13 +19,13 @@
 #include "specific-object/chest.h"
 #include "status/action-setter.h"
 #include "status/experience.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/grid-count-kind.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/target-getter.h"
 #include "term/screen-processor.h"
@@ -54,11 +54,11 @@ static bool exe_open_chest(PlayerType *player_ptr, const Pos2D &pos, OBJECT_IDX 
         flag = false;
         int i = player_ptr->skill_dis;
         const auto effects = player_ptr->effects();
-        if (effects->blindness().is_blind() || no_lite(player_ptr)) {
+        if (effects->blindness().is_active() || no_lite(player_ptr)) {
             i = i / 10;
         }
 
-        if (effects->confusion().is_confused() || effects->hallucination().is_hallucinated()) {
+        if (effects->confusion().is_active() || effects->hallucination().is_active()) {
             i = i / 10;
         }
 
@@ -82,9 +82,11 @@ static bool exe_open_chest(PlayerType *player_ptr, const Pos2D &pos, OBJECT_IDX 
     }
 
     if (flag) {
+        // 罠の効果で箱が削除されると番号が変わるため、箱の実体を保持して渡す。
+        const auto chest_item = player_ptr->current_floor_ptr->o_list[o_idx];
         Chest chest(player_ptr);
-        chest.fire_trap(pos, o_idx);
-        chest.open(false, pos, o_idx);
+        chest.fire_trap(pos, chest_item);
+        chest.open(false, pos, chest_item);
     }
 
     return more;
@@ -118,7 +120,7 @@ void do_cmd_open(PlayerType *player_ptr)
 
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -167,7 +169,7 @@ void do_cmd_close(PlayerType *player_ptr)
 
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -182,7 +184,7 @@ void do_cmd_close(PlayerType *player_ptr)
             msg_print(_("モンスターが立ちふさがっている！", "There is a monster in the way!"));
             do_cmd_attack(player_ptr, pos.y, pos.x, HISSATSU_NONE);
         } else {
-            more = exe_close(player_ptr, pos.y, pos.x);
+            more = exe_close(player_ptr, pos);
         }
     }
 
@@ -216,7 +218,7 @@ void do_cmd_disarm(PlayerType *player_ptr)
 
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -268,7 +270,7 @@ void do_cmd_bash(PlayerType *player_ptr)
     PlayerClass(player_ptr).break_samurai_stance({ SamuraiStanceType::MUSOU });
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -304,14 +306,14 @@ void do_cmd_bash(PlayerType *player_ptr)
  */
 static bool get_spike(PlayerType *player_ptr, INVENTORY_IDX *ip)
 {
-    for (INVENTORY_IDX i = 0; i < INVEN_PACK; i++) {
-        auto *o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        auto *o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
 
         if (o_ptr->bi_key.tval() == ItemKindType::SPIKE) {
-            *ip = i;
+            *ip = i_idx;
             return true;
         }
     }
@@ -354,7 +356,7 @@ void do_cmd_spike(PlayerType *player_ptr)
         do_cmd_attack(player_ptr, pos.y, pos.x, HISSATSU_NONE);
     } else {
         PlayerEnergy(player_ptr).set_player_turn_energy(100);
-        msg_format(_("%sにくさびを打ち込んだ。", "You jam the %s with a spike."), terrain_mimic.name.data());
+        msg_print(_("{}にくさびを打ち込んだ。", "You jam the {} with a spike."), terrain_mimic.name);
         cave_alter_feat(player_ptr, pos.y, pos.x, TerrainCharacteristics::SPIKE);
         vary_item(player_ptr, i_idx, -1);
     }

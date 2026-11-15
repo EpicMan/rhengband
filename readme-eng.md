@@ -42,6 +42,7 @@ make install
 
  * Replace `x.x.x` with the downloaded version's number.
  * `--disable-japanese` is required to build English version, remove it if you want to build Japanese version.
+ * Add `--enable-lto` to enable link time optimization. The game runs faster (in our measurements, 10-25% fewer instructions in typical play), but building takes longer, and rebuilding after changing a source file becomes much slower. It is recommended when you build the game to play, not while developing. `gcc-ar` and `gcc-ranlib` (GCC) or `llvm-ar` and `llvm-ranlib` (Clang) are used if available. If `configure` reports that LTO cannot be used, specify an archiver that supports LTO with `AR=` and `RANLIB=`.
 
 To run in ASCII mode:
 
@@ -56,6 +57,10 @@ To run in the graphical mode:
 ./hengband -g -- -b -n <number of windows> ## double width size tiles
 ./hengband -g -- -a -n <number of windows> ## 16x16 tiles (tiles of this size are not provided)
 ```
+
+### Sound effects, music and tiles
+
+The sound effects, background music (mp3) and 8x8 tiles are in the [hengband.xtra](https://github.com/hengband/hengband.xtra) repository, which is included as the `lib/xtra` submodule. If you cloned the repository with git, `git submodule update --init lib/xtra` fetches them. In the "Source code" archives that GitHub generates, `lib/xtra` is an empty directory, and archives created by `make dist` leave out the background music because of its size. In those cases, download hengband.xtra and put its contents into `lib/xtra`. When installing with `setgid`, do this before running `./configure`.
 
 ### Install with `setgid`
 

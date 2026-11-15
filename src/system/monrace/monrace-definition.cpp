@@ -1,5 +1,4 @@
 #include "system/monrace/monrace-definition.h"
-#include "game-option/cheat-options.h"
 #include "monster-attack/monster-attack-table.h"
 #include "monster-race/race-ability-mask.h"
 #include "monster-race/race-resistance-mask.h"
@@ -11,9 +10,9 @@
 #include "system/monrace/monrace-message.h"
 #include "system/system-variables.h"
 #include "util/enum-converter.h"
-#include "util/string-processor.h"
 #include "world/world.h"
 #include <algorithm>
+#include <fmt/format.h>
 #ifdef JP
 #else
 #include "locale/english.h"
@@ -107,6 +106,15 @@ bool MonraceDefinition::is_male() const
 bool MonraceDefinition::is_female() const
 {
     return this->sex == MonsterSex::FEMALE;
+}
+
+/*!
+ * @brief 性別を返す
+ * @return 性別 (性別の無い種族は MonsterSex::NONE)
+ */
+MonsterSex MonraceDefinition::get_sex() const
+{
+    return this->sex;
 }
 
 /*!
@@ -236,6 +244,11 @@ const MonraceDefinition &MonraceDefinition::get_next() const
     return MonraceList::get_instance().get_monrace(this->next_r_idx);
 }
 
+std::shared_ptr<const MonraceDefinition> MonraceDefinition::get_next_shared() const
+{
+    return MonraceList::get_instance().get_monrace_shared(this->next_r_idx);
+}
+
 /*!
  * @brief モンスター種族が賞金首の対象かどうかを調べる。日替わり賞金首は対象外。
  * @param unachieved_only true の場合未達成の賞金首のみを対象とする。false の場合達成未達成に関わらずすべての賞金首を対象とする。
@@ -257,14 +270,15 @@ bool MonraceDefinition::is_bounty(bool unachieved_only) const
 /*!
  * @brief モンスター種族の総合的な強さを計算する。
  * @details 現在はモンスター闘技場でのモンスターの強さの総合的な評価にのみ使用されている。
+ * 全属性耐性で10万倍し、さらに闘技場の倍率を掛けるので、int ではあふれうる。int64_t で計算する。
  * @return 計算した結果のモンスター種族の総合的な強さの値を返す。
  */
-int MonraceDefinition::calc_power() const
+int64_t MonraceDefinition::calc_power() const
 {
-    auto power = 0;
-    const auto num_resistances = EnumClassFlagGroup<MonsterResistanceType>(this->resistance_flags & RFR_EFF_IMMUNE_ELEMENT_MASK).count();
+    int64_t power;
+    const auto num_resistances = static_cast<int64_t>(EnumClassFlagGroup<MonsterResistanceType>(this->resistance_flags & RFR_EFF_IMMUNE_ELEMENT_MASK).count());
     if (this->misc_flags.has(MonsterMiscType::FORCE_MAXHP)) {
-        power = this->hit_dice.maxroll() * 2;
+        power = int64_t{ this->hit_dice.maxroll() } * 2;
     } else {
         power = this->hit_dice.floored_expected_value_multiplied_by(2);
     }
@@ -347,8 +361,8 @@ int MonraceDefinition::calc_capture_value() const
 std::string MonraceDefinition::build_eldritch_horror_message(std::string_view description) const
 {
     const auto &horror_message = this->decide_horror_message();
-    constexpr auto fmt = _("%s%sの顔を見てしまった！", "You behold the %s visage of %s!");
-    return format(fmt, horror_message.data(), description.data());
+    constexpr auto fmt = _("{}{}の顔を見てしまった！", "You behold the {} visage of {}!");
+    return fmt::format(fmt, horror_message, description);
 }
 
 bool MonraceDefinition::has_reinforce() const
@@ -576,7 +590,7 @@ bool MonraceDefinition::is_catchable_for_fishing() const
 {
     auto is_catchable = this->feature_flags.has(MonsterFeatureType::AQUATIC);
     is_catchable &= this->kind_flags.has_not(MonsterKindType::UNIQUE);
-    is_catchable &= str_find("Jjlw", &this->symbol_definition.character);
+    is_catchable &= this->symbol_char_is_any_of("Jjlw");
     return is_catchable;
 }
 
@@ -758,6 +772,7 @@ tl::optional<std::string> MonraceDefinition::probe_lore()
     this->r_cast_spell = MAX_UCHAR;
     n |= count_lore_mflag_group(this->resistance_flags, this->r_resistance_flags) > 0;
     n |= count_lore_mflag_group(this->ability_flags, this->r_ability_flags) > 0;
+    n |= count_lore_mflag_group(this->aura_flags, this->r_aura_flags) > 0;
     n |= count_lore_mflag_group(this->behavior_flags, this->r_behavior_flags) > 0;
     n |= count_lore_mflag_group(this->drop_flags, this->r_drop_flags) > 0;
     n |= count_lore_mflag_group(this->feature_flags, this->r_feature_flags) > 0;
@@ -766,6 +781,7 @@ tl::optional<std::string> MonraceDefinition::probe_lore()
 
     this->r_resistance_flags = this->resistance_flags;
     this->r_ability_flags = this->ability_flags;
+    this->r_aura_flags = this->aura_flags;
     this->r_behavior_flags = this->behavior_flags;
     this->r_drop_flags = this->drop_flags;
     this->r_feature_flags = this->feature_flags;
@@ -781,14 +797,14 @@ tl::optional<std::string> MonraceDefinition::probe_lore()
     }
 
 #ifdef JP
-    return format("%sについてさらに詳しくなった気がする。", this->name.data());
+    return fmt::format("{}についてさらに詳しくなった気がする。", this->name);
 #else
     const char *preamble = "You now know more about ";
     if (this->kind_flags.has(MonsterKindType::UNIQUE)) {
-        return format("%s%s.", preamble, this->name.data());
+        return fmt::format("{}{}.", preamble, this->name);
     }
     const auto nm = pluralize(this->name);
-    return format("%s%s.", preamble, nm.data());
+    return fmt::format("{}{}.", preamble, nm);
 #endif
 }
 
@@ -834,15 +850,11 @@ bool MonraceDefinition::has_entity() const
  * @brief モンスターリストを走査し、生きているか死んでいるユニークだけを抽出する
  * @param is_alive 生きているユニークのリストならばTRUE、撃破したユニークのリストならばFALSE
  * @return is_aliveの条件に見合うユニークがいたらTRUE、それ以外はFALSE
- * @details 闘技場のモンスターとは再戦できないので、生きているなら表示から外す
+ * @details 闘技場のモンスターとは再戦できないので、生きているなら表示から外す.
  */
 bool MonraceDefinition::should_display(bool is_alive) const
 {
     if (this->kind_flags.has_not(MonsterKindType::UNIQUE)) {
-        return false;
-    }
-
-    if (!cheat_know && !this->r_sights) {
         return false;
     }
 
@@ -971,9 +983,9 @@ void MonraceDefinition::increment_tkills()
     }
 }
 
-void MonraceDefinition::emplace_final_summon(MonraceId id, int probability, int min_num, int max_num, int radius)
+void MonraceDefinition::emplace_final_summon(MonraceId id, int probability, int min_summon_num, int max_summon_num, int radius)
 {
-    this->final_summons.emplace_back(MonsterSummon(id, probability, min_num, max_num, radius));
+    this->final_summons.emplace_back(MonsterSummon(id, probability, min_summon_num, max_summon_num, radius));
 }
 
 const std::vector<MonsterSummon> &MonraceDefinition::get_final_summons() const

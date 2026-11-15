@@ -13,13 +13,17 @@
 #include "player-info/race-types.h"
 #include "player/digestion-processor.h"
 #include "player/eldritch-horror.h"
+#include "rumor/rumor-rarity.h"
+#include "rumor/rumor-service.h"
 #include "status/bad-status-setter.h"
 #include "store/rumor.h"
+#include "system/deferred-update-requests.h"
 #include "system/inner-game-data.h"
 #include "system/player-type-definition.h"
 #include "timed-effect/timed-effects.h"
 #include "view/display-messages.h"
 #include "world/world.h"
+#include <fmt/format.h>
 
 /*!
  * @brief 宿屋で食事を摂る
@@ -46,7 +50,7 @@ static bool buy_food(PlayerType *player_ptr)
 static bool is_healthy_stay(PlayerType *player_ptr)
 {
     const auto effects = player_ptr->effects();
-    if (!effects->poison().is_poisoned() && !effects->cut().is_cut()) {
+    if (!effects->poison().is_active() && !effects->cut().is_active()) {
         return true;
     }
 
@@ -148,10 +152,10 @@ static void display_stay_result(PlayerType *player_ptr, int prev_hour)
 {
     const auto &floor = *player_ptr->current_floor_ptr;
     if ((prev_hour >= 6) && (prev_hour < 18)) {
-#if JP
-        msg_format("あなたはリフレッシュして目覚め、%sを迎えた。", is_player_undead(player_ptr) ? "夜" : "夕方");
+#ifdef JP
+        msg_print("あなたはリフレッシュして目覚め、{}を迎えた。", is_player_undead(player_ptr) ? "夜" : "夕方");
 #else
-        msg_format("You awake refreshed for the %s.", is_player_undead(player_ptr) ? "evening" : "twilight");
+        msg_print("You awake refreshed for the {}.", is_player_undead(player_ptr) ? "evening" : "twilight");
 #endif
         const auto awake_message = _(is_player_undead(player_ptr) ? "すがすがしい夜を迎えた。" : "夕方を迎えた。", "awoke refreshed.");
         exe_write_diary(floor, DiaryKind::DESCRIPTION, 0, awake_message);
@@ -185,11 +189,23 @@ static bool stay_inn(PlayerType *player_ptr)
     }
 
     player_ptr->chp = player_ptr->mhp;
+
+    // 建物の中ではメイン画面の描き直しが後回しになり、そこからの要求も来ないので、ここでサブウィンドウの描き直しを要求する。
+    // HP はプレイヤーの情報と呪文の一覧 (職業によっては技の失敗率や効果の表示) に表れる
+    auto &dur = DeferredUpdateRequests::get_instance();
+    static constexpr auto flags_swrf = {
+        SubWindowRedrawingFlag::PLAYER,
+        SubWindowRedrawingFlag::SPELL,
+    };
+    dur.set_flags(flags_swrf);
     if (has_a_nightmare(player_ptr)) {
         return true;
     }
 
     back_to_health(player_ptr);
+
+    // MP・朦朧は、呪文の一覧に加えてアイテムの知識の失敗率にも表れる
+    dur.request_spell_info_redrawing();
     charge_magic_eating_energy(player_ptr);
 
     display_stay_result(player_ptr, prev_hour);
@@ -200,26 +216,37 @@ static bool stay_inn(PlayerType *player_ptr)
  * @brief 宿屋を利用する
  * @param player_ptr プレイヤーへの参照ポインタ
  * @param cmd 宿屋の利用施設ID
+ * @param cost 噂を聞くのに払った金額
  * @return 施設の利用が実際に行われたらTRUE
- * @details inn commands
- * Note that resting for the night was a perfect way to avoid player
- * ghosts in the town *if* you could only make it to the inn in time (-:
- * Now that the ghosts are temporarily disabled in 2.8.X, this function
- * will not be that useful.  I will keep it in the hopes the player
- * ghost code does become a reality again. Does help to avoid filthy urchins.
- * Resting at night is also a quick way to restock stores -KMW-
  * @todo 悪夢を見る前後に全回復しているが、何か意図がある？
  */
-bool inn_comm(PlayerType *player_ptr, int cmd)
+bool inn_comm(PlayerType *player_ptr, int cmd, int cost)
 {
     switch (cmd) {
     case BACT_FOOD:
         return buy_food(player_ptr);
     case BACT_REST:
         return stay_inn(player_ptr);
-    case BACT_RUMORS:
-        display_rumor(player_ptr, true);
+    case BACT_RUMORS: {
+        constexpr auto high_rarity_rumor_threshold = 100;
+        if (cost >= high_rarity_rumor_threshold) {
+            const auto &rumor = RumorService::pick_rumor(RumorRarity::HIGH);
+            display_selected_rumor(rumor);
+            return true;
+        }
+
+        constexpr auto medium_rarity_rumor_threshold = 10;
+        if (cost >= medium_rarity_rumor_threshold) {
+            const auto &rumor = RumorService::pick_rumor(RumorRarity::MEDIUM);
+            display_selected_rumor(rumor);
+            return true;
+        }
+
+        // V3.2.0.4時点で1～9$を取られる宿屋の噂はなく、デッドコード.
+        const auto &rumor = RumorService::pick_rumor(RumorRarity::LOW);
+        display_selected_rumor(rumor);
         return true;
+    }
     default:
         //!< @todo リファクタリング前のコードもTRUEだった、FALSEにすべきでは.
         return true;

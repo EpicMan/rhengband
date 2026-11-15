@@ -5,206 +5,132 @@
  */
 
 #include "knowledge/knowledge-items.h"
+#include "core/asking-player.h"
 #include "core/show-file.h"
-#include "core/stuff-handler.h"
+#include "core/window-redrawer.h"
 #include "flavor/flavor-describer.h"
 #include "flavor/object-flavor-types.h"
 #include "game-option/special-options.h"
-#include "inventory/inventory-slot-types.h"
 #include "io-dump/dump-util.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
+#include "io/temp-file.h"
 #include "knowledge/item-group-table.h"
-#include "object-enchant/special-object-flags.h"
-#include "object/tval-types.h"
 #include "perception/identification.h"
-#include "perception/object-perception.h"
-#include "system/artifact-type-definition.h"
-#include "system/baseitem/baseitem-definition.h"
-#include "system/baseitem/baseitem-list.h"
+#include "system/angband-exceptions.h"
+#include "system/artifact/artifact-definition.h"
+#include "system/artifact/artifact-list.h"
+#include "system/artifact/artifact-record.h"
+#include "system/baseitem/baseitem-config.h"
+#include "system/baseitem/baseitem-configs.h"
+#include "system/baseitem/baseitem-record.h"
+#include "system/baseitem/baseitem-records.h"
+#include "system/baseitem/baseitem-service.h"
 #include "system/floor/floor-info.h"
-#include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
 #include "tracking/baseitem-tracker.h"
-#include "util/angband-files.h"
 #include "util/int-char-converter.h"
 #include "view/display-messages.h"
 #include "world/world.h"
-#include <numeric>
-#include <set>
+#include <algorithm>
+#include <fmt/format.h>
+#include <memory>
+#include <string>
 #include <vector>
 
-namespace {
-auto collect_known_fixed_artifacts(PlayerType *player_ptr)
-{
-    const auto &artifacts = ArtifactList::get_instance();
-    const auto comparer = [&artifacts](auto id1, auto id2) { return artifacts.order(id1, id2); };
-    std::set<FixedArtifactId, decltype(comparer)> fa_ids(comparer);
-    for (const auto &[fa_id, artifact] : artifacts) {
-        if (!artifact.is_generated) {
-            continue;
-        }
-
-        fa_ids.insert(fa_id);
-    }
-
-    const auto &floor = *player_ptr->current_floor_ptr;
-    for (const auto &pos : floor.get_area()) {
-        const auto &grid = floor.get_grid(pos);
-        for (const auto this_o_idx : grid.o_idx_list) {
-            const auto &item = *floor.o_list[this_o_idx];
-            if (!item.is_fixed_artifact() || item.is_known()) {
-                continue;
-            }
-
-            fa_ids.erase(item.fa_id);
-        }
-    }
-
-    for (auto i = 0; i < INVEN_TOTAL; i++) {
-        const auto &item = *player_ptr->inventory[i];
-        if (!item.is_valid()) {
-            continue;
-        }
-
-        if (!item.is_fixed_artifact()) {
-            continue;
-        }
-
-        if (item.is_known()) {
-            continue;
-        }
-
-        fa_ids.erase(item.fa_id);
-    }
-
-    return fa_ids;
-}
-}
-
 /*!
- * @brief Check the status of "artifacts"
+ * @brief 入手済の固定アーティファクト一覧を一時ファイルへ保存して表示する
  * @param player_ptr プレイヤーへの参照ポインタ
+ * @param mode 表示モード
  */
-void do_cmd_knowledge_artifacts(PlayerType *player_ptr)
+void do_cmd_knowledge_artifacts(PlayerType *player_ptr, ArtifactKnowledgeMode mode)
 {
-    FILE *fff = nullptr;
-    GAME_TEXT file_name[FILE_NAME_SIZE];
-    if (!open_temporary_file(&fff, file_name)) {
+    TempFile temp_file;
+    if (const auto &error_message = temp_file.get_error_message(); error_message) {
+        msg_print(*error_message);
         return;
     }
 
+    const auto &records = ArtifactRecords::get_instance();
+    std::vector<FixedArtifactId> fa_ids;
+    std::string title;
+    switch (mode) {
+    case ArtifactKnowledgeMode::KNOWN:
+        fa_ids = records.collect_known_ids();
+        title = _("既知の伝説のアイテム", "Known Artifacts");
+        break;
+    case ArtifactKnowledgeMode::IDENTIFIED:
+        fa_ids = records.collect_identified_ids();
+        title = _("鑑定済の伝説のアイテム", "Identified Artifacts");
+        break;
+    default:
+        THROW_EXCEPTION(std::logic_error, fmt::format("Invalid ArtifactKnowledgeMode: {}", enum2i(mode)));
+    }
+
     const auto &artifacts = ArtifactList::get_instance();
-    const auto fa_ids = collect_known_fixed_artifacts(player_ptr);
+    std::stable_sort(fa_ids.begin(), fa_ids.end(), [&artifacts](auto x, auto y) {
+        return artifacts.order(x, y);
+    });
+    std::vector<std::string> lines;
     for (const auto fa_id : fa_ids) {
         const auto &artifact = artifacts.get_artifact(fa_id);
-        constexpr auto template_basename = _("     %s\n", "     The %s\n");
+        constexpr auto template_basename = _("     {}", "     The {}");
         ItemEntity item(artifact.bi_key);
         item.fa_id = fa_id;
-        item.ident |= IDENT_STORE;
+        item.set_identification_flag(IdentificationFlag::STORE);
         const auto item_name = describe_flavor(player_ptr, item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
-        fprintf(fff, template_basename, item_name.data());
+        lines.push_back(fmt::format(template_basename, item_name));
     }
 
-    angband_fclose(fff);
-    FileDisplayer(player_ptr->name).display(true, file_name, 0, 0, _("既知の伝説のアイテム", "Artifacts Seen"));
-    fd_kill(file_name);
-}
-
-/*!
- * @brief ベースアイテムの出現率チェック処理
- * @param mode グループ化モード (0x02 表示専用)
- * @param baseitem ベースアイテムへの参照
- * @return collect_objects() の処理を続行するか否か
- */
-static bool check_baseitem_chance(const BIT_FLAGS8 mode, const BaseitemDefinition &baseitem)
-{
-    if (mode & 0x02) {
-        return true;
+    temp_file.write_lines(lines);
+    if (const auto &error_message = temp_file.get_error_message(); error_message) {
+        msg_print(*error_message);
+        return;
     }
 
-    if (!AngbandWorld::get_instance().wizard && ((baseitem.flavor == 0) || !baseitem.aware)) {
-        return false;
-    }
-
-    const auto &alloc_tables = baseitem.alloc_tables;
-    const auto sum_chances = std::accumulate(alloc_tables.begin(), alloc_tables.end(), 0, [](int sum, const auto &table) {
-        return sum + table.chance;
-    });
-
-    return sum_chances > 0;
-}
-
-/*
- * Build a list of object indexes in the given group. Return the number
- * of objects in the group.
- *
- * mode & 0x01 : check for non-empty group
- * mode & 0x02 : visual operation only
- */
-static short collect_objects(int grp_cur, std::vector<short> &object_idx, BIT_FLAGS8 mode)
-{
-    short object_cnt = 0;
-    const auto group_tval = ITEM_KINDS_GROUP[grp_cur];
-    for (const auto &baseitem : BaseitemList::get_instance()) {
-        if (baseitem.name.empty() || !check_baseitem_chance(mode, baseitem)) {
-            continue;
-        }
-
-        const auto tval = baseitem.bi_key.tval();
-        if (group_tval == ItemKindType::LIFE_BOOK) {
-            if (baseitem.bi_key.is_spell_book()) {
-                object_idx[object_cnt++] = baseitem.idx;
-            } else {
-                continue;
-            }
-        } else if (tval == group_tval) {
-            object_idx[object_cnt++] = baseitem.idx;
-        } else {
-            continue;
-        }
-
-        if (mode & 0x01) {
-            break;
-        }
-    }
-
-    object_idx[object_cnt] = -1;
-    return object_cnt;
+    FileDisplayer(player_ptr->name).display(true, temp_file.get_path().string(), 0, 0, title);
 }
 
 /*
  * Display the objects in a group.
  */
-static void display_object_list(int col, int row, int per_page, const std::vector<short> &object_idx, int object_cur, int object_top, bool visual_only)
+static void display_object_list(int col, int row, int per_page, const std::vector<short> &bi_ids, int current_bi_id, int top_bi_id, bool visual_only)
 {
     const auto is_wizard = AngbandWorld::get_instance().wizard;
     const auto &baseitems = BaseitemList::get_instance();
-    int i;
-    for (i = 0; i < per_page && (object_idx[object_top + i] >= 0); i++) {
-        const short bi_id = object_idx[object_top + i];
+    const auto &baseitem_records = BaseitemRecords::get_instance();
+    const auto &baseitem_configs = BaseitemConfigs::get_instance();
+    const auto &empty_symbol = BaseitemService::get_dummy_symbol();
+    auto i = 0;
+    for (; i < per_page && top_bi_id + i < static_cast<int>(bi_ids.size()); i++) {
+        const auto bi_id = bi_ids[top_bi_id + i];
         const auto &baseitem = baseitems.get_baseitem(bi_id);
-        TERM_COLOR attr = ((baseitem.aware || visual_only) ? TERM_WHITE : TERM_SLATE);
-        byte cursor = ((baseitem.aware || visual_only) ? TERM_L_BLUE : TERM_BLUE);
-        const auto &flavor_baseitem = !visual_only && baseitem.flavor ? baseitems.get_baseitem(baseitem.flavor) : baseitem;
+        const auto &baseitem_record = baseitem_records.get_record(bi_id);
+        const auto &baseitem_config = baseitem_configs.get_config(bi_id);
+        TERM_COLOR attr = ((baseitem_record.is_aware() || visual_only) ? TERM_WHITE : TERM_SLATE);
+        byte cursor = ((baseitem_record.is_aware() || visual_only) ? TERM_L_BLUE : TERM_BLUE);
+        const auto has_flavor = baseitem_record.is_apparent();
+        const auto appearance_id = baseitem_record.get_appearance_id();
+        const auto &flavor_baseitem = !visual_only && has_flavor ? baseitems.get_baseitem(appearance_id) : baseitem;
+        const auto &flavor_config = !visual_only && has_flavor ? baseitem_configs.get_config(appearance_id) : baseitem_config;
 
-        attr = ((i + object_top == object_cur) ? cursor : attr);
-        const auto is_flavor_only = (baseitem.flavor != 0) && (visual_only || !baseitem.aware);
-        const auto o_name = is_flavor_only ? flavor_baseitem.flavor_name : baseitem.stripped_name();
-        c_prt(attr, o_name.data(), row + i, col);
-        const auto &symbol_config = flavor_baseitem.symbol_config;
+        attr = ((i + top_bi_id == current_bi_id) ? cursor : attr);
+        const auto is_flavor_only = has_flavor && (visual_only || !baseitem_record.is_aware());
+        const auto item_name = is_flavor_only ? flavor_baseitem.flavor_name : baseitem.stripped_name();
+        c_prt(attr, item_name.data(), row + i, col);
         if (per_page == 1) {
-            c_prt(attr, format("%02x/%02x", symbol_config.color, symbol_config.character), row + i, (is_wizard || visual_only) ? 64 : 68);
+            c_prt(attr, fmt::format("{:02x}/{:02x}", flavor_config.get_color(), static_cast<uint8_t>(flavor_config.get_character())), row + i, (is_wizard || visual_only) ? 64 : 68);
         }
 
         if (is_wizard || visual_only) {
-            c_prt(attr, format("%d", bi_id), row + i, 70);
+            c_prt(attr, fmt::format("{}", bi_id), row + i, 70);
         }
 
-        term_queue_bigchar(use_bigtile ? 76 : 77, row + i, { symbol_config, {} });
+        const auto ds = flavor_baseitem.is_valid() ? flavor_config.get_symbol() : empty_symbol;
+        term_queue_bigchar(use_bigtile ? 76 : 77, row + i, { ds, {} });
     }
 
     for (; i < per_page; i++) {
@@ -218,8 +144,7 @@ static void display_object_list(int col, int row, int per_page, const std::vecto
 static void desc_obj_fake(PlayerType *player_ptr, short bi_id)
 {
     ItemEntity item(bi_id);
-    item.ident |= IDENT_KNOWN;
-    handle_stuff(player_ptr);
+    item.set_identification_flag(IdentificationFlag::KNOWN);
     if (screen_object(player_ptr, item, SCROBJ_FAKE_OBJECT | SCROBJ_FORCE_DETAIL)) {
         return;
     }
@@ -231,60 +156,60 @@ static void desc_obj_fake(PlayerType *player_ptr, short bi_id)
 /**
  * @brief Display known objects
  */
-void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool visual_only, short direct_k_idx)
+void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool visual_only, short bi_id)
 {
     TermCenteredOffsetSetter tcos(MAIN_TERM_MIN_COLS, tl::nullopt);
 
-    short object_old, object_top;
     std::vector<short> grp_idx;
-    int object_cnt;
-
     bool visual_list = false;
     TERM_COLOR attr_top = 0;
     byte char_left = 0;
-    byte mode;
-
     const auto &[wid, hgt] = term_get_size();
     auto browser_rows = hgt - 8;
-    auto &baseitems = BaseitemList::get_instance();
-    std::vector<short> object_idx(baseitems.size());
+    auto &baseitem_configs = BaseitemConfigs::get_instance();
+    std::vector<short> bi_ids;
 
     const auto max_element = std::max_element(ITEM_KIND_NAMES_GROUP.begin(), ITEM_KIND_NAMES_GROUP.end(),
         [](auto x, auto y) { return x.length() < y.length(); });
     const int max_length = max_element->length();
     const auto width = wid - (max_length + 3);
-    if (direct_k_idx < 0) {
-        mode = visual_only ? 0x03 : 0x01;
+    if (bi_id < 0) {
+        EnumClassFlagGroup<BaseitemCollectionMode> bcm{ BaseitemCollectionMode::CHECK_CHANCE };
+        if (visual_only) {
+            bcm.set(BaseitemCollectionMode::VISUAL_ONLY);
+        }
+
         const auto size = static_cast<short>(ITEM_KIND_NAMES_GROUP.size());
         for (short i = 0; i < size; i++) {
-            if (collect_objects(i, object_idx, mode)) {
+            bi_ids = BaseitemService::collect_baseitem_ids(i, bcm);
+            if (!bi_ids.empty()) {
                 grp_idx.push_back(i);
             }
         }
-
-        object_old = -1;
-        object_cnt = 0;
     } else {
-        auto &baseitem = baseitems.get_baseitem(direct_k_idx);
-        auto &flavor_baseitem = !visual_only && baseitem.flavor ? baseitems.get_baseitem(baseitem.flavor) : baseitem;
-        object_idx[0] = direct_k_idx;
-        object_old = direct_k_idx;
-        object_cnt = 1;
-        object_idx[1] = -1;
+        auto &flavor_config = visual_only ? baseitem_configs.get_config(bi_id) : BaseitemService::get_flavor_config(bi_id);
+        bi_ids = { bi_id };
         const auto height = browser_rows - 1;
-        auto &symbol_config = flavor_baseitem.symbol_config;
-        (void)visual_mode_command(
-            'v', &visual_list, height, width, &attr_top, &char_left, &symbol_config.color, &symbol_config.character, need_redraw);
+        auto color = flavor_config.get_color();
+        auto character = flavor_config.get_character();
+        (void)visual_mode_command('v', &visual_list, height, width, &attr_top, &char_left, &color, &character, need_redraw);
+        flavor_config.set_symbol({ color, character });
     }
 
-    mode = visual_only ? 0x02 : 0x00;
-    IDX old_grp_cur = -1;
-    IDX grp_cur = 0;
-    IDX grp_top = 0;
-    IDX object_cur = object_top = 0;
-    bool flag = false;
-    bool redraw = true;
-    int column = 0;
+    EnumClassFlagGroup<BaseitemCollectionMode> bcm{};
+    if (visual_only) {
+        bcm.set(BaseitemCollectionMode::VISUAL_ONLY);
+    }
+
+    short previous_bi_id = bi_id < 0 ? -1 : bi_id;
+    short old_grp_cur = -1;
+    short grp_cur = 0;
+    short grp_top = 0;
+    short top_bi_id = 0;
+    short current_bi_id = 0;
+    auto flag = false;
+    auto redraw = true;
+    auto column = 0;
     auto &tracker = BaseitemTracker::get_instance();
     const auto &world = AngbandWorld::get_instance();
     const auto &symbols_cb = DisplaySymbolsClipboard::get_instance();
@@ -293,8 +218,8 @@ void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool vi
             clear_from(0);
 
 #ifdef JP
-            prt(format("%s - アイテム", !visual_only ? "知識" : "表示"), 2, 0);
-            if (direct_k_idx < 0) {
+            prt(fmt::format("{} - アイテム", !visual_only ? "知識" : "表示"), 2, 0);
+            if (bi_id < 0) {
                 prt("グループ", 4, 0);
             }
             prt("名前", 4, max_length + 3);
@@ -303,8 +228,8 @@ void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool vi
             }
             prt("文字", 4, 74);
 #else
-            prt(format("%s - objects", !visual_only ? "Knowledge" : "Visuals"), 2, 0);
-            if (direct_k_idx < 0) {
+            prt(fmt::format("{} - objects", !visual_only ? "Knowledge" : "Visuals"), 2, 0);
+            if (bi_id < 0) {
                 prt("Group", 4, 0);
             }
             prt("Name", 4, max_length + 3);
@@ -318,7 +243,7 @@ void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool vi
                 term_putch(i, 5, { TERM_WHITE, '=' });
             }
 
-            if (direct_k_idx < 0) {
+            if (bi_id < 0) {
                 for (IDX i = 0; i < browser_rows; i++) {
                     term_putch(max_length + 1, 6 + i, { TERM_WHITE, '|' });
                 }
@@ -327,7 +252,7 @@ void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool vi
             redraw = false;
         }
 
-        if (direct_k_idx < 0) {
+        if (bi_id < 0) {
             if (grp_cur < grp_top) {
                 grp_top = grp_cur;
             }
@@ -337,66 +262,81 @@ void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool vi
 
             std::vector<std::string> tmp_texts = ITEM_KIND_NAMES_GROUP;
             display_group_list(max_length, browser_rows, grp_idx, tmp_texts, grp_cur, grp_top);
-            if (old_grp_cur != grp_cur) {
+            if (!grp_idx.empty() && (old_grp_cur != grp_cur)) {
                 old_grp_cur = grp_cur;
-                object_cnt = collect_objects(grp_idx[grp_cur], object_idx, mode);
+                bi_ids = BaseitemService::collect_baseitem_ids(grp_idx[grp_cur], bcm);
+                current_bi_id = 0;
+                top_bi_id = 0;
             }
 
-            while (object_cur < object_top) {
-                object_top = std::max<short>(0, object_top - browser_rows / 2);
-            }
+            if (!bi_ids.empty()) {
+                while (current_bi_id < top_bi_id) {
+                    top_bi_id = std::max<short>(0, top_bi_id - browser_rows / 2);
+                }
 
-            while (object_cur >= object_top + browser_rows) {
-                object_top = std::min<short>(object_cnt - browser_rows, object_top + browser_rows / 2);
+                while (current_bi_id >= top_bi_id + browser_rows) {
+                    const auto max_top = std::max<short>(0, static_cast<short>(bi_ids.size()) - browser_rows);
+                    top_bi_id = std::min<short>(max_top, top_bi_id + browser_rows / 2);
+                }
             }
         }
 
         if (!visual_list) {
-            display_object_list(max_length + 3, 6, browser_rows, object_idx, object_cur, object_top, visual_only);
+            display_object_list(max_length + 3, 6, browser_rows, bi_ids, current_bi_id, top_bi_id, visual_only);
         } else {
-            object_top = object_cur;
-            display_object_list(max_length + 3, 6, 1, object_idx, object_cur, object_top, visual_only);
+            top_bi_id = current_bi_id;
+            display_object_list(max_length + 3, 6, 1, bi_ids, current_bi_id, top_bi_id, visual_only);
             display_visual_list(max_length + 3, 7, browser_rows - 1, wid - (max_length + 3), attr_top, char_left);
         }
 
-        auto &baseitem = baseitems.get_baseitem(object_idx[object_cur]);
-        auto &flavor_baseitem = !visual_only && baseitem.flavor ? baseitems.get_baseitem(baseitem.flavor) : baseitem;
+        const auto key_guide = fmt::format(_("<方向>{}{}{}, ESC", "<dir>{}{}{}, ESC"), (!visual_list && !visual_only) ? _(", 'r'で詳細を見る", ", 'r' to recall") : "", visual_list ? _(", ENTERで決定", ", ENTER to accept") : _(", 'v'でシンボル変更", ", 'v' for visuals"), (symbols_cb.symbol != DisplaySymbol()) ? _(", 'c', 'p'でペースト", ", 'c', 'p' to paste") : _(", 'c'でコピー", ", 'c' to copy"));
+        prt(key_guide, hgt - 1, 0);
 
-#ifdef JP
-        prt(format("<方向>%s%s%s, ESC", (!visual_list && !visual_only) ? ", 'r'で詳細を見る" : "", visual_list ? ", ENTERで決定" : ", 'v'でシンボル変更",
-                (symbols_cb.symbol != DisplaySymbol()) ? ", 'c', 'p'でペースト" : ", 'c'でコピー"),
-            hgt - 1, 0);
-#else
-        prt(format("<dir>%s%s%s, ESC", (!visual_list && !visual_only) ? ", 'r' to recall" : "", visual_list ? ", ENTER to accept" : ", 'v' for visuals",
-                (symbols_cb.symbol != DisplaySymbol()) ? ", 'c', 'p' to paste" : ", 'c' to copy"),
-            hgt - 1, 0);
-#endif
-
-        if (!visual_only) {
-            if (object_cnt) {
-                tracker.set_trackee(object_idx[object_cur]);
+        if (bi_ids.empty()) {
+            if (!column) {
+                term_gotoxy(0, 6 + (grp_cur - grp_top));
             }
 
-            if (object_old != object_idx[object_cur]) {
-                handle_stuff(player_ptr);
-                object_old = object_idx[object_cur];
+            const auto ch = input_key_with_context(InputKind::BROWSER, key_guide);
+            switch (ch) {
+            case ESCAPE: {
+                flag = true;
+                break;
+            }
+            default: {
+                browser_cursor(ch, &column, &grp_cur, std::ssize(grp_idx), &current_bi_id, 0);
+                break;
+            }
+            }
+
+            continue;
+        }
+
+        const auto bi_id_cursor = bi_ids[current_bi_id];
+        if (!visual_only) {
+            tracker.set_trackee(bi_id_cursor);
+            if (previous_bi_id != bi_id_cursor) {
+                window_stuff(player_ptr);
+                previous_bi_id = bi_id_cursor;
             }
         }
 
-        auto &symbol_config = flavor_baseitem.symbol_config;
+        auto &flavor_config = visual_only ? baseitem_configs.get_config(bi_id_cursor) : BaseitemService::get_flavor_config(bi_id_cursor);
+        auto color = flavor_config.get_color();
+        auto character = flavor_config.get_character();
         if (visual_list) {
-            place_visual_list_cursor(max_length + 3, 7, symbol_config.color, symbol_config.character, attr_top, char_left);
+            place_visual_list_cursor(max_length + 3, 7, color, character, attr_top, char_left);
         } else if (!column) {
             term_gotoxy(0, 6 + (grp_cur - grp_top));
         } else {
-            term_gotoxy(max_length + 3, 6 + (object_cur - object_top));
+            term_gotoxy(max_length + 3, 6 + (current_bi_id - top_bi_id));
         }
 
-        char ch = inkey();
+        char ch = input_key_with_context(InputKind::BROWSER, key_guide);
         const auto height = browser_rows - 1;
-        if (visual_mode_command(
-                ch, &visual_list, height, width, &attr_top, &char_left, &symbol_config.color, &symbol_config.character, need_redraw)) {
-            if (direct_k_idx >= 0) {
+        if (visual_mode_command(ch, &visual_list, height, width, &attr_top, &char_left, &color, &character, need_redraw)) {
+            flavor_config.set_symbol({ color, character });
+            if (bi_id >= 0) {
                 switch (ch) {
                 case '\n':
                 case '\r':
@@ -416,8 +356,8 @@ void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool vi
 
         case 'R':
         case 'r': {
-            if (!visual_list && !visual_only && (grp_idx.size() > 0)) {
-                desc_obj_fake(player_ptr, object_idx[object_cur]);
+            if (!visual_list && !visual_only) {
+                desc_obj_fake(player_ptr, bi_id_cursor);
                 redraw = true;
             }
 
@@ -425,7 +365,7 @@ void do_cmd_knowledge_objects(PlayerType *player_ptr, bool *need_redraw, bool vi
         }
 
         default: {
-            browser_cursor(ch, &column, &grp_cur, std::ssize(grp_idx), &object_cur, object_cnt);
+            browser_cursor(ch, &column, &grp_cur, std::ssize(grp_idx), &current_bi_id, bi_ids.size());
             break;
         }
         }

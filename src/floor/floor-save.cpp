@@ -21,14 +21,19 @@
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "term/z-form.h"
 #include "util/angband-files.h"
 #include "view/display-messages.h"
 #include "world/world.h"
+#include <fmt/format.h>
 
-static std::string get_saved_floor_name(int level)
+/*!
+ * @brief 保存フロアの一時ファイルの名前を返す
+ * @param savefile_id 保存フロアのファイルの番号
+ * @return 一時ファイルのパス
+ */
+std::string get_saved_floor_name(int savefile_id)
 {
-    const auto ext = format(".F%02d", level);
+    const auto ext = fmt::format(".F{:02}", savefile_id);
     return savefile.string().append(ext);
 }
 

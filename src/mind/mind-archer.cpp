@@ -15,15 +15,16 @@
 #include "object/item-use-flags.h"
 #include "perception/object-perception.h"
 #include "system/angband.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/target-getter.h"
 #include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
+#include <fmt/format.h>
 #include <string>
 
 enum ammo_creation_type {
@@ -115,7 +116,7 @@ bool create_ammo(PlayerType *player_ptr)
             return false;
         }
 
-        if (!grid.has(TerrainCharacteristics::CAN_DIG) || !grid.has(TerrainCharacteristics::HURT_ROCK)) {
+        if (!grid.has(TerrainCharacteristics::CAN_DIG) || !grid.has(TerrainCharacteristics::STONE)) {
             msg_print(_("硬すぎて崩せなかった。", "You failed to make ammo."));
             return true;
         }
@@ -128,21 +129,20 @@ bool create_ammo(PlayerType *player_ptr)
         item.discount = 99;
         int16_t slot = store_item_to_inventory(player_ptr, &item);
         const auto item_name = describe_flavor(player_ptr, item, 0);
-        msg_print(_(format("%sを作った。", item_name.data()), "You make some ammo."));
+        msg_print(_("{}を作った。", "You make some ammo."), item_name);
         if (slot >= 0) {
             autopick_alter_item(player_ptr, slot, false);
         }
 
-        cave_alter_feat(player_ptr, pos.y, pos.x, TerrainCharacteristics::HURT_ROCK);
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
+        cave_alter_feat(player_ptr, pos.y, pos.x, TerrainCharacteristics::STONE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
         return true;
     }
     case AMMO_ARROW: {
         constexpr auto q = _("どのアイテムから作りますか？ ", "Convert which item? ");
         constexpr auto s = _("材料を持っていない。", "You have no item to convert.");
-        short i_idx;
-        auto *item_ptr = choose_object(player_ptr, &i_idx, q, s, USE_INVEN | USE_FLOOR, FuncItemTester(&ItemEntity::is_convertible));
-        if (item_ptr == nullptr) {
+        const auto &[item, i_idx] = choose_item(player_ptr, q, s, USE_INVEN | USE_FLOOR, FuncItemTester(&ItemEntity::is_convertible));
+        if (!item) {
             return false;
         }
         ItemEntity ammo({ ItemKindType::ARROW, m_bonus(1, player_ptr->lev) + 1 });
@@ -152,7 +152,7 @@ bool create_ammo(PlayerType *player_ptr)
         ItemMagicApplier(player_ptr, &ammo, player_ptr->lev, AM_NO_FIXED_ART).execute();
         ammo.discount = 99;
         const auto item_name = describe_flavor(player_ptr, ammo, 0);
-        msg_print(_(format("%sを作った。", item_name.data()), "You make some ammo."));
+        msg_print(_("{}を作った。", "You make some ammo."), item_name);
         vary_item(player_ptr, i_idx, -1);
         int16_t slot = store_item_to_inventory(player_ptr, &ammo);
         if (slot >= 0) {
@@ -164,9 +164,8 @@ bool create_ammo(PlayerType *player_ptr)
     case AMMO_BOLT: {
         constexpr auto q = _("どのアイテムから作りますか？ ", "Convert which item? ");
         constexpr auto s = _("材料を持っていない。", "You have no item to convert.");
-        short i_idx;
-        auto *item_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_INVEN | USE_FLOOR), FuncItemTester(&ItemEntity::is_convertible));
-        if (!item_ptr) {
+        const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_INVEN | USE_FLOOR), FuncItemTester(&ItemEntity::is_convertible));
+        if (!item) {
             return false;
         }
 
@@ -177,7 +176,7 @@ bool create_ammo(PlayerType *player_ptr)
         ItemMagicApplier(player_ptr, &ammo, player_ptr->lev, AM_NO_FIXED_ART).execute();
         ammo.discount = 99;
         const auto item_name = describe_flavor(player_ptr, ammo, 0);
-        msg_print(_(format("%sを作った。", item_name.data()), "You make some ammo."));
+        msg_print(_("{}を作った。", "You make some ammo."), item_name);
         vary_item(player_ptr, i_idx, -1);
         int16_t slot = store_item_to_inventory(player_ptr, &ammo);
         if (slot >= 0) {

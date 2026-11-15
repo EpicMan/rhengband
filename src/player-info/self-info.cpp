@@ -12,7 +12,8 @@
 
 #include "player-info/self-info.h"
 #include "avatar/avatar.h"
-#include "io/input-key-acceptor.h"
+#include "core/asking-player.h"
+#include "io/input-context.h"
 #include "object-enchant/trc-types.h"
 #include "player-info/base-status-info.h"
 #include "player-info/body-improvement-info.h"
@@ -29,37 +30,37 @@
 #include "system/player-type-definition.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
-#include "term/z-form.h"
 #include "timed-effect/timed-effects.h"
 #include "view/display-self-info.h"
+#include <fmt/format.h>
 
 static void set_bad_status_info(const TimedEffects &effects, self_info_type *self_ptr)
 {
-    if (effects.blindness().is_blind()) {
+    if (effects.blindness().is_active()) {
         self_ptr->info_list.emplace_back(_("あなたは目が見えない。", "You cannot see."));
     }
 
-    if (effects.confusion().is_confused()) {
+    if (effects.confusion().is_active()) {
         self_ptr->info_list.emplace_back(_("あなたは混乱している。", "You are confused."));
     }
 
-    if (effects.fear().is_fearful()) {
+    if (effects.fear().is_active()) {
         self_ptr->info_list.emplace_back(_("あなたは恐怖に侵されている。", "You are terrified."));
     }
 
-    if (effects.cut().is_cut()) {
+    if (effects.cut().is_active()) {
         self_ptr->info_list.emplace_back(_("あなたは出血している。", "You are bleeding."));
     }
 
-    if (effects.stun().is_stunned()) {
+    if (effects.stun().is_active()) {
         self_ptr->info_list.emplace_back(_("あなたはもうろうとしている。", "You are stunned."));
     }
 
-    if (effects.poison().is_poisoned()) {
+    if (effects.poison().is_active()) {
         self_ptr->info_list.emplace_back(_("あなたは毒に侵されている。", "You are poisoned."));
     }
 
-    if (effects.hallucination().is_hallucinated()) {
+    if (effects.hallucination().is_active()) {
         self_ptr->info_list.emplace_back(_("あなたは幻覚を見ている。", "You are hallucinating."));
     }
 }
@@ -315,31 +316,31 @@ void report_magics(PlayerType *player_ptr)
     std::vector<std::pair<int, std::string>> info;
     const auto effects = player_ptr->effects();
     const auto &blindness = effects->blindness();
-    if (blindness.is_blind()) {
+    if (blindness.is_active()) {
         info.emplace_back(report_magics_aux(blindness.current()),
             _("あなたは目が見えない", "You cannot see"));
     }
 
     const auto &confusion = effects->confusion();
-    if (confusion.is_confused()) {
+    if (confusion.is_active()) {
         info.emplace_back(report_magics_aux(confusion.current()),
             _("あなたは混乱している", "You are confused"));
     }
 
     const auto &fear = effects->fear();
-    if (fear.is_fearful()) {
+    if (fear.is_active()) {
         info.emplace_back(report_magics_aux(fear.current()),
             _("あなたは恐怖に侵されている", "You are terrified"));
     }
 
     const auto &player_poison = effects->poison();
-    if (player_poison.is_poisoned()) {
+    if (player_poison.is_active()) {
         info.emplace_back(report_magics_aux(player_poison.current()),
             _("あなたは毒に侵されている", "You are poisoned"));
     }
 
     const auto &hallucination = effects->hallucination();
-    if (hallucination.is_hallucinated()) {
+    if (hallucination.is_active()) {
         info.emplace_back(report_magics_aux(hallucination.current()),
             _("あなたは幻覚を見ている", "You are hallucinating"));
     }
@@ -360,7 +361,7 @@ void report_magics(PlayerType *player_ptr)
     }
 
     const auto &protection = effects->protection();
-    if (protection.is_protected()) {
+    if (protection.is_active()) {
         info.emplace_back(report_magics_aux(protection.current()),
             _("あなたは邪悪なる存在から守られている", "You are protected from evil"));
     }
@@ -430,21 +431,23 @@ void report_magics(PlayerType *player_ptr)
     const int size = std::ssize(info);
     auto k = 2;
     for (int j = 0; j < size; j++) {
-        constexpr auto fmt = _("%-28s : 期間 - %s ", "%s %s.");
-        const auto mes = format(fmt, info[j].second.data(), report_magic_durations[info[j].first].data());
+        constexpr auto fmt = _("{:<28} : 期間 - {} ", "{} {}.");
+        const auto mes = fmt::format(fmt, fmt::bytes(info[j].second), report_magic_durations[info[j].first]);
         prt(mes, k++, 15);
 
         /* Every 20 entries (lines 2 to 21), start over */
         if ((k == 22) && (j + 1 < size)) {
-            prt(_("-- 続く --", "-- more --"), k, 15);
-            inkey();
+            constexpr auto more_prompt = _("-- 続く --", "-- more --");
+            prt(more_prompt, k, 15);
+            (void)input_key_with_context(InputKind::ANY_KEY, more_prompt);
             for (; k > 2; k--) {
                 prt("", k, 15);
             }
         }
     }
 
-    prt(_("[何かキーを押すとゲームに戻ります]", "[Press any key to continue]"), k, 13);
-    inkey();
+    constexpr auto prompt = _("[何かキーを押すとゲームに戻ります]", "[Press any key to continue]");
+    prt(prompt, k, 13);
+    (void)input_key_with_context(InputKind::ANY_KEY, prompt);
     screen_load();
 }

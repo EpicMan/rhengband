@@ -13,14 +13,15 @@
 #include "monster/monster-util.h"
 #include "monster/smart-learn-types.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/projection-path-calculator.h"
 #include "tracking/health-bar-tracker.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 #include <string>
@@ -51,7 +52,7 @@ void anger_monster(PlayerType *player_ptr, MonsterEntity &monster)
     }
 
     const auto m_name = monster_desc(player_ptr, monster, 0);
-    msg_format(_("%s^は怒った！", "%s^ gets angry!"), m_name.data());
+    msg_print(_("{}は怒った！", "{} gets angry!"), str_upcase_first(m_name));
     monster.set_hostile();
     chg_virtue(player_ptr, Virtue::INDIVIDUALISM, 1);
     chg_virtue(player_ptr, Virtue::HONOUR, -1);
@@ -61,14 +62,13 @@ void anger_monster(PlayerType *player_ptr, MonsterEntity &monster)
 
 /*!
  * @brief モンスターの睡眠状態値をセットする。0で起きる
- * @param player_ptr プレイヤーへの参照ポインタ
+ * @param floor フロアへの参照
  * @param m_idx モンスター参照ID
  * @param v セットする値
  * @return 別途更新処理が必要な場合TRUEを返す
  */
-bool set_monster_csleep(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
+bool set_monster_csleep(FloorType &floor, MONSTER_IDX m_idx, int v)
 {
-    auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
     bool notice = false;
     v = (v > 10000) ? 10000 : (v < 0) ? 0
@@ -90,16 +90,16 @@ bool set_monster_csleep(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
         return false;
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (monster.ml) {
         HealthBarTracker::get_instance().set_flag_if_tracking(m_idx);
         if (monster.is_riding()) {
-            rfu.set_flag(MainWindowRedrawingFlag::UHEALTH);
+            dur.set_flag(MainWindowRedrawingFlag::UHEALTH);
         }
     }
 
     if (monster.get_monrace().brightness_flags.has_any_of(has_ld_mask)) {
-        rfu.set_flag(StatusRecalculatingFlag::MONSTER_LITE);
+        dur.set_flag(StatusRecalculatingFlag::MONSTER_LITE);
     }
 
     return true;
@@ -107,14 +107,13 @@ bool set_monster_csleep(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
 
 /*!
  * @brief モンスターの加速状態値をセット
- * @param player_ptr プレイヤーへの参照ポインタ
+ * @param floor フロアへの参照
  * @param m_idx モンスター参照ID
  * @param v セットする値
  * @return 別途更新処理が必要な場合TRUEを返す
  */
-bool set_monster_fast(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
+bool set_monster_fast(FloorType &floor, MONSTER_IDX m_idx, int v)
 {
-    auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
     bool notice = false;
     v = (v > 200) ? 200 : (v < 0) ? 0
@@ -136,8 +135,8 @@ bool set_monster_fast(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
         return false;
     }
 
-    if (monster.is_riding() && !player_ptr->leaving) {
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
+    if (monster.is_riding()) {
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
     }
 
     return true;
@@ -145,14 +144,13 @@ bool set_monster_fast(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
 
 /*
  * @brief モンスターの原則状態値をセット
- * @param player_ptr プレイヤーへの参照ポインタ
+ * @param floor フロアへの参照
  * @param m_idx モンスター参照ID
  * @param v セットする値
  * @return 別途更新処理が必要な場合TRUEを返す
  */
-bool set_monster_slow(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
+bool set_monster_slow(FloorType &floor, MONSTER_IDX m_idx, int v)
 {
-    auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
     bool notice = false;
     v = (v > 200) ? 200 : (v < 0) ? 0
@@ -174,8 +172,8 @@ bool set_monster_slow(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
         return false;
     }
 
-    if (monster.is_riding() && !player_ptr->leaving) {
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
+    if (monster.is_riding()) {
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
     }
 
     return true;
@@ -183,14 +181,13 @@ bool set_monster_slow(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
 
 /*!
  * @brief モンスターの朦朧状態値をセット
- * @param player_ptr プレイヤーへの参照ポインタ
+ * @param floor フロアへの参照
  * @param m_idx モンスター参照ID
  * @param v セットする値
  * @return 別途更新処理が必要な場合TRUEを返す
  */
-bool set_monster_stunned(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
+bool set_monster_stunned(FloorType &floor, MONSTER_IDX m_idx, int v)
 {
-    auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
     bool notice = false;
     v = (v > 200) ? 200 : (v < 0) ? 0
@@ -213,14 +210,13 @@ bool set_monster_stunned(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
 
 /*!
  * @brief モンスターの混乱状態値をセット
- * @param player_ptr プレイヤーへの参照ポインタ
+ * @param floor フロアへの参照
  * @param m_idx モンスター参照ID
  * @param v セットする値
  * @return 別途更新処理が必要な場合TRUEを返す
  */
-bool set_monster_confused(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
+bool set_monster_confused(FloorType &floor, MONSTER_IDX m_idx, int v)
 {
-    auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
     bool notice = false;
     v = (v > 200) ? 200 : (v < 0) ? 0
@@ -243,14 +239,13 @@ bool set_monster_confused(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
 
 /*!
  * @brief モンスターの恐慌状態値をセット
- * @param player_ptr プレイヤーへの参照ポインタ
+ * @param floor フロアへの参照
  * @param m_idx モンスター参照ID
  * @param v セットする値
  * @return 別途更新処理が必要な場合TRUEを返す
  */
-bool set_monster_monfear(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
+bool set_monster_monfear(FloorType &floor, MONSTER_IDX m_idx, int v)
 {
-    auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
     bool notice = false;
     v = (v > 200) ? 200 : (v < 0) ? 0
@@ -276,7 +271,7 @@ bool set_monster_monfear(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
     if (monster.ml) {
         HealthBarTracker::get_instance().set_flag_if_tracking(m_idx);
         if (monster.is_riding()) {
-            RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
+            DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
         }
     }
 
@@ -285,15 +280,14 @@ bool set_monster_monfear(PlayerType *player_ptr, MONSTER_IDX m_idx, int v)
 
 /*!
  * @brief モンスターの無敵状態値をセット
- * @param player_ptr プレイヤーへの参照ポインタ
+ * @param floor フロアへの参照
  * @param m_idx モンスター参照ID
  * @param v セットする値
  * @param energy_need TRUEならば無敵解除時に行動ターン消費を行う
  * @return 別途更新処理が必要な場合TRUEを返す
  */
-bool set_monster_invulner(PlayerType *player_ptr, MONSTER_IDX m_idx, int v, bool energy_need)
+bool set_monster_invulner(FloorType &floor, MONSTER_IDX m_idx, int v, bool energy_need)
 {
-    auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
     bool notice = false;
     v = (v > 200) ? 200 : (v < 0) ? 0
@@ -321,7 +315,7 @@ bool set_monster_invulner(PlayerType *player_ptr, MONSTER_IDX m_idx, int v, bool
     if (monster.ml) {
         HealthBarTracker::get_instance().set_flag_if_tracking(m_idx);
         if (monster.is_riding()) {
-            RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
+            DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
         }
     }
 
@@ -368,20 +362,13 @@ bool set_monster_timewalk(PlayerType *player_ptr, MONSTER_IDX m_idx, int num, bo
 
         process_monster(player_ptr, world.timewalk_m_idx);
         monster.reset_target();
-        handle_stuff(player_ptr);
+        handle_stuff_with_inventory_arrangement(player_ptr);
         if (vs_player) {
             term_xtra(TERM_XTRA_DELAY, 500);
         }
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::MAP);
-    rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-    static constexpr auto flags = {
-        SubWindowRedrawingFlag::OVERHEAD,
-        SubWindowRedrawingFlag::DUNGEON,
-    };
-    rfu.set_flags(flags);
+    DeferredUpdateRequests::get_instance().request_monster_update_and_map_redrawing();
     world.timewalk_m_idx = 0;
     const auto p_pos = player_ptr->get_position();
     const auto m_pos = monster.get_position();

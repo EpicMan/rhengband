@@ -10,13 +10,13 @@
 #include "object/item-use-flags.h"
 #include "object/object-info.h"
 #include "system/baseitem/baseitem-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
-#include "term/z-form.h"
 #include "util/string-processor.h"
+#include <fmt/format.h>
 
 /*!
  * @brief 所持アイテムの表示を行う /
@@ -28,7 +28,6 @@
  */
 COMMAND_CODE show_inventory(PlayerType *player_ptr, int target_item, BIT_FLAGS mode, const ItemTester &item_tester)
 {
-    COMMAND_CODE i;
     int k, l, z = 0;
     COMMAND_CODE out_index[23]{};
     TERM_COLOR out_color[23]{};
@@ -37,15 +36,16 @@ COMMAND_CODE show_inventory(PlayerType *player_ptr, int target_item, BIT_FLAGS m
     auto col = command_gap;
     const auto &[wid, hgt] = term_get_size();
     auto len = wid - col - 1;
-    for (i = 0; i < INVEN_PACK; i++) {
-        const auto &item = *player_ptr->inventory[i];
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        const auto &item = *player_ptr->inventory[i_idx];
         if (!item.is_valid()) {
             continue;
         }
 
-        z = i + 1;
+        z = enum2i(i_idx) + 1;
     }
 
+    COMMAND_CODE i;
     const auto inven_label = prepare_label_string(player_ptr, USE_INVEN, item_tester);
     for (k = 0, i = 0; i < z; i++) {
         auto &item = *player_ptr->inventory[i];
@@ -95,9 +95,9 @@ COMMAND_CODE show_inventory(PlayerType *player_ptr, int target_item, BIT_FLAGS m
                 head = "  ";
             }
         } else if (i <= INVEN_PACK) {
-            head = format("%c)", inven_label[i]);
+            head = fmt::format("{:c})", inven_label[i]);
         } else {
-            head = format("%c)", index_to_label(i));
+            head = fmt::format("{:c})", index_to_label(i));
         }
 
         put_str(head, j + 1, col);
@@ -114,7 +114,7 @@ COMMAND_CODE show_inventory(PlayerType *player_ptr, int target_item, BIT_FLAGS m
         c_put_str(out_color[j], out_desc[j], j + 1, cur_col);
         if (show_weights) {
             const auto wgt = item.weight * item.number;
-            const auto weight = format(_("%3d.%1d kg", "%3d.%1d lb"), _(lb_to_kg_integer(wgt), wgt / 10), _(lb_to_kg_fraction(wgt), wgt % 10));
+            const auto weight = fmt::format(_("{:3}.{:1} kg", "{:3}.{:1} lb"), _(lb_to_kg_integer(wgt), wgt / 10), _(lb_to_kg_fraction(wgt), wgt % 10));
             prt(weight, j + 1, wid - 9);
         }
     }
@@ -133,22 +133,22 @@ COMMAND_CODE show_inventory(PlayerType *player_ptr, int target_item, BIT_FLAGS m
  */
 void display_inventory(PlayerType *player_ptr, const ItemTester &item_tester)
 {
-    int i, z = 0;
+    int z = 0;
     TERM_COLOR attr = TERM_WHITE;
     if (!player_ptr || player_ptr->inventory.empty()) {
         return;
     }
 
     const auto &[wid, hgt] = term_get_size();
-    for (i = 0; i < INVEN_PACK; i++) {
-        auto o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        auto o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
-        z = i + 1;
+        z = enum2i(i_idx) + 1;
     }
 
-    for (i = 0; i < z; i++) {
+    for (auto i = 0; i < z; i++) {
         if (i >= hgt) {
             break;
         }
@@ -183,14 +183,12 @@ void display_inventory(PlayerType *player_ptr, const ItemTester &item_tester)
 
         if (show_weights) {
             const auto wgt = item.weight * item.number;
-            const auto weight = format(_("%3d.%1d kg", "%3d.%1d lb"),
-                _(lb_to_kg_integer(wgt), wgt / 10),
-                _(lb_to_kg_fraction(wgt), wgt % 10));
+            const auto weight = fmt::format(_("{:3}.{:1} kg", "{:3}.{:1} lb"), _(lb_to_kg_integer(wgt), wgt / 10), _(lb_to_kg_fraction(wgt), wgt % 10));
             prt(weight, i, wid - 9);
         }
     }
 
-    for (i = z; i < hgt; i++) {
+    for (auto i = z; i < hgt; i++) {
         term_erase(0, i);
     }
 }

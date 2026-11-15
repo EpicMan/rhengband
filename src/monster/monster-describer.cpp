@@ -8,12 +8,15 @@
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
+#include "system/monrace/monrace-service.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
+#include "term/z-rand.h"
 #include "timed-effect/timed-effects.h"
 #include "util/bit-flags-calculator.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
+#include "world/world.h"
 #include <fmt/format.h>
 #include <sstream>
 #include <string>
@@ -99,14 +102,14 @@ static tl::optional<std::string> decide_monster_personal_pronoun(const MonsterEn
         return tl::nullopt;
     }
 
-    const auto &monrace = monster.get_appearance_monrace();
+    const auto &monrace = monster.get_apparent_monrace();
     const auto kind = get_monster_pronoun_kind(monrace, pron);
     return get_monster_personal_pronoun(kind, mode);
 }
 
 static tl::optional<std::string> get_monster_self_pronoun(const MonsterEntity &monster, const BIT_FLAGS mode)
 {
-    const auto &monrace = monster.get_appearance_monrace();
+    const auto &monrace = monster.get_apparent_monrace();
     constexpr BIT_FLAGS self = MD_POSSESSIVE | MD_OBJECTIVE;
     if (!match_bits(mode, self, self)) {
         return tl::nullopt;
@@ -125,22 +128,25 @@ static tl::optional<std::string> get_monster_self_pronoun(const MonsterEntity &m
 
 static std::string get_describing_monster_name(const MonsterEntity &monster, const bool is_hallucinated, const BIT_FLAGS mode)
 {
-    const auto &monrace = monster.get_appearance_monrace();
+    const auto &monrace = monster.get_apparent_monrace();
     if (!is_hallucinated || any_bits(mode, MD_IGNORE_HALLU)) {
         return any_bits(mode, MD_TRUE_NAME) ? monster.get_real_monrace().name.string() : monrace.name.string();
     }
 
-    if (one_in_(2)) {
+    // 幻覚中の名前は表示専用で、ペット一覧のサブウィンドウなど呼び出される回数が環境によって変わる
+    // 場面でも使われるため、ゲームのターンとモンスターの位置・種族から作った乱数生成器を使い、名前をゲームの状態だけで決める
+    const auto turn = AngbandWorld::get_instance().game_turn;
+    auto rng = make_keyed_rng(KeyedRngPurpose::MONSTER_NAME, { turn, monster.fy, monster.fx, enum2i(monster.r_idx) });
+    if (one_in_(rng, 2)) {
         constexpr auto filename = _("silly_j.txt", "silly.txt");
-        const auto silly_name = get_random_line(filename, enum2i(monster.r_idx));
+        const auto silly_name = get_random_line(rng, filename, enum2i(monster.r_idx));
         if (silly_name) {
             return *silly_name;
         }
     }
 
-    const auto &monraces = MonraceList::get_instance();
-    const auto ids = monraces.search([](const auto &monrace) { return monrace.kind_flags.has_not(MonsterKindType::UNIQUE); });
-    return monraces.get_monrace(rand_choice(ids)).name.string();
+    const auto ids = MonraceService::search([](const auto &monrace) { return monrace.kind_flags.has_not(MonsterKindType::UNIQUE); });
+    return MonraceList::get_instance().get_monrace(rand_choice(rng, ids)).name.string();
 }
 
 #ifdef JP
@@ -164,18 +170,18 @@ static std::string replace_monster_name_undefined(std::string_view name)
 
 static tl::optional<std::string> get_fake_monster_name(const PlayerType &player, const MonsterEntity &monster, const std::string &name, const BIT_FLAGS mode)
 {
-    const auto &monrace = monster.get_appearance_monrace();
-    const auto is_hallucinated = player.effects()->hallucination().is_hallucinated();
+    const auto &monrace = monster.get_apparent_monrace();
+    const auto is_hallucinated = player.effects()->hallucination().is_active();
     if (monrace.kind_flags.has_not(MonsterKindType::UNIQUE) || (is_hallucinated && none_bits(mode, MD_IGNORE_HALLU))) {
         return tl::nullopt;
     }
 
     if (monster.mflag2.has(MonsterConstantFlagType::CHAMELEON) && none_bits(mode, MD_TRUE_NAME)) {
-        return _(replace_monster_name_undefined(name), format("%s?", name.data()));
+        return _(replace_monster_name_undefined(name), fmt::format("{}?", name));
     }
 
     if (AngbandSystem::get_instance().is_phase_out() && !monster.is_riding()) {
-        return format(_("%sもどき", "fake %s"), name.data());
+        return fmt::format(_("{}もどき", "fake {}"), name);
     }
 
     return name;
@@ -218,7 +224,7 @@ static std::string add_cameleon_name(const MonsterEntity &monster, const BIT_FLA
         return "";
     }
 
-    const auto &monrace = monster.get_appearance_monrace();
+    const auto &monrace = monster.get_apparent_monrace();
     if (monrace.kind_flags.has(MonsterKindType::UNIQUE)) {
         return _("(カメレオンの王)", "(Chameleon Lord)");
     }
@@ -244,11 +250,11 @@ std::string monster_desc(PlayerType *player_ptr, const MonsterEntity &monster, B
         return *pronoun_self;
     }
 
-    const auto is_hallucinated = player_ptr->effects()->hallucination().is_hallucinated();
+    const auto is_hallucinated = player_ptr->effects()->hallucination().is_active();
     const auto name = get_describing_monster_name(monster, is_hallucinated, mode);
     std::stringstream ss;
     if (monster.is_pet() && !monster.is_original_ap()) {
-        ss << _(replace_monster_name_undefined(name), format("%s?", name.data()));
+        ss << _(replace_monster_name_undefined(name), fmt::format("{}?", name));
     } else {
         ss << describe_non_pet(*player_ptr, monster, name, mode);
     }

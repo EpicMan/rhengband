@@ -16,7 +16,6 @@
 #include "game-option/map-screen-options.h"
 #include "game-option/play-record-options.h"
 #include "game-option/special-options.h"
-#include "info-reader/fixed-map-parser.h"
 #include "io/input-key-requester.h"
 #include "io/write-diary.h"
 #include "main/sound-definitions-table.h"
@@ -32,13 +31,15 @@
 #include "spell-realm/spells-hex.h"
 #include "spell-realm/spells-song.h"
 #include "status/action-setter.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/enums/dungeon/dungeon-id.h"
 #include "system/floor/floor-info.h"
 #include "system/floor/wilderness-grid.h"
 #include "system/grid-type-definition.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/services/dungeon-service.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/target-getter.h"
@@ -84,7 +85,7 @@ void do_cmd_go_up(PlayerType *player_ptr)
     const auto &terrain = grid.get_terrain();
     PlayerClass(player_ptr).break_samurai_stance({ SamuraiStanceType::MUSOU });
 
-    if (terrain.flags.has_not(TerrainCharacteristics::LESS)) {
+    if (terrain.flags.has_not(TerrainCharacteristics::UP_STAIRS)) {
         msg_print(_("ここには上り階段が見当たらない。", "I see no up staircase here."));
         return;
     }
@@ -108,8 +109,7 @@ void do_cmd_go_up(PlayerType *player_ptr)
         auto &quest = quests.get_quest(quest_id);
         if (quest.status == QuestStatusType::UNTAKEN) {
             if (quest.type != QuestKindType::RANDOM) {
-                init_flags = INIT_ASSIGN;
-                parse_fixed_map(player_ptr, QUEST_DEFINITION_LIST, 0, 0, 0, 0);
+                assign_json_quest_metadata(floor.quest_number);
             }
 
             quest.status = QuestStatusType::TAKEN;
@@ -161,23 +161,14 @@ void do_cmd_go_up(PlayerType *player_ptr)
     } else {
         auto &fcms = FloorChangeModesStore::get_instace();
         fcms->set({ FloorChangeMode::SAVE_FLOORS, FloorChangeMode::UP });
+        up_num = 1;
+        if (terrain.flags.has(TerrainCharacteristics::SHAFT)) {
+            fcms->set(FloorChangeMode::SHAFT);
+            up_num *= 2;
+        }
 
-        if (permanent_descent) {
-            if (terrain.flags.has(TerrainCharacteristics::SHAFT)) {
-                fcms->set(FloorChangeMode::SHAFT);
-            }
-
+        if (floor.dun_level - up_num < floor.get_dungeon_definition().mindepth) {
             up_num = floor.dun_level;
-        } else {
-            up_num = 1;
-            if (terrain.flags.has(TerrainCharacteristics::SHAFT)) {
-                fcms->set(FloorChangeMode::SHAFT);
-                up_num *= 2;
-            }
-
-            if (floor.dun_level - up_num < floor.get_dungeon_definition().mindepth) {
-                up_num = floor.dun_level;
-            }            
         }
     }
 
@@ -185,20 +176,20 @@ void do_cmd_go_up(PlayerType *player_ptr)
         exe_write_diary(floor, DiaryKind::STAIR, 0 - up_num, _("階段を上った", "climbed up the stairs to"));
     }
 
-    /*if (up_num == floor.dun_level) {*/
+    if (up_num == floor.dun_level) {
         if (is_echizen(player_ptr)) {
             msg_print(_("なんだこの階段は！", "What's this STAIRWAY!"));
         } else {
-            msg_print(_("地上に戻った。", "You enter a maze of staircases to the surface."));
+            msg_print(_("地上に戻った。", "You go back to the surface."));
         }
         player_ptr->word_recall = 0;
-    /*} else {
+    } else {
         if (is_echizen(player_ptr)) {
             msg_print(_("なんだこの階段は！", "What's this STAIRWAY!"));
         } else {
             msg_print(_("階段を上って新たなる迷宮へと足を踏み入れた。", "You enter a maze of up staircases."));
         }
-    }*/
+    }
 
     sound(SoundKind::STAIRWAY);
 
@@ -216,7 +207,7 @@ void do_cmd_go_down(PlayerType *player_ptr)
     auto &floor = *player_ptr->current_floor_ptr;
     auto &grid = floor.grid_array[player_ptr->y][player_ptr->x];
     auto &terrain = grid.get_terrain();
-    if (terrain.flags.has_not(TerrainCharacteristics::MORE)) {
+    if (terrain.flags.has_not(TerrainCharacteristics::DOWN_STAIRS)) {
         msg_print(_("ここには下り階段が見当たらない。", "I see no down staircase here."));
         return;
     }
@@ -248,8 +239,7 @@ void do_cmd_go_down(PlayerType *player_ptr)
         auto &quest = quests.get_quest(floor.quest_number);
         if (quest.status == QuestStatusType::UNTAKEN) {
             if (quest.type != QuestKindType::RANDOM) {
-                init_flags = INIT_ASSIGN;
-                parse_fixed_map(player_ptr, QUEST_DEFINITION_LIST, 0, 0, 0, 0);
+                assign_json_quest_metadata(floor.quest_number);
             }
 
             quest.status = QuestStatusType::TAKEN;
@@ -321,7 +311,7 @@ void do_cmd_go_down(PlayerType *player_ptr)
         }
     } else {
         if (dungeon_id > DungeonId::WILDERNESS) {
-            msg_format(_("%sへ入った。", "You entered %s."), dungeon.text.data());
+            msg_print(_("{}へ入った。", "You entered {}."), dungeon.text);
         } else {
             if (is_echizen(player_ptr)) {
                 msg_print(_("なんだこの階段は！", "What's this STAIRWAY!"));
@@ -355,7 +345,7 @@ void do_cmd_walk(PlayerType *player_ptr, bool pickup)
 {
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -435,7 +425,7 @@ void do_cmd_stay(PlayerType *player_ptr, bool pickup)
     uint32_t mpe_mode = MPE_STAYING | MPE_ENERGY_USE;
     if (command_arg) {
         command_rep = command_arg - 1;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
         command_arg = 0;
     }
 
@@ -516,9 +506,9 @@ void do_cmd_rest(PlayerType *player_ptr)
 
     player_ptr->resting = command_arg;
     player_ptr->action = ACTION_REST;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(StatusRecalculatingFlag::BONUS);
-    rfu.set_flag(MainWindowRedrawingFlag::ACTION);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(StatusRecalculatingFlag::BONUS);
+    dur.set_flag(MainWindowRedrawingFlag::ACTION);
     handle_stuff(player_ptr);
     term_fresh();
 }

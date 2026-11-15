@@ -2,19 +2,19 @@
 #include "flavor/flavor-describer.h"
 #include "flavor/object-flavor-types.h"
 #include "io/files-util.h"
-#include "object-enchant/special-object-flags.h"
 #include "object-enchant/trg-types.h"
 #include "object/object-value.h"
 #include "system/angband-system.h"
 #include "system/baseitem/baseitem-definition.h"
 #include "system/baseitem/baseitem-list.h"
-#include "system/item-entity.h"
+#include "system/baseitem/baseitem-service.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "term/z-form.h"
 #include "util/angband-files.h"
 #include "view/display-messages.h"
 #include "wizard/spoiler-util.h"
 #include <algorithm>
+#include <fmt/format.h>
 #include <sstream>
 
 /*!
@@ -56,7 +56,7 @@ static std::string describe_dam_or_ac(const ItemEntity &item)
     case ItemKindType::SOFT_ARMOR:
     case ItemKindType::HARD_ARMOR:
     case ItemKindType::DRAG_ARMOR:
-        return format("%d", item.ac);
+        return fmt::format("{}", item.ac);
     default:
         return {};
     }
@@ -76,7 +76,7 @@ static std::string describe_chance(const ItemEntity &item)
     for (auto i = 0U; i < baseitem.alloc_tables.size(); i++) {
         const auto &[level, chance] = baseitem.alloc_tables[i];
         if (chance > 0) {
-            ss << format("%s%3dF:%+4d", (i != 0 ? "/" : ""), level, 100 / chance);
+            ss << fmt::format("{}{:3}F:{:+4}", (i != 0 ? "/" : ""), level, 100 / chance);
         }
     }
 
@@ -91,19 +91,21 @@ static std::string describe_chance(const ItemEntity &item)
  */
 static std::string describe_weight(const ItemEntity &item)
 {
-    return format("%3d.%d", (int)(item.weight / 10), (int)(item.weight % 10));
+    return fmt::format("{:3}.{}", item.weight / 10, item.weight % 10);
 }
 
 /*!
  * @brief obj-desc.txt出力用にベースアイテムIDからItemEntityオブジェクトを生成する
  * @param bi_id ベースアイテムID
  * @return obj-desc.txt出力用に使用するItemEntityオブジェクト
- * @details 人形・像・死体類はpvalが0だと異常アイテム扱いで例外が飛ぶためダミー値を入れておく.
+ * @details 人形・像・死体類はpvalにモンスター種族IDが入る。スポイラーには種族名込みの名前と
+ * 価格の双方を出力するため、pvalが0のままだと名前の記述と価格計算
+ * (ItemEntity::calc_figurine_value()) の両方で例外が飛ぶ。ダミー値を入れておく.
  */
 static ItemEntity prepare_item_for_obj_desc(short bi_id)
 {
     ItemEntity item(bi_id);
-    item.ident |= IDENT_KNOWN;
+    item.set_identification_flag(IdentificationFlag::KNOWN);
     switch (item.bi_key.tval()) {
     case ItemKindType::FIGURINE:
     case ItemKindType::STATUE:
@@ -132,20 +134,23 @@ SpoilerOutputResultType spoil_obj_desc()
         return SpoilerOutputResultType::FILE_OPEN_FAILED;
     }
 
-    constexpr auto fmt_version = "Spoiler File -- Basic Items (%s)\n\n\n";
-    ofs << format(fmt_version, AngbandSystem::get_instance().build_version_expression(VersionExpression::FULL).data());
-    ofs << format("%-37s%8s%7s%5s %40s%9s\n", "Description", "Dam/AC", "Wgt", "Lev", "Chance", "Cost");
-    ofs << format("%-37s%8s%7s%5s %40s%9s\n", "-------------------------------------", "------", "---", "---", "----------------", "----");
+    constexpr auto fmt_version = "Spoiler File -- Basic Items ({})\n\n\n";
+    ofs << fmt::format(fmt_version, AngbandSystem::get_instance().build_version_expression(VersionExpression::FULL));
+    ofs << fmt::format("{:<37}{:>8}{:>7}{:>5} {:>40}{:>9}\n", "Description", "Dam/AC", "Wgt", "Lev", "Chance", "Cost");
+    ofs << fmt::format("{:<37}{:>8}{:>7}{:>5} {:>40}{:>9}\n", "-------------------------------------", "------", "---", "---", "----------------", "----");
 
+    const auto &baseitems = BaseitemList::get_instance();
     for (const auto &[tval_list, name] : group_item_list) {
         std::vector<short> whats;
         for (auto tval : tval_list) {
-            for (const auto &baseitem : BaseitemList::get_instance()) {
+            for (short bi_id : baseitems.collect_valid_bi_ids()) {
+                const auto &baseitem = baseitems.get_baseitem(bi_id);
                 if ((baseitem.bi_key.tval() == tval) && baseitem.gen_flags.has_not(ItemGenerationTraitType::INSTA_ART)) {
-                    whats.push_back(baseitem.idx);
+                    whats.push_back(bi_id);
                 }
             }
         }
+
         if (whats.empty()) {
             continue;
         }
@@ -168,7 +173,8 @@ SpoilerOutputResultType spoil_obj_desc()
             const auto dam_or_ac = describe_dam_or_ac(item);
             const auto weight = describe_weight(item);
             const auto chance = describe_chance(item);
-            ofs << format("  %-35s%8s%7s%5d %-40s%9d\n", item_name.data(), dam_or_ac.data(), weight.data(), depth, chance.data(), price);
+            const auto line = fmt::format("  {:<35}{:>8}{:>7}{:5} {:<40}{:9}\n", fmt::bytes(item_name), fmt::bytes(dam_or_ac), fmt::bytes(weight), depth, fmt::bytes(chance), price);
+            ofs << line;
         }
     }
 

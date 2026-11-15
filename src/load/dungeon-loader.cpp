@@ -1,5 +1,4 @@
 #include "load/dungeon-loader.h"
-#include "dungeon/quest.h"
 #include "floor/floor-save-util.h"
 #include "floor/floor-save.h"
 #include "load/angband-version-comparer.h"
@@ -8,6 +7,8 @@
 #include "load/load-util.h"
 #include "load/old/load-v1-5-0.h"
 #include "save/floor-writer.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/player-type-definition.h"
@@ -45,17 +46,7 @@ static errr rd_dungeon(PlayerType *player_ptr)
         err = rd_saved_floor(player_ptr, nullptr);
     } else {
         for (int i = 0; i < num; i++) {
-            saved_floor_type *sf_ptr = &saved_floors[i];
-
-            sf_ptr->floor_id = rd_s16b();
-            sf_ptr->savefile_id = rd_byte();
-
-            sf_ptr->dun_level = rd_s16b();
-
-            sf_ptr->last_visit = rd_s32b();
-            sf_ptr->visit_mark = rd_u32b();
-            sf_ptr->upper_floor_id = rd_s16b();
-            sf_ptr->lower_floor_id = rd_s16b();
+            saved_floors[i] = rd_saved_floor_header();
         }
 
         for (int i = 0; i < num; i++) {

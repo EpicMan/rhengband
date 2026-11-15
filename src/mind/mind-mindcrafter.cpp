@@ -1,5 +1,4 @@
 #include "mind/mind-mindcrafter.h"
-#include "autopick/autopick.h"
 #include "avatar/avatar.h"
 #include "core/window-redrawer.h"
 #include "effect/attribute-types.h"
@@ -9,12 +8,9 @@
 #include "flavor/flavor-describer.h"
 #include "flavor/object-flavor-types.h"
 #include "floor/floor-object.h"
-#include "game-option/auto-destruction-options.h"
 #include "hpmp/hp-mp-processor.h"
-#include "mind/mind-mindcrafter.h"
 #include "mind/mind-numbers.h"
-#include "object-enchant/item-feeling.h"
-#include "object-enchant/special-object-flags.h"
+#include "object/item-tester-hooker.h"
 #include "object/item-use-flags.h"
 #include "object/object-mark-types.h"
 #include "perception/object-perception.h"
@@ -32,104 +28,45 @@
 #include "status/buff-setter.h"
 #include "status/element-resistance.h"
 #include "status/sight-setter.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/target-getter.h"
-#include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
 
 /*!
  * @brief 超能力者のサイコメトリー処理/ Forcibly pseudo-identify an object in the inventory (or on the floor)
  * @param player_ptr プレイヤーへの参照ポインタ
- * @note
- * currently this function allows pseudo-id of any object,
- * including silly ones like potions & scrolls, which always
- * get '{average}'. This should be changed, either to stop such
- * items from being pseudo-id'd, or to allow psychometry to
- * detect whether the unidentified potion/scroll/etc is
- * good (Cure Light Wounds, Restore Strength, etc) or
- * bad (Poison, Weakness etc) or 'useless' (Slime Mold Juice, etc).
+ * @details 定期の擬似鑑定と同じく、感触を得られる種類 (武器・防具・矢弾・装飾品など) だけを調べられる。
  */
 bool psychometry(PlayerType *player_ptr)
 {
     constexpr auto q = _("どのアイテムを調べますか？", "Meditate on which item? ");
     constexpr auto s = _("調べるアイテムがありません。", "You have nothing appropriate.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT));
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT), FuncItemTester(&ItemEntity::can_be_sensed));
+    if (!item) {
         return false;
     }
 
-    if (o_ptr->is_known()) {
+    if (item->is_known()) {
         msg_print(_("何も新しいことは判らなかった。", "You cannot find out anything more about that."));
         return true;
     }
 
-    item_feel_type feel = pseudo_value_check_heavy(o_ptr);
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, (OD_OMIT_PREFIX | OD_NAME_ONLY));
+    const auto feel = pseudo_value_check_heavy(item.get());
+    const auto item_name = describe_flavor(player_ptr, *item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
     if (!feel) {
-        msg_format(_("%sからは特に変わった事は感じとれなかった。", "You do not perceive anything unusual about the %s."), item_name.data());
+        msg_print(_("{}からは特に変わった事は感じとれなかった。", "You do not perceive anything unusual about the {}."), item_name);
         return true;
     }
 
 #ifdef JP
-    msg_format("%sは%sという感じがする...", item_name.data(), game_inscriptions[feel]);
+    msg_print("{}は{}という感じがする...", item_name, game_inscriptions[feel]);
 #else
-    msg_format("You feel that the %s %s %s...", item_name.data(), ((o_ptr->number == 1) ? "is" : "are"), game_inscriptions[feel]);
+    msg_print("You feel that the {} {} {}...", item_name, ((item->number == 1) ? "is" : "are"), game_inscriptions[feel]);
 #endif
 
-    set_bits(o_ptr->ident, IDENT_SENSE);
-    o_ptr->feeling = feel;
-    o_ptr->marked.set(OmType::TOUCHED);
-
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::COMBINATION,
-        StatusRecalculatingFlag::REORDER,
-    };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::PLAYER,
-        SubWindowRedrawingFlag::FLOOR_ITEMS,
-        SubWindowRedrawingFlag::FOUND_ITEMS,
-    };
-    rfu.set_flags(flags_swrf);
-
-    bool okay = false;
-    switch (o_ptr->bi_key.tval()) {
-    case ItemKindType::SHOT:
-    case ItemKindType::ARROW:
-    case ItemKindType::BOLT:
-    case ItemKindType::BOW:
-    case ItemKindType::DIGGING:
-    case ItemKindType::HAFTED:
-    case ItemKindType::POLEARM:
-    case ItemKindType::SWORD:
-    case ItemKindType::BOOTS:
-    case ItemKindType::GLOVES:
-    case ItemKindType::HELM:
-    case ItemKindType::CROWN:
-    case ItemKindType::SHIELD:
-    case ItemKindType::CLOAK:
-    case ItemKindType::SOFT_ARMOR:
-    case ItemKindType::HARD_ARMOR:
-    case ItemKindType::DRAG_ARMOR:
-    case ItemKindType::CARD:
-    case ItemKindType::RING:
-    case ItemKindType::AMULET:
-    case ItemKindType::LITE:
-    case ItemKindType::FIGURINE:
-        okay = true;
-        break;
-
-    default:
-        break;
-    }
-
-    autopick_alter_item(player_ptr, i_idx, (bool)(okay && destroy_feeling));
+    item->marked.set(OmType::TOUCHED);
+    apply_item_feeling(player_ptr, i_idx, feel);
     return true;
 }
 

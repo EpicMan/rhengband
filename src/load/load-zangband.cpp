@@ -1,9 +1,7 @@
 #include "load/load-zangband.h"
 #include "avatar/avatar.h"
-#include "dungeon/quest.h"
 #include "floor/dungeon-feeling.h"
 #include "game-option/option-flags.h"
-#include "info-reader/fixed-map-parser.h"
 #include "load/angband-version-comparer.h"
 #include "load/load-util.h"
 #include "market/bounty.h"
@@ -21,8 +19,10 @@
 #include "spell/spells-status.h"
 #include "system/building-type-definition.h"
 #include "system/dungeon/dungeon-record.h"
+#include "system/dungeon/quest-definition.h"
 #include "system/enums/dungeon/dungeon-id.h"
 #include "system/floor/floor-info.h"
+#include "system/floor/town-records.h"
 #include "system/inner-game-data.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
@@ -160,6 +160,7 @@ void set_zangband_reflection(PlayerType *player_ptr)
 void rd_zangband_dungeon()
 {
     DungeonRecords::get_instance().get_record(DungeonId::ANGBAND).set_max_level(rd_s16b());
+    DungeonRecords::get_instance().get_record(DungeonId::ANGBAND).mark_visited();
 }
 
 void set_zangband_game_turns(PlayerType *player_ptr)
@@ -194,10 +195,10 @@ void set_zangband_action(PlayerType *player_ptr)
     }
 }
 
-void set_zangband_visited_towns(PlayerType *player_ptr)
+void set_zangband_visited_towns()
 {
     strip_bytes(4);
-    player_ptr->visit = 1L;
+    TownRecords::get_instance().initialize();
 }
 
 void set_zangband_quest(PlayerType *player_ptr, QuestType *const q_ptr, const QuestId loading_quest_index, const QuestId old_inside_quest)
@@ -207,9 +208,7 @@ void set_zangband_quest(PlayerType *player_ptr, QuestType *const q_ptr, const Qu
         return;
     }
 
-    init_flags = INIT_ASSIGN;
-    player_ptr->current_floor_ptr->quest_number = loading_quest_index;
-    parse_fixed_map(player_ptr, QUEST_DEFINITION_LIST, 0, 0, 0, 0);
+    assign_json_quest_metadata(loading_quest_index);
     player_ptr->current_floor_ptr->quest_number = old_inside_quest;
 }
 

@@ -5,13 +5,12 @@
 #include "util/finalizer.h"
 #include <array>
 #include <concepts>
+#include <fmt/format.h>
 #include <limits>
 #include <sstream>
 #include <string>
 #include <tl/optional.hpp>
 
-/// @note clang-formatによるconceptの整形が安定していないので抑制しておく
-// clang-format off
 /*!
  * @brief 型Argのオブジェクトの説明を生成する関数の型Funcを表すコンセプト
  */
@@ -30,7 +29,6 @@ concept SizedContainer = requires(T t) {
     std::size(t);
     typename T::value_type;
 };
-// clang-format on
 
 /*!
  * @brief 候補を選択するためのクラス
@@ -117,7 +115,7 @@ private:
             put_str(ss.str(), i + 1, this->start_col);
         }
         if (page_max > 1) {
-            const auto page_info = format(" -- more (%lu/%lu) --", page + 1, page_max);
+            const auto page_info = fmt::format(" -- more ({}/{}) --", page + 1, page_max);
             put_str(page_info, page_item_count + 1, this->start_col);
         }
     }

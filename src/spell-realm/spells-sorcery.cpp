@@ -9,11 +9,11 @@
 #include "object-hook/hook-expendable.h"
 #include "object/item-use-flags.h"
 #include "object/object-value.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
-#include "term/z-form.h"
 #include "view/display-messages.h"
+#include <fmt/format.h>
 
 /*!
  * @brief アイテムの価値に応じた錬金術処理 /
@@ -30,42 +30,41 @@ bool alchemy(PlayerType *player_ptr)
 
     constexpr auto q = _("どのアイテムを金に変えますか？", "Turn which item to gold? ");
     constexpr auto s = _("金に変えられる物がありません。", "You have nothing to turn to gold.");
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_INVEN | USE_FLOOR));
-    if (o_ptr == nullptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_INVEN | USE_FLOOR));
+    if (!item) {
         return false;
     }
 
     auto amt = 1;
-    if (o_ptr->number > 1) {
-        amt = input_quantity(o_ptr->number);
+    if (item->number > 1) {
+        amt = input_quantity(item->number);
         if (amt <= 0) {
             return false;
         }
     }
 
-    const auto old_number = o_ptr->number;
-    o_ptr->number = amt;
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, 0);
-    o_ptr->number = old_number;
+    const auto old_number = item->number;
+    item->number = amt;
+    const auto item_name = describe_flavor(player_ptr, *item, 0);
+    item->number = old_number;
 
     if (!force) {
-        if (confirm_destroy || (o_ptr->calc_price() > 0)) {
-            const auto out_val = format(_("本当に%sを金に変えますか？", "Really turn %s to gold? "), item_name.data());
+        if (confirm_destroy || (item->calc_price() > 0)) {
+            const auto out_val = fmt::format(_("本当に{}を金に変えますか？", "Really turn {} to gold? "), item_name);
             if (!input_check(out_val)) {
                 return false;
             }
         }
     }
 
-    if (!can_player_destroy_object(o_ptr)) {
-        msg_format(_("%sを金に変えることに失敗した。", "You fail to turn %s to gold!"), item_name.data());
+    if (!can_player_destroy_object(item.get())) {
+        msg_print(_("{}を金に変えることに失敗した。", "You fail to turn {} to gold!"), item_name);
         return false;
     }
 
-    auto price = object_value_real(o_ptr);
+    auto price = int64_t{ object_value_real(item.get()) };
     if (price <= 0) {
-        msg_format(_("%sをニセの金に変えた。", "You turn %s to fool's gold."), item_name.data());
+        msg_print(_("{}をニセの金に変えた。", "You turn {} to fool's gold."), item_name);
         vary_item(player_ptr, i_idx, -amt);
         return true;
     }
@@ -80,11 +79,10 @@ bool alchemy(PlayerType *player_ptr)
         price = 30000;
     }
 
-    msg_format(_("%sを＄%d の金に変えた。", "You turn %s to %d coins worth of gold."), item_name.data(), price);
-    player_ptr->au += price;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::GOLD);
-    rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+    const auto gold = static_cast<PRICE>(price);
+    msg_print(_("{}を＄{} の金に変えた。", "You turn {} to {} coins worth of gold."), item_name, gold);
+    player_ptr->au = clamp_price(int64_t{ player_ptr->au } + gold);
+    DeferredUpdateRequests::get_instance().request_gold_redrawing();
     vary_item(player_ptr, i_idx, -amt);
     return true;
 }

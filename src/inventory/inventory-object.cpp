@@ -1,4 +1,5 @@
 #include "inventory/inventory-object.h"
+#include "autopick/autopick.h"
 #include "core/window-redrawer.h"
 #include "flavor/flavor-describer.h"
 #include "floor/floor-object.h"
@@ -10,13 +11,14 @@
 #include "object/object-value.h"
 #include "player-info/equipment-info.h"
 #include "spell-realm/spells-craft.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/object-sort.h"
 #include "view/display-messages.h"
 #include "view/object-describer.h"
 #include <algorithm>
+#include <range/v3/algorithm.hpp>
 
 void vary_item(PlayerType *player_ptr, INVENTORY_IDX i_idx, ITEM_NUMBER num)
 {
@@ -54,18 +56,13 @@ void inven_item_increase(PlayerType *player_ptr, INVENTORY_IDX i_idx, ITEM_NUMBE
     }
 
     o_ptr->number += num;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     static constexpr auto flags_srf = {
         StatusRecalculatingFlag::BONUS,
         StatusRecalculatingFlag::MP,
-        StatusRecalculatingFlag::COMBINATION,
     };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-    };
-    rfu.set_flags(flags_swrf);
+    dur.set_flags(flags_srf);
+    dur.set_flag(InventoryArrangementFlag::COMBINATION);
     if (o_ptr->number || !player_ptr->ele_attack) {
         return;
     }
@@ -97,21 +94,11 @@ void inven_item_optimize(PlayerType *player_ptr, INVENTORY_IDX i_idx)
         return;
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (i_idx >= INVEN_MAIN_HAND) {
         player_ptr->equip_cnt--;
         player_ptr->inventory[i_idx]->wipe();
-        static constexpr auto flags_srf = {
-            StatusRecalculatingFlag::BONUS,
-            StatusRecalculatingFlag::TORCH,
-            StatusRecalculatingFlag::MP,
-        };
-        rfu.set_flags(flags_srf);
-        static constexpr auto flags_swrf = {
-            SubWindowRedrawingFlag::EQUIPMENT,
-            SubWindowRedrawingFlag::SPELL,
-        };
-        rfu.set_flags(flags_swrf);
+        dur.request_equipment_change_updates();
         return;
     }
 
@@ -122,11 +109,12 @@ void inven_item_optimize(PlayerType *player_ptr, INVENTORY_IDX i_idx)
     std::rotate(first, first + 1, last + 1);
     (*last)->wipe();
 
+    // 装備の側と違い、ここでは能力の再計算を要求しないので、持ち物の並びと (魔法書が無くなったときの) 呪文の一覧も要求する
     static constexpr auto flags = {
         SubWindowRedrawingFlag::INVENTORY,
         SubWindowRedrawingFlag::SPELL,
     };
-    rfu.set_flags(flags);
+    dur.set_flags(flags);
 }
 
 /*!
@@ -156,7 +144,7 @@ void drop_from_inventory(PlayerType *player_ptr, INVENTORY_IDX i_idx, ITEM_NUMBE
 
     item.number = amt;
     const auto item_name = describe_flavor(player_ptr, item, 0);
-    msg_format(_("%s(%c)を落とした。", "You drop %s (%c)."), item_name.data(), index_to_label(i_idx));
+    msg_print(_("{}({:c})を落とした。", "You drop {} ({:c})."), item_name, index_to_label(i_idx));
     (void)drop_near(player_ptr, item, player_ptr->get_position(), false);
     vary_item(player_ptr, i_idx, -amt);
 }
@@ -218,7 +206,7 @@ void combine_pack(PlayerType *player_ptr)
                     }
                 }
 
-                RedrawingFlagsUpdater::get_instance().set_flag(SubWindowRedrawingFlag::INVENTORY);
+                DeferredUpdateRequests::get_instance().set_flag(SubWindowRedrawingFlag::INVENTORY);
                 combined = true;
                 break;
             }
@@ -253,9 +241,33 @@ void reorder_pack(PlayerType *player_ptr)
     }
 
     std::stable_sort(first, last, comp);
-    RedrawingFlagsUpdater::get_instance().set_flag(SubWindowRedrawingFlag::INVENTORY);
+    DeferredUpdateRequests::get_instance().set_flag(SubWindowRedrawingFlag::INVENTORY);
 
     msg_print(_("ザックの中のアイテムを並べ直した。", "You reorder some items in your pack."));
+}
+
+/*!
+ * @brief フラグに応じて所持品の自動破壊・結合・並べ替えを行う
+ * @details 所持品のスロット番号が変わるため、アイテムの番号を保持している処理の途中では呼ばない。
+ * 通常は handle_stuff_with_inventory_arrangement() を通じて呼ぶ。
+ */
+void update_inventory_arrangement(PlayerType *player_ptr)
+{
+    auto &dur = DeferredUpdateRequests::get_instance();
+    if (dur.has(InventoryArrangementFlag::AUTO_DESTRUCTION)) {
+        dur.reset_flag(InventoryArrangementFlag::AUTO_DESTRUCTION);
+        autopick_delayed_alter(player_ptr);
+    }
+
+    if (dur.has(InventoryArrangementFlag::COMBINATION)) {
+        dur.reset_flag(InventoryArrangementFlag::COMBINATION);
+        combine_pack(player_ptr);
+    }
+
+    if (dur.has(InventoryArrangementFlag::REORDER)) {
+        dur.reset_flag(InventoryArrangementFlag::REORDER);
+        reorder_pack(player_ptr);
+    }
 }
 
 /*!
@@ -266,27 +278,23 @@ void reorder_pack(PlayerType *player_ptr)
  */
 int16_t store_item_to_inventory(PlayerType *player_ptr, ItemEntity *o_ptr)
 {
-    INVENTORY_IDX i, j;
+    INVENTORY_IDX i;
     INVENTORY_IDX n = -1;
 
     ItemEntity *j_ptr;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::PLAYER,
-    };
-    for (j = 0; j < INVEN_PACK; j++) {
-        j_ptr = player_ptr->inventory[j].get();
+    auto &dur = DeferredUpdateRequests::get_instance();
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        j_ptr = player_ptr->inventory[i_idx].get();
         if (!j_ptr->is_valid()) {
             continue;
         }
 
-        n = j;
+        n = enum2i(i_idx);
         if (j_ptr->is_similar(*o_ptr)) {
             j_ptr->absorb(*o_ptr);
-            rfu.set_flag(StatusRecalculatingFlag::BONUS);
-            rfu.set_flags(flags_swrf);
-            return j;
+            dur.set_flag(StatusRecalculatingFlag::BONUS);
+            dur.set_flag(SubWindowRedrawingFlag::PLAYER);
+            return enum2i(i_idx);
         }
     }
 
@@ -294,6 +302,7 @@ int16_t store_item_to_inventory(PlayerType *player_ptr, ItemEntity *o_ptr)
         return -1;
     }
 
+    INVENTORY_IDX j;
     for (j = 0; j <= INVEN_PACK; j++) {
         j_ptr = player_ptr->inventory[j].get();
         if (!j_ptr->is_valid()) {
@@ -303,13 +312,10 @@ int16_t store_item_to_inventory(PlayerType *player_ptr, ItemEntity *o_ptr)
 
     i = j;
     if (i < INVEN_PACK && n >= 0) {
-        for (j = 0; j < INVEN_PACK; j++) {
-            if (object_sort_comp(player_ptr, *o_ptr, *player_ptr->inventory[j])) {
-                break;
-            }
-        }
-
-        i = j;
+        const auto sort_it = ranges::find_if(INVEN_PACK_SLOTS, [&](const auto s) {
+            return object_sort_comp(player_ptr, *o_ptr, *player_ptr->inventory[s]);
+        });
+        i = enum2i(sort_it != INVEN_PACK_SLOTS.end() ? *sort_it : INVEN_PACK);
         auto begin = player_ptr->inventory.begin();
         std::rotate(begin + i, begin + n + 1, begin + n + 2);
     }
@@ -321,13 +327,9 @@ int16_t store_item_to_inventory(PlayerType *player_ptr, ItemEntity *o_ptr)
     j_ptr->marked.clear().set(OmType::TOUCHED);
 
     player_ptr->inven_cnt++;
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::BONUS,
-        StatusRecalculatingFlag::COMBINATION,
-        StatusRecalculatingFlag::REORDER,
-    };
-    rfu.set_flags(flags_srf);
-    rfu.set_flags(flags_swrf);
+    dur.set_flag(StatusRecalculatingFlag::BONUS);
+    dur.request_inventory_arrangement();
+    dur.set_flag(SubWindowRedrawingFlag::PLAYER);
     return i;
 }
 
@@ -344,8 +346,8 @@ bool check_store_item_to_inventory(PlayerType *player_ptr, const ItemEntity *o_p
         return true;
     }
 
-    for (int j = 0; j < INVEN_PACK; j++) {
-        auto *j_ptr = player_ptr->inventory[j].get();
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        auto *j_ptr = player_ptr->inventory[i_idx].get();
         if (!j_ptr->is_valid()) {
             continue;
         }
@@ -395,9 +397,9 @@ INVENTORY_IDX inven_takeoff(PlayerType *player_ptr, INVENTORY_IDX i_idx, ITEM_NU
 
     const auto slot = store_item_to_inventory(player_ptr, &item);
 #ifdef JP
-    msg_format("%s(%c)%s。", item_name.data(), index_to_label(slot), act.data());
+    msg_print("{}({:c}){}。", item_name, index_to_label(slot), act);
 #else
-    msg_format("%s %s (%c).", act.data(), item_name.data(), index_to_label(slot));
+    msg_print("{} {} ({:c}).", act, item_name, index_to_label(slot));
 #endif
 
     return slot;

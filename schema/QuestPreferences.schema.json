@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "QuestPreferences.schema.jsonc",
+  "title": "QuestPreferences",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "legend"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "legend": {
+      "type": "object",
+      "description": "Shared base legend (X/./%/D/< ...). Loaded into the global letter[] table before each quest's own legend overlays it. Uses the same grid definition as a quest legend.",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "common/QuestGrid.schema.json#/$defs/gridDefinition"
+      }
+    }
+  }
+}

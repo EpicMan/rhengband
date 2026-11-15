@@ -2,7 +2,6 @@
 #include "blue-magic/blue-magic-checker.h"
 #include "core/disturbance.h"
 #include "dungeon/dungeon-flag-types.h"
-#include "dungeon/quest.h"
 #include "monster-floor/monster-move.h"
 #include "monster-race/race-ability-mask.h"
 #include "monster/monster-describer.h"
@@ -24,13 +23,14 @@
 #include "spell-kind/spells-world.h"
 #include "spell-realm/spells-hex.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
+#include "system/dungeon/quest-definition.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/projection-path-calculator.h"
 #include "timed-effect/timed-effects.h"
 #include "util/string-processor.h"
@@ -58,7 +58,7 @@ static void check_mspell_stupid(PlayerType *player_ptr, msa_type *msa_ptr)
     is_in_no_magic_dungeon &= floor.is_underground();
     is_in_no_magic_dungeon &= !floor.is_in_quest() || QuestType::is_fixed(floor.quest_number);
     msa_ptr->in_no_magic_dungeon = is_in_no_magic_dungeon;
-    if (!msa_ptr->in_no_magic_dungeon || (msa_ptr->r_ptr->behavior_flags.has(MonsterBehaviorType::STUPID))) {
+    if (!msa_ptr->in_no_magic_dungeon || (msa_ptr->monrace->behavior_flags.has(MonsterBehaviorType::STUPID))) {
         return;
     }
 
@@ -67,7 +67,7 @@ static void check_mspell_stupid(PlayerType *player_ptr, msa_type *msa_ptr)
 
 static void check_mspell_smart(const FloorType &floor, msa_type *msa_ptr)
 {
-    if (msa_ptr->r_ptr->behavior_flags.has_not(MonsterBehaviorType::SMART)) {
+    if (msa_ptr->monrace->behavior_flags.has_not(MonsterBehaviorType::SMART)) {
         return;
     }
 
@@ -95,7 +95,7 @@ static void check_mspell_arena(const FloorType &floor, msa_type *msa_ptr)
 
 static bool check_mspell_non_stupid(PlayerType *player_ptr, msa_type *msa_ptr)
 {
-    if (msa_ptr->r_ptr->behavior_flags.has(MonsterBehaviorType::STUPID)) {
+    if (msa_ptr->monrace->behavior_flags.has(MonsterBehaviorType::STUPID)) {
         return true;
     }
 
@@ -185,18 +185,18 @@ static bool check_mspell_continuation(PlayerType *player_ptr, msa_type *msa_ptr)
 static bool check_mspell_unexploded(PlayerType *player_ptr, msa_type *msa_ptr)
 {
     PERCENTAGE fail_rate = 25 - (msa_ptr->rlev + 3) / 4;
-    if (msa_ptr->r_ptr->behavior_flags.has(MonsterBehaviorType::STUPID)) {
+    if (msa_ptr->monrace->behavior_flags.has(MonsterBehaviorType::STUPID)) {
         fail_rate = 0;
     }
 
     if (!spell_is_inate(msa_ptr->thrown_spell) && (msa_ptr->in_no_magic_dungeon || (msa_ptr->m_ptr->get_remaining_stun() && one_in_(2)) || evaluate_percent(fail_rate))) {
         disturb(player_ptr, true, true);
-        msg_format(_("%s^は呪文を唱えようとしたが失敗した。", "%s^ tries to cast a spell, but fails."), msa_ptr->m_name.data());
+        msg_print(_("{}は呪文を唱えようとしたが失敗した。", "{} tries to cast a spell, but fails."), str_upcase_first(msa_ptr->m_name));
         return true;
     }
 
     if (!spell_is_inate(msa_ptr->thrown_spell) && SpellHex(player_ptr).check_hex_barrier(msa_ptr->m_idx, HEX_ANTI_MAGIC)) {
-        msg_format(_("反魔法バリアが%s^の呪文をかき消した。", "Anti magic barrier cancels the spell which %s^ casts."), msa_ptr->m_name.data());
+        msg_print(_("反魔法バリアが{}の呪文をかき消した。", "Anti-magic barrier cancels the spell which {} casts."), msa_ptr->m_name);
         return true;
     }
 
@@ -263,7 +263,7 @@ static bool check_thrown_mspell(PlayerType *player_ptr, msa_type *msa_ptr)
 
 static void check_mspell_imitation(PlayerType *player_ptr, msa_type *msa_ptr)
 {
-    const auto seen = (!player_ptr->effects()->blindness().is_blind() && msa_ptr->m_ptr->ml);
+    const auto seen = (!player_ptr->effects()->blindness().is_active() && msa_ptr->m_ptr->ml);
     const auto can_imitate = player_ptr->current_floor_ptr->has_los_at({ msa_ptr->m_ptr->fy, msa_ptr->m_ptr->fx });
     PlayerClass pc(player_ptr);
     if (!seen || !can_imitate || (AngbandWorld::get_instance().timewalk_m_idx != 0) || !pc.equals(PlayerClassType::IMITATOR)) {
@@ -283,7 +283,7 @@ static void check_mspell_imitation(PlayerType *player_ptr, msa_type *msa_ptr)
 
     mane_data->mane_list.push_back({ msa_ptr->thrown_spell, msa_ptr->dam });
     mane_data->new_mane = true;
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::IMITATION);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::IMITATION);
 }
 
 static void remember_mspell(msa_type *msa_ptr)
@@ -292,9 +292,9 @@ static void remember_mspell(msa_type *msa_ptr)
         return;
     }
 
-    msa_ptr->r_ptr->r_ability_flags.set(msa_ptr->thrown_spell);
-    if (msa_ptr->r_ptr->r_cast_spell < MAX_UCHAR) {
-        msa_ptr->r_ptr->r_cast_spell++;
+    msa_ptr->monrace->r_ability_flags.set(msa_ptr->thrown_spell);
+    if (msa_ptr->monrace->r_cast_spell < MAX_UCHAR) {
+        msa_ptr->monrace->r_cast_spell++;
     }
 }
 
@@ -328,7 +328,7 @@ bool make_attack_spell(PlayerType *player_ptr, MONSTER_IDX m_idx)
     }
 
     msa_ptr->m_ptr->reset_target();
-    msa_ptr->rlev = ((msa_ptr->r_ptr->level >= 1) ? msa_ptr->r_ptr->level : 1);
+    msa_ptr->rlev = ((msa_ptr->monrace->level >= 1) ? msa_ptr->monrace->level : 1);
     set_no_magic_mask(msa_ptr);
     decide_lite_area(player_ptr, msa_ptr);
     check_mspell_stupid(player_ptr, msa_ptr);
@@ -355,8 +355,8 @@ bool make_attack_spell(PlayerType *player_ptr, MONSTER_IDX m_idx)
     msa_ptr->dam = monspell_res.dam;
     check_mspell_imitation(player_ptr, msa_ptr);
     remember_mspell(msa_ptr);
-    if (player_ptr->is_dead && (msa_ptr->r_ptr->r_deaths < MAX_SHORT) && !player_ptr->current_floor_ptr->inside_arena) {
-        msa_ptr->r_ptr->r_deaths++;
+    if (player_ptr->is_dead && (msa_ptr->monrace->r_deaths < MAX_SHORT) && !player_ptr->current_floor_ptr->inside_arena) {
+        msa_ptr->monrace->r_deaths++;
     }
 
     return true;

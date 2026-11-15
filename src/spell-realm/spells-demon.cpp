@@ -1,10 +1,9 @@
 #include "spell-realm/spells-demon.h"
-#include "action/travel-execution.h"
 #include "core/disturbance.h"
-#include "core/stuff-handler.h"
-#include "game-option/disturbance-options.h"
+#include "main/sound-definitions-table.h"
+#include "main/sound-of-music.h"
+#include "system/deferred-update-requests.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "view/display-messages.h"
 
 /*!
@@ -35,23 +34,20 @@ bool set_tim_sh_fire(PlayerType *player_ptr, TIME_EFFECT v, bool do_dec)
     } else {
         if (player_ptr->tim_sh_fire) {
             msg_print(_("炎のオーラが消えた。", "The fiery aura disappeared."));
+            sound(SoundKind::BUFF_EXPIRE);
             notice = true;
         }
     }
 
     player_ptr->tim_sh_fire = v;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
 
     if (!notice) {
         return false;
     }
 
-    if (disturb_state || Travel::get_instance().is_ongoing()) {
-        disturb(player_ptr, false, true);
-    }
-
-    rfu.set_flag(StatusRecalculatingFlag::BONUS);
-    handle_stuff(player_ptr);
+    dur.set_flag(StatusRecalculatingFlag::BONUS);
+    finish_timed_effect_change(player_ptr);
     return true;
 }

@@ -4,9 +4,9 @@
 #include "object-enchant/tr-types.h"
 #include "object/tval-types.h"
 #include "sv-definition/sv-food-types.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-definition.h"
 #include "system/baseitem/baseitem-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "util/string-processor.h"
 #include <sstream>
 
@@ -231,12 +231,10 @@ std::string get_inscription(const ItemEntity &item)
             if (ss.tellp() > MAX_INSCRIPTION - 1) {
                 break;
             }
-#ifdef JP
-            if (iskanji(sv.front())) {
+            if (is_multibyte_char_at(sv)) {
                 ss << sv.front();
                 sv.remove_prefix(1);
             }
-#endif
             ss << sv.front();
         }
 

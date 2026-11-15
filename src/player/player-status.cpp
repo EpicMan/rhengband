@@ -1,7 +1,6 @@
 #include "player/player-status.h"
 #include "artifact/fixed-art-types.h"
 #include "autopick/autopick-reader-writer.h"
-#include "autopick/autopick.h"
 #include "avatar/avatar.h"
 #include "cmd-action/cmd-pet.h"
 #include "cmd-action/cmd-spell.h"
@@ -18,8 +17,8 @@
 #include "floor/floor-util.h"
 #include "game-option/birth-options.h"
 #include "grid/grid.h"
-#include "inventory/inventory-object.h"
-#include "io/input-key-acceptor.h"
+#include "inventory/inventory-slot-types.h"
+#include "io/input-context.h"
 #include "io/write-diary.h"
 #include "main/sound-definitions-table.h"
 #include "main/sound-of-music.h"
@@ -34,7 +33,6 @@
 #include "mutation/mutation-flag-types.h"
 #include "mutation/mutation-investor-remover.h"
 #include "object-enchant/object-ego.h"
-#include "object-enchant/special-object-flags.h"
 #include "object-enchant/tr-types.h"
 #include "object-enchant/trc-types.h"
 #include "object-hook/hook-armor.h"
@@ -91,14 +89,15 @@
 #include "status/base-status.h"
 #include "sv-definition/sv-lite-types.h"
 #include "sv-definition/sv-weapon-types.h"
+#include "system/deferred-update-requests.h"
+#include "system/enums/terrain/pattern-tile-type.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/services/dungeon-service.h"
 #include "system/terrain/terrain-definition.h"
 #include "term/screen-processor.h"
@@ -108,6 +107,7 @@
 #include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
+#include <fmt/format.h>
 
 static bool is_martial_arts_mode(PlayerType *player_ptr);
 
@@ -186,8 +186,8 @@ static bool is_heavy_shoot(PlayerType *player_ptr, const ItemEntity *o_ptr)
 int calc_inventory_weight(PlayerType *player_ptr)
 {
     auto weight = 0;
-    for (int i = 0; i < INVEN_TOTAL; i++) {
-        const auto &item = *player_ptr->inventory[i];
+    for (const auto i_idx : INVEN_ALL_SLOTS) {
+        const auto &item = *player_ptr->inventory[i_idx];
         if (!item.is_valid()) {
             continue;
         }
@@ -257,7 +257,7 @@ static void update_bonuses(PlayerType *player_ptr)
     BIT_FLAGS old_esp_nonliving = player_ptr->esp_nonliving;
     BIT_FLAGS old_esp_unique = player_ptr->esp_unique;
     BIT_FLAGS old_see_inv = player_ptr->see_inv;
-    BIT_FLAGS old_mighty_throw = player_ptr->mighty_throw;
+    BIT_FLAGS old_lite_flags = player_ptr->lite;
     int16_t old_speed = player_ptr->pspeed;
 
     ARMOUR_CLASS old_dis_ac = player_ptr->dis_ac;
@@ -356,13 +356,9 @@ static void update_bonuses(PlayerType *player_ptr)
     player_ptr->dis_ac = calc_base_ac(player_ptr);
     player_ptr->dis_to_a = calc_to_ac(player_ptr, false);
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    if (old_mighty_throw != player_ptr->mighty_throw) {
-        rfu.set_flag(SubWindowRedrawingFlag::INVENTORY);
-    }
-
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (player_ptr->telepathy != old_telepathy) {
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
+        dur.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
     }
 
     auto is_esp_updated = player_ptr->esp_animal != old_esp_animal;
@@ -378,20 +374,25 @@ static void update_bonuses(PlayerType *player_ptr)
     is_esp_updated |= player_ptr->esp_nonliving != old_esp_nonliving;
     is_esp_updated |= player_ptr->esp_unique != old_esp_unique;
     if (is_esp_updated) {
-        rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
+        dur.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
     }
 
     if (player_ptr->see_inv != old_see_inv) {
-        rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
+        dur.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
+    }
+
+    // 光源を持たないときの明るさ (cur_lite) は発光で決まる
+    if (player_ptr->lite != old_lite_flags) {
+        dur.set_flag(StatusRecalculatingFlag::TORCH);
     }
 
     if (player_ptr->pspeed != old_speed) {
-        rfu.set_flag(MainWindowRedrawingFlag::SPEED);
+        dur.set_flag(MainWindowRedrawingFlag::SPEED);
     }
 
     if ((player_ptr->dis_ac != old_dis_ac) || (player_ptr->dis_to_a != old_dis_to_a)) {
-        rfu.set_flag(MainWindowRedrawingFlag::AC);
-        rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+        dur.set_flag(MainWindowRedrawingFlag::AC);
+        dur.set_flag(SubWindowRedrawingFlag::PLAYER);
     }
 
     if (AngbandWorld::get_instance().character_xtra) {
@@ -465,14 +466,13 @@ static void update_max_hitpoints(PlayerType *player_ptr)
 
 #ifdef JP
     if (player_ptr->level_up_message && (mhp > player_ptr->mhp)) {
-        msg_format("最大ヒット・ポイントが %d 増加した！", (mhp - player_ptr->mhp));
+        msg_print("最大ヒット・ポイントが {} 増加した！", (mhp - player_ptr->mhp));
     }
 #endif
     player_ptr->mhp = mhp;
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::HP);
-    rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(MainWindowRedrawingFlag::HP);
 }
 
 /*!
@@ -558,11 +558,7 @@ static void update_num_of_spells(PlayerType *player_ptr)
         realm_status.set_learned(spell_id, false);
 
         const auto &spell_name = realm.get_spell_name(spell_id);
-#ifdef JP
-        msg_format("%sの%sを忘れてしまった。", spell_name.data(), spell_category.data());
-#else
-        msg_format("You have forgotten the %s of %s.", spell_category.data(), spell_name.data());
-#endif
+        msg_print(_("{0}の{1}を忘れてしまった。", "You have forgotten the {1} of {0}."), spell_name, spell_category);
         player_ptr->new_spells++;
     }
 
@@ -585,11 +581,7 @@ static void update_num_of_spells(PlayerType *player_ptr)
 
         const auto &realm = is_realm1 ? pr.realm1() : pr.realm2();
         const auto &spell_name = realm.get_spell_name(spell_id);
-#ifdef JP
-        msg_format("%sの%sを忘れてしまった。", spell_name.data(), spell_category.data());
-#else
-        msg_format("You have forgotten the %s of %s.", spell_category.data(), spell_name.data());
-#endif
+        msg_print(_("{0}の{1}を忘れてしまった。", "You have forgotten the {1} of {0}."), spell_name, spell_category);
         player_ptr->new_spells++;
     }
 
@@ -618,11 +610,7 @@ static void update_num_of_spells(PlayerType *player_ptr)
         realm_status.set_learned(spell_id);
 
         const auto &spell_name = realm.get_spell_name(spell_id);
-#ifdef JP
-        msg_format("%sの%sを思い出した。", spell_name.data(), spell_category.data());
-#else
-        msg_format("You have remembered the %s of %s.", spell_category.data(), spell_name.data());
-#endif
+        msg_print(_("{0}の{1}を思い出した。", "You have remembered the {1} of {0}."), spell_name, spell_category);
         player_ptr->new_spells--;
     }
 
@@ -661,19 +649,18 @@ static void update_num_of_spells(PlayerType *player_ptr)
     if (player_ptr->new_spells) {
 #ifdef JP
         if (player_ptr->new_spells < 10) {
-            msg_format("あと %d つの%sを学べる。", player_ptr->new_spells, spell_category.data());
+            msg_print("あと {} つの{}を学べる。", player_ptr->new_spells, spell_category);
         } else {
-            msg_format("あと %d 個の%sを学べる。", player_ptr->new_spells, spell_category.data());
+            msg_print("あと {} 個の{}を学べる。", player_ptr->new_spells, spell_category);
         }
 #else
-        msg_format("You can learn %d more %s%s.", player_ptr->new_spells, spell_category.data(), (player_ptr->new_spells != 1) ? "s" : "");
+        msg_print("You can learn {} more {}{}.", player_ptr->new_spells, spell_category, (player_ptr->new_spells != 1) ? "s" : "");
 #endif
     }
 
     player_ptr->old_spells = player_ptr->new_spells;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::STUDY);
-    rfu.set_flag(SubWindowRedrawingFlag::ITEM_KNOWLEDGE);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(MainWindowRedrawingFlag::STUDY);
 }
 
 /*!
@@ -700,7 +687,7 @@ static void update_max_mana(PlayerType *player_ptr)
     } else {
         if (mp_ptr->spell_first > player_ptr->lev) {
             player_ptr->msp = 0;
-            RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::MP);
+            DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::MP);
             return;
         }
 
@@ -899,17 +886,12 @@ static void update_max_mana(PlayerType *player_ptr)
 
 #ifdef JP
         if (player_ptr->level_up_message && (msp > player_ptr->msp)) {
-            msg_format("最大マジック・ポイントが %d 増加した！", (msp - player_ptr->msp));
+            msg_print("最大マジック・ポイントが {} 増加した！", (msp - player_ptr->msp));
         }
 #endif
         player_ptr->msp = msp;
-        auto &rfu = RedrawingFlagsUpdater::get_instance();
-        rfu.set_flag(MainWindowRedrawingFlag::MP);
-        static constexpr auto flags = {
-            SubWindowRedrawingFlag::PLAYER,
-            SubWindowRedrawingFlag::SPELL,
-        };
-        rfu.set_flags(flags);
+        auto &dur = DeferredUpdateRequests::get_instance();
+        dur.set_flag(MainWindowRedrawingFlag::MP);
     }
 
     if (AngbandWorld::get_instance().character_xtra) {
@@ -949,14 +931,14 @@ short calc_num_fire(PlayerType *player_ptr, const ItemEntity *o_ptr)
 {
     int extra_shots = 0;
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         ItemEntity *q_ptr;
-        q_ptr = player_ptr->inventory[i].get();
+        q_ptr = player_ptr->inventory[i_idx].get();
         if (!q_ptr->is_valid()) {
             continue;
         }
 
-        if (i == INVEN_BOW) {
+        if (i_idx == INVEN_BOW) {
             continue;
         }
 
@@ -1069,9 +1051,9 @@ static ACTION_SKILL_POWER calc_device_ability(PlayerType *player_ptr)
     pow = tmp_rp_ptr->r_dev + player_class.c_dev + player_personality.a_dev;
     pow += ((player_class.x_dev * player_ptr->lev / 10) + (ap_ptr->a_dev * player_ptr->lev / 50));
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         ItemEntity *o_ptr;
-        o_ptr = player_ptr->inventory[i].get();
+        o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
@@ -1197,9 +1179,9 @@ static ACTION_SKILL_POWER calc_search(PlayerType *player_ptr)
     pow = tmp_rp_ptr->r_srh + player_class.c_srh + player_personality.a_srh;
     pow += (player_class.x_srh * player_ptr->lev / 10);
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         ItemEntity *o_ptr;
-        o_ptr = player_ptr->inventory[i].get();
+        o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
@@ -1246,9 +1228,9 @@ static ACTION_SKILL_POWER calc_search_freq(PlayerType *player_ptr)
     pow = tmp_rp_ptr->r_fos + player_class.c_fos + player_personality.a_fos;
     pow += (player_class.x_fos * player_ptr->lev / 10);
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         ItemEntity *o_ptr;
-        o_ptr = player_ptr->inventory[i].get();
+        o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
@@ -1382,8 +1364,8 @@ static ACTION_SKILL_POWER calc_skill_dig(PlayerType *player_ptr)
         pow += (100 + player_ptr->lev * 8);
     }
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-        o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
@@ -1600,9 +1582,9 @@ static int16_t calc_to_magic_chance(PlayerType *player_ptr)
         chance += 5;
     }
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         ItemEntity *o_ptr;
-        o_ptr = player_ptr->inventory[i].get();
+        o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
@@ -1625,9 +1607,9 @@ static ARMOUR_CLASS calc_base_ac(PlayerType *player_ptr)
         return 0;
     }
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         ItemEntity *o_ptr;
-        o_ptr = player_ptr->inventory[i].get();
+        o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
@@ -1683,8 +1665,8 @@ static ARMOUR_CLASS calc_to_ac(PlayerType *player_ptr, bool is_real_value)
         ac -= 50;
     }
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-        const auto *o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        const auto *o_ptr = player_ptr->inventory[i_idx].get();
         const auto flags = o_ptr->get_flags();
         if (!o_ptr->is_valid()) {
             continue;
@@ -1705,7 +1687,7 @@ static ARMOUR_CLASS calc_to_ac(PlayerType *player_ptr, bool is_real_value)
             }
         }
 
-        if ((i == INVEN_SUB_HAND) && flags.has(TR_SUPPORTIVE)) {
+        if ((i_idx == INVEN_SUB_HAND) && flags.has(TR_SUPPORTIVE)) {
             ac += 5;
         }
     }
@@ -1983,13 +1965,13 @@ void put_equipment_warning(PlayerType *player_ptr)
     if (player_ptr->riding && (player_ptr->old_riding_ryoute != player_ptr->riding_ryoute)) {
         if (player_ptr->riding_ryoute) {
 #ifdef JP
-            msg_format("%s馬を操れない。", (empty_hands(player_ptr, false) == EMPTY_HAND_NONE) ? "両手がふさがっていて" : "");
+            msg_print("{}馬を操れない。", (empty_hands(player_ptr, false) == EMPTY_HAND_NONE) ? "両手がふさがっていて" : "");
 #else
             msg_print("You are using both hand for fighting, and you can't control the pet you're riding.");
 #endif
         } else {
 #ifdef JP
-            msg_format("%s馬を操れるようになった。", (empty_hands(player_ptr, false) == EMPTY_HAND_NONE) ? "手が空いて" : "");
+            msg_print("{}馬を操れるようになった。", (empty_hands(player_ptr, false) == EMPTY_HAND_NONE) ? "手が空いて" : "");
 #else
             msg_print("You began to control the pet you're riding with one hand.");
 #endif
@@ -2018,6 +2000,25 @@ static bool is_bare_knuckle(PlayerType *player_ptr)
     auto bare_knuckle = is_martial_arts_mode(player_ptr);
     bare_knuckle &= empty_hands(player_ptr, false) == (EMPTY_HAND_MAIN | EMPTY_HAND_SUB);
     return bare_knuckle;
+}
+
+/*!
+ * @brief 武器以外の装備による命中・ダメージ修正を加算する対象のスロットかを判定する
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param slot 判定する装備スロット
+ * @return 加算対象ならtrue
+ * @details
+ * 空きスロットとモンスター・ボールは対象外。打撃武器と遠隔武器自身の修正は武器の分として別に計算するため、
+ * 打撃武器を装備している手と遠隔武器のスロットも対象外とする。
+ */
+static bool is_non_weapon_bonus_slot(PlayerType *player_ptr, inventory_slot_type slot)
+{
+    const auto &item = *player_ptr->inventory[slot];
+    if (!item.is_valid() || (item.bi_key.tval() == ItemKindType::CAPTURE)) {
+        return false;
+    }
+
+    return (slot != INVEN_BOW) && !has_melee_weapon(player_ptr, slot);
 }
 
 static short calc_to_damage(PlayerType *player_ptr, INVENTORY_IDX slot, bool is_real_value)
@@ -2077,15 +2078,10 @@ static short calc_to_damage(PlayerType *player_ptr, INVENTORY_IDX slot, bool is_
         }
     }
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         int bonus_to_d = 0;
-        o_ptr = player_ptr->inventory[i].get();
-        const auto has_melee = has_melee_weapon(player_ptr, i);
-        if (!o_ptr->is_valid() || (o_ptr->bi_key.tval() == ItemKindType::CAPTURE)) {
-            continue;
-        }
-
-        if (((i == INVEN_MAIN_HAND) && has_melee) || ((i == INVEN_SUB_HAND) && has_melee) || (i == INVEN_BOW)) {
+        o_ptr = player_ptr->inventory[i_idx].get();
+        if (!is_non_weapon_bonus_slot(player_ptr, i_idx)) {
             continue;
         }
 
@@ -2110,30 +2106,30 @@ static short calc_to_damage(PlayerType *player_ptr, INVENTORY_IDX slot, bool is_
 
         case MELEE_TYPE_BAREHAND_MAIN:
         case MELEE_TYPE_WEAPON_MAIN:
-            if ((calc_hand == PLAYER_HAND_MAIN) && (i != INVEN_SUB_RING)) {
+            if ((calc_hand == PLAYER_HAND_MAIN) && (i_idx != INVEN_SUB_RING)) {
                 damage += (int16_t)bonus_to_d;
             }
             break;
 
         case MELEE_TYPE_BAREHAND_SUB:
         case MELEE_TYPE_WEAPON_SUB:
-            if ((calc_hand == PLAYER_HAND_SUB) && (i != INVEN_MAIN_RING)) {
+            if ((calc_hand == PLAYER_HAND_SUB) && (i_idx != INVEN_MAIN_RING)) {
                 damage += (int16_t)bonus_to_d;
             }
             break;
 
         case MELEE_TYPE_WEAPON_DOUBLE:
             if (calc_hand == PLAYER_HAND_MAIN) {
-                if (i == INVEN_MAIN_RING) {
+                if (i_idx == INVEN_MAIN_RING) {
                     damage += (int16_t)bonus_to_d;
-                } else if (i != INVEN_SUB_RING) {
+                } else if (i_idx != INVEN_SUB_RING) {
                     damage += (bonus_to_d > 0) ? (bonus_to_d + 1) / 2 : bonus_to_d;
                 }
             }
             if (calc_hand == PLAYER_HAND_SUB) {
-                if (i == INVEN_SUB_RING) {
+                if (i_idx == INVEN_SUB_RING) {
                     damage += (int16_t)bonus_to_d;
-                } else if (i != INVEN_MAIN_RING) {
+                } else if (i_idx != INVEN_MAIN_RING) {
                     damage += (bonus_to_d > 0) ? bonus_to_d / 2 : bonus_to_d;
                 }
             }
@@ -2317,16 +2313,10 @@ static short calc_to_hit(PlayerType *player_ptr, INVENTORY_IDX slot, bool is_rea
     }
 
     /* Bonuses from inventory */
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-        auto *o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        auto *o_ptr = player_ptr->inventory[i_idx].get();
 
-        /* Ignore empty hands, handed weapons, bows and capture balls */
-        const auto has_melee = has_melee_weapon(player_ptr, i);
-        if (!o_ptr->is_valid() || o_ptr->bi_key.tval() == ItemKindType::CAPTURE) {
-            continue;
-        }
-
-        if (((i == INVEN_MAIN_HAND) && has_melee) || ((i == INVEN_SUB_HAND) && has_melee) || (i == INVEN_BOW)) {
+        if (!is_non_weapon_bonus_slot(player_ptr, i_idx)) {
             continue;
         }
 
@@ -2354,30 +2344,30 @@ static short calc_to_hit(PlayerType *player_ptr, INVENTORY_IDX slot, bool is_rea
 
         case MELEE_TYPE_BAREHAND_MAIN:
         case MELEE_TYPE_WEAPON_MAIN:
-            if ((calc_hand == PLAYER_HAND_MAIN) && (i != INVEN_SUB_RING)) {
+            if ((calc_hand == PLAYER_HAND_MAIN) && (i_idx != INVEN_SUB_RING)) {
                 hit += (int16_t)bonus_to_h;
             }
             break;
 
         case MELEE_TYPE_BAREHAND_SUB:
         case MELEE_TYPE_WEAPON_SUB:
-            if ((calc_hand == PLAYER_HAND_SUB) && (i != INVEN_MAIN_RING)) {
+            if ((calc_hand == PLAYER_HAND_SUB) && (i_idx != INVEN_MAIN_RING)) {
                 hit += (int16_t)bonus_to_h;
             }
             break;
 
         case MELEE_TYPE_WEAPON_DOUBLE:
             if (calc_hand == PLAYER_HAND_MAIN) {
-                if (i == INVEN_MAIN_RING) {
+                if (i_idx == INVEN_MAIN_RING) {
                     hit += (int16_t)bonus_to_h;
-                } else if (i != INVEN_SUB_RING) {
+                } else if (i_idx != INVEN_SUB_RING) {
                     hit += (bonus_to_h > 0) ? (bonus_to_h + 1) / 2 : bonus_to_h;
                 }
             }
             if (calc_hand == PLAYER_HAND_SUB) {
-                if (i == INVEN_SUB_RING) {
+                if (i_idx == INVEN_SUB_RING) {
                     hit += (int16_t)bonus_to_h;
-                } else if (i != INVEN_MAIN_RING) {
+                } else if (i_idx != INVEN_MAIN_RING) {
                     hit += (bonus_to_h > 0) ? bonus_to_h / 2 : bonus_to_h;
                 }
             }
@@ -2458,15 +2448,10 @@ static int16_t calc_to_hit_bow(PlayerType *player_ptr, bool is_real_value)
     }
 
     // 武器以外の装備による修正
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
         int bonus_to_h;
-        o_ptr = player_ptr->inventory[i].get();
-        const auto has_melee = has_melee_weapon(player_ptr, i);
-        if (!o_ptr->is_valid() || (o_ptr->bi_key.tval() == ItemKindType::CAPTURE)) {
-            continue;
-        }
-
-        if (((i == INVEN_MAIN_HAND) && has_melee) || ((i == INVEN_SUB_HAND) && has_melee) || (i == INVEN_BOW)) {
+        o_ptr = player_ptr->inventory[i_idx].get();
+        if (!is_non_weapon_bonus_slot(player_ptr, i_idx)) {
             continue;
         }
 
@@ -2494,9 +2479,9 @@ static int16_t calc_to_damage_misc(PlayerType *player_ptr)
 
     int16_t to_dam = 0;
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-        o_ptr = player_ptr->inventory[i].get();
-        if (!o_ptr->is_valid()) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        o_ptr = player_ptr->inventory[i_idx].get();
+        if (!is_non_weapon_bonus_slot(player_ptr, i_idx)) {
             continue;
         }
 
@@ -2524,9 +2509,9 @@ static int16_t calc_to_hit_misc(PlayerType *player_ptr)
 
     int16_t to_hit = 0;
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-        o_ptr = player_ptr->inventory[i].get();
-        if (!o_ptr->is_valid()) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        o_ptr = player_ptr->inventory[i_idx].get();
+        if (!is_non_weapon_bonus_slot(player_ptr, i_idx)) {
             continue;
         }
 
@@ -2582,32 +2567,36 @@ int calc_weight_limit(PlayerType *player_ptr)
 /*!
  * @brief update のフラグに応じた更新をまとめて行う / Handle "update"
  * @details 更新処理の対象はプレイヤーの能力修正/光源寿命/HP/MP/魔法の学習状態、他多数の外界の状態判定。
+ * 所持品の自動破壊・結合・並べ替えは行わない (update_inventory_arrangement() で行う)。
  */
 void update_creature(PlayerType *player_ptr)
 {
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    if (!rfu.any_stats()) {
+    auto &dur = DeferredUpdateRequests::get_instance();
+    if (!dur.any_stats()) {
         return;
     }
 
+    // 呪文の失敗率・消費 MP・覚えている呪文は、能力の修正 (朦朧・能力値・装備・レベルなど)、
+    // 最大 MP、覚えられる呪文の数を計算し直すと変わりうる (呪文の熟練度が増えたときは、熟練度を加える処理が要求する)
+    static constexpr auto flags_srf = {
+        StatusRecalculatingFlag::BONUS,
+        StatusRecalculatingFlag::MP,
+        StatusRecalculatingFlag::SPELLS,
+    };
+    if (dur.has_any_of(flags_srf)) {
+        dur.request_spell_info_redrawing();
+    }
+
     auto &floor = *player_ptr->current_floor_ptr;
-    if (rfu.has(StatusRecalculatingFlag::AUTO_DESTRUCTION)) {
-        rfu.reset_flag(StatusRecalculatingFlag::AUTO_DESTRUCTION);
-        autopick_delayed_alter(player_ptr);
-    }
+    if (dur.has(StatusRecalculatingFlag::BONUS)) {
+        dur.reset_flag(StatusRecalculatingFlag::BONUS);
 
-    if (rfu.has(StatusRecalculatingFlag::COMBINATION)) {
-        rfu.reset_flag(StatusRecalculatingFlag::COMBINATION);
-        combine_pack(player_ptr);
-    }
+        // 矢弾・投擲の威力、運搬中・両手持ちの表示、騎乗中のランスのダイスは、能力の修正 (能力値・射撃・騎乗・集中度など) で変わる。
+        // また、持ち物・装備の中身の変化のうち能力の再計算を伴うもの (重さが変わる個数の増減・装備の出し入れ、
+        // 装備の修正値・呪い、$ や . の銘) は、表示の変化もここでまとめて描き直す。
+        // 能力の再計算を伴わない変化 (充填・感触・燃料など) は、それぞれの箇所で描き直しを要求する (足元の品もありうるなら床のアイテムの一覧も)
+        dur.request_carried_item_lists_redrawing();
 
-    if (rfu.has(StatusRecalculatingFlag::REORDER)) {
-        rfu.reset_flag(StatusRecalculatingFlag::REORDER);
-        reorder_pack(player_ptr);
-    }
-
-    if (rfu.has(StatusRecalculatingFlag::BONUS)) {
-        rfu.reset_flag(StatusRecalculatingFlag::BONUS);
         PlayerAlignment(player_ptr).update_alignment();
         PlayerSkill ps(player_ptr);
         ps.apply_special_weapon_skill_max_values();
@@ -2615,23 +2604,23 @@ void update_creature(PlayerType *player_ptr)
         update_bonuses(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::TORCH)) {
-        rfu.reset_flag(StatusRecalculatingFlag::TORCH);
+    if (dur.has(StatusRecalculatingFlag::TORCH)) {
+        dur.reset_flag(StatusRecalculatingFlag::TORCH);
         update_lite_radius(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::HP)) {
-        rfu.reset_flag(StatusRecalculatingFlag::HP);
+    if (dur.has(StatusRecalculatingFlag::HP)) {
+        dur.reset_flag(StatusRecalculatingFlag::HP);
         update_max_hitpoints(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::MP)) {
-        rfu.reset_flag(StatusRecalculatingFlag::MP);
+    if (dur.has(StatusRecalculatingFlag::MP)) {
+        dur.reset_flag(StatusRecalculatingFlag::MP);
         update_max_mana(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::SPELLS)) {
-        rfu.reset_flag(StatusRecalculatingFlag::SPELLS);
+    if (dur.has(StatusRecalculatingFlag::SPELLS)) {
+        dur.reset_flag(StatusRecalculatingFlag::SPELLS);
         update_num_of_spells(player_ptr);
     }
 
@@ -2640,48 +2629,48 @@ void update_creature(PlayerType *player_ptr)
         return;
     }
 
-    if (rfu.has(StatusRecalculatingFlag::UN_LITE)) {
-        rfu.reset_flag(StatusRecalculatingFlag::UN_LITE);
+    if (dur.has(StatusRecalculatingFlag::UN_LITE)) {
+        dur.reset_flag(StatusRecalculatingFlag::UN_LITE);
         floor.forget_lite();
     }
 
-    if (rfu.has(StatusRecalculatingFlag::UN_VIEW)) {
-        rfu.reset_flag(StatusRecalculatingFlag::UN_VIEW);
+    if (dur.has(StatusRecalculatingFlag::UN_VIEW)) {
+        dur.reset_flag(StatusRecalculatingFlag::UN_VIEW);
         floor.forget_view();
     }
 
-    if (rfu.has(StatusRecalculatingFlag::VIEW)) {
-        rfu.reset_flag(StatusRecalculatingFlag::VIEW);
+    if (dur.has(StatusRecalculatingFlag::VIEW)) {
+        dur.reset_flag(StatusRecalculatingFlag::VIEW);
         update_view(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::LITE)) {
-        rfu.reset_flag(StatusRecalculatingFlag::LITE);
+    if (dur.has(StatusRecalculatingFlag::LITE)) {
+        dur.reset_flag(StatusRecalculatingFlag::LITE);
         update_lite(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::FLOW)) {
-        rfu.reset_flag(StatusRecalculatingFlag::FLOW);
+    if (dur.has(StatusRecalculatingFlag::FLOW)) {
+        dur.reset_flag(StatusRecalculatingFlag::FLOW);
         update_flow(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::DISTANCE)) {
-        rfu.reset_flag(StatusRecalculatingFlag::DISTANCE);
+    if (dur.has(StatusRecalculatingFlag::DISTANCE)) {
+        dur.reset_flag(StatusRecalculatingFlag::DISTANCE);
         update_monsters(player_ptr, true);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::MONSTER_LITE)) {
-        rfu.reset_flag(StatusRecalculatingFlag::MONSTER_LITE);
+    if (dur.has(StatusRecalculatingFlag::MONSTER_LITE)) {
+        dur.reset_flag(StatusRecalculatingFlag::MONSTER_LITE);
         update_mon_lite(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::DELAY_VISIBILITY)) {
-        rfu.reset_flag(StatusRecalculatingFlag::DELAY_VISIBILITY);
+    if (dur.has(StatusRecalculatingFlag::DELAY_VISIBILITY)) {
+        dur.reset_flag(StatusRecalculatingFlag::DELAY_VISIBILITY);
         delayed_visual_update(player_ptr);
     }
 
-    if (rfu.has(StatusRecalculatingFlag::MONSTER_STATUSES)) {
-        rfu.reset_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
+    if (dur.has(StatusRecalculatingFlag::MONSTER_STATUSES)) {
+        dur.reset_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
         update_monsters(player_ptr, false);
     }
 }
@@ -2692,8 +2681,8 @@ void update_creature(PlayerType *player_ptr)
  */
 bool player_has_no_spellbooks(PlayerType *player_ptr)
 {
-    for (int i = 0; i < INVEN_PACK; i++) {
-        const auto *o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        const auto *o_ptr = player_ptr->inventory[i_idx].get();
         if (o_ptr->is_valid() && check_book_realm(player_ptr, o_ptr->bi_key)) {
             return false;
         }
@@ -2718,7 +2707,7 @@ void wreck_the_pattern(PlayerType *player_ptr)
     const auto &floor = *player_ptr->current_floor_ptr;
     const auto p_pos = player_ptr->get_position();
     const auto &terrain = floor.get_grid(p_pos).get_terrain();
-    if (terrain.subtype == PATTERN_TILE_WRECKED) {
+    if (terrain.pattern_tile_type == PatternTileType::WRECKED) {
         return;
     }
 
@@ -2730,8 +2719,8 @@ void wreck_the_pattern(PlayerType *player_ptr)
 
     auto to_ruin = randint1(45) + 35;
     while (to_ruin--) {
-        const auto pos = scatter(player_ptr, p_pos, 4, PROJECT_NONE);
-        if (floor.has_terrain_characteristics(pos, TerrainCharacteristics::PATTERN) && (floor.get_grid(pos).get_terrain().subtype != PATTERN_TILE_WRECKED)) {
+        const auto pos = scatter(floor, p_pos, 4, PROJECT_NONE);
+        if (floor.has_terrain_characteristics(pos, TerrainCharacteristics::PATTERN) && (floor.get_grid(pos).get_terrain().pattern_tile_type != PatternTileType::WRECKED)) {
             set_terrain_id_to_grid(player_ptr, pos, TerrainTag::PATTERN_CORRUPTED);
         }
     }
@@ -2772,28 +2761,26 @@ void check_experience(PlayerType *player_ptr)
         player_ptr->max_max_exp = player_ptr->max_exp;
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::EXP);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(MainWindowRedrawingFlag::EXP);
     handle_stuff(player_ptr);
 
     PlayerRace pr(player_ptr);
     bool android = pr.equals(PlayerRaceType::ANDROID);
     PLAYER_LEVEL old_lev = player_ptr->lev;
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::BONUS,
-        StatusRecalculatingFlag::HP,
-        StatusRecalculatingFlag::MP,
-        StatusRecalculatingFlag::SPELLS,
+    const auto request_level_change_recalculation = [&dur] {
+        dur.request_player_status_recalculation();
+        dur.set_flag(StatusRecalculatingFlag::TORCH); // 一時的な発光の明るさもレベルで決まる
     };
     while ((player_ptr->lev > 1) && (player_ptr->exp < ((android ? player_exp_a : player_exp)[player_ptr->lev - 2] * player_ptr->expfact / 100L))) {
         player_ptr->lev--;
-        rfu.set_flags(flags_srf);
+        request_level_change_recalculation();
         static constexpr auto flags_mwrf = {
             MainWindowRedrawingFlag::LEVEL,
             MainWindowRedrawingFlag::TITLE,
         };
-        rfu.set_flags(flags_mwrf);
-        rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+        dur.set_flags(flags_mwrf);
+        dur.set_flag(SubWindowRedrawingFlag::PLAYER);
         handle_stuff(player_ptr);
     }
 
@@ -2819,20 +2806,15 @@ void check_experience(PlayerType *player_ptr)
         }
 
         sound(SoundKind::LEVEL);
-        msg_format(_("レベル %d にようこそ。", "Welcome to level %d."), player_ptr->lev);
-        rfu.set_flags(flags_srf);
+        msg_print(_("レベル {} にようこそ。", "Welcome to level {}."), player_ptr->lev);
+        request_level_change_recalculation();
         const auto flags_mwrf_levelup = {
             MainWindowRedrawingFlag::LEVEL,
             MainWindowRedrawingFlag::TITLE,
             MainWindowRedrawingFlag::EXP,
         };
-        rfu.set_flags(flags_mwrf_levelup);
-        const auto &flags_swrf_levelup = {
-            SubWindowRedrawingFlag::PLAYER,
-            SubWindowRedrawingFlag::SPELL,
-            SubWindowRedrawingFlag::INVENTORY,
-        };
-        rfu.set_flags(flags_swrf_levelup);
+        dur.set_flags(flags_mwrf_levelup);
+        dur.set_flag(SubWindowRedrawingFlag::PLAYER);
         player_ptr->level_up_message = true;
         handle_stuff(player_ptr);
 
@@ -2844,18 +2826,19 @@ void check_experience(PlayerType *player_ptr)
                 while (true) {
                     int n;
 
-                    prt(format(_("        a) 腕力 (現在値 %s)", "        a) Str (cur %s)"), cnv_stat(player_ptr->stat_max[0]).data()), 2, 14);
-                    prt(format(_("        b) 知能 (現在値 %s)", "        b) Int (cur %s)"), cnv_stat(player_ptr->stat_max[1]).data()), 3, 14);
-                    prt(format(_("        c) 賢さ (現在値 %s)", "        c) Wis (cur %s)"), cnv_stat(player_ptr->stat_max[2]).data()), 4, 14);
-                    prt(format(_("        d) 器用 (現在値 %s)", "        d) Dex (cur %s)"), cnv_stat(player_ptr->stat_max[3]).data()), 5, 14);
-                    prt(format(_("        e) 耐久 (現在値 %s)", "        e) Con (cur %s)"), cnv_stat(player_ptr->stat_max[4]).data()), 6, 14);
-                    prt(format(_("        f) 魅力 (現在値 %s)", "        f) Chr (cur %s)"), cnv_stat(player_ptr->stat_max[5]).data()), 7, 14);
+                    prt(fmt::format(_("        a) 腕力 (現在値 {})", "        a) Str (cur {})"), cnv_stat(player_ptr->stat_max[0])), 2, 14);
+                    prt(fmt::format(_("        b) 知能 (現在値 {})", "        b) Int (cur {})"), cnv_stat(player_ptr->stat_max[1])), 3, 14);
+                    prt(fmt::format(_("        c) 賢さ (現在値 {})", "        c) Wis (cur {})"), cnv_stat(player_ptr->stat_max[2])), 4, 14);
+                    prt(fmt::format(_("        d) 器用 (現在値 {})", "        d) Dex (cur {})"), cnv_stat(player_ptr->stat_max[3])), 5, 14);
+                    prt(fmt::format(_("        e) 耐久 (現在値 {})", "        e) Con (cur {})"), cnv_stat(player_ptr->stat_max[4])), 6, 14);
+                    prt(fmt::format(_("        f) 魅力 (現在値 {})", "        f) Chr (cur {})"), cnv_stat(player_ptr->stat_max[5])), 7, 14);
 
                     prt("", 8, 14);
-                    prt(_("        どの能力値を上げますか？", "        Which stat do you want to raise?"), 1, 14);
+                    constexpr auto prompt = _("        どの能力値を上げますか？", "        Which stat do you want to raise?");
+                    prt(prompt, 1, 14);
 
                     while (true) {
-                        choice = inkey();
+                        choice = input_key_with_context(InputKind::COMMAND_CHAR, prompt);
                         if ((choice >= 'a') && (choice <= 'f')) {
                             break;
                         }
@@ -2891,17 +2874,13 @@ void check_experience(PlayerType *player_ptr)
             level_reward = false;
         }
 
-        rfu.set_flags(flags_srf);
+        request_level_change_recalculation();
         static constexpr auto flags_mwrf = {
             MainWindowRedrawingFlag::LEVEL,
             MainWindowRedrawingFlag::TITLE,
         };
-        rfu.set_flags(flags_mwrf);
-        static constexpr auto flags_swrf = {
-            SubWindowRedrawingFlag::PLAYER,
-            SubWindowRedrawingFlag::SPELL,
-        };
-        rfu.set_flags(flags_swrf);
+        dur.set_flags(flags_mwrf);
+        dur.set_flag(SubWindowRedrawingFlag::PLAYER);
         handle_stuff(player_ptr);
     }
 
@@ -2918,16 +2897,16 @@ void check_experience(PlayerType *player_ptr)
 std::string cnv_stat(int val)
 {
     if (val <= 18) {
-        return format("    %2d", val);
+        return fmt::format("    {:2}", val);
     }
 
     int bonus = (val - 18);
     if (bonus >= 220) {
         return "18/***";
     } else if (bonus >= 100) {
-        return format("18/%03d", bonus);
+        return fmt::format("18/{:03}", bonus);
     } else {
-        return format(" 18/%02d", bonus);
+        return fmt::format(" 18/{:02}", bonus);
     }
 }
 
@@ -2996,10 +2975,10 @@ uint32_t calc_score(PlayerType *player_ptr)
     if (ironman_shops) {
         mult += 50;
     }
-    if (ironman_small_levels) {
+    if (ironman_smallest_floor) {
         mult += 10;
     }
-    if (ironman_empty_levels) {
+    if (ironman_force_arena_floor) {
         mult += 20;
     }
     if (!powerup_home) {
@@ -3103,7 +3082,7 @@ void stop_mouth(PlayerType *player_ptr)
 
 bool is_fast(PlayerType *player_ptr)
 {
-    return player_ptr->effects()->acceleration().is_fast() || music_singing(player_ptr, MUSIC_SPEED) || music_singing(player_ptr, MUSIC_SHERO);
+    return player_ptr->effects()->acceleration().is_active() || music_singing(player_ptr, MUSIC_SPEED) || music_singing(player_ptr, MUSIC_SHERO);
 }
 
 bool is_invuln(PlayerType *player_ptr)

@@ -1,9 +1,10 @@
 #include "dungeon/quest-monster-placer.h"
-#include "dungeon/quest.h"
 #include "floor/floor-generator-util.h"
 #include "monster-floor/monster-generator.h"
 #include "monster-floor/place-monster-types.h"
 #include "monster/monster-info.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
 #include "system/monrace/monrace-definition.h"
@@ -47,7 +48,7 @@ bool place_quest_monsters(PlayerType *player_ptr)
                 Pos2D pos(0, 0);
                 int l;
                 for (l = SAFE_MAX_ATTEMPTS; l > 0; l--) {
-                    pos = Pos2D(randint0(floor.height), randint0(floor.width));
+                    pos = Pos2D{ randint0(floor.height), randint0(floor.width) };
                     const auto &grid = floor.get_grid(pos);
                     const auto &terrain = grid.get_terrain();
                     if (terrain.flags.has_none_of({ TerrainCharacteristics::MOVE, TerrainCharacteristics::CAN_FLY })) {
@@ -62,7 +63,7 @@ bool place_quest_monsters(PlayerType *player_ptr)
                         continue;
                     }
 
-                    if (grid.is_icky()) {
+                    if (grid.is_no_teleport_dest()) {
                         continue;
                     } else {
                         break;

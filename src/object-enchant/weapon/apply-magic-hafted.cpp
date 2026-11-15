@@ -9,7 +9,7 @@
 #include "inventory/inventory-slot-types.h"
 #include "object-enchant/object-boost.h"
 #include "sv-definition/sv-weapon-types.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 
 /*!
  * @brief 鈍器強化クラスのコンストラクタ
@@ -41,6 +41,12 @@ void HaftedEnchanter::give_ego_index()
         break;
     }
 
+    this->adjust_for_ego();
+}
+
+/*! @brief 選択されたエゴ固有の補正を与える。 */
+void HaftedEnchanter::adjust_for_ego()
+{
     switch (this->o_ptr->ego_idx) {
     case EgoType::EARTHQUAKES:
         if (one_in_(3) && (this->level > 60)) {

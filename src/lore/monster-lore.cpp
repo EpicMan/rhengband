@@ -6,125 +6,116 @@
 
 #include "lore/monster-lore.h"
 #include "game-option/cheat-options.h"
+#include "game-option/text-display-options.h"
 #include "lore/lore-calculator.h"
 #include "lore/lore-util.h"
 #include "lore/magic-types-setter.h"
 #include "monster-race/race-misc-flags.h"
-#include "monster-race/race-sex.h"
 #include "player-ability/player-ability-types.h"
 #include "system/angband.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/monrace/monrace-definition.h"
 #include "term/term-color-types.h"
+#include "util/string-processor.h"
 #include "view/display-lore-attacks.h"
 #include "view/display-lore-drops.h"
 #include "view/display-lore-magics.h"
 #include "view/display-lore-status.h"
 #include "view/display-lore.h"
 #include <algorithm>
-#include <game-option/birth-options.h>
-
-static void set_msex_flags(lore_type *lore_ptr)
-{
-    lore_ptr->msex = MonsterSex::NONE;
-    if (lore_ptr->r_ptr->is_male()) {
-        lore_ptr->msex = MonsterSex::MALE;
-    }
-    if (lore_ptr->r_ptr->is_female()) {
-        lore_ptr->msex = MonsterSex::FEMALE;
-    }
-}
+#include <fmt/format.h>
+#include "game-option/birth-options.h"
 
 static void set_flags1(lore_type *lore_ptr)
 {
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::UNIQUE)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::UNIQUE)) {
         lore_ptr->kind_flags.set(MonsterKindType::UNIQUE);
     }
 
-    if (lore_ptr->r_ptr->misc_flags.has(MonsterMiscType::QUESTOR)) {
+    if (lore_ptr->monrace->misc_flags.has(MonsterMiscType::QUESTOR)) {
         lore_ptr->misc_flags.set(MonsterMiscType::QUESTOR);
     }
 
-    if (lore_ptr->r_ptr->misc_flags.has(MonsterMiscType::HAS_FRIENDS)) {
+    if (lore_ptr->monrace->misc_flags.has(MonsterMiscType::HAS_FRIENDS)) {
         lore_ptr->misc_flags.set(MonsterMiscType::HAS_FRIENDS);
     }
 
-    if (lore_ptr->r_ptr->misc_flags.has(MonsterMiscType::ESCORT)) {
+    if (lore_ptr->monrace->misc_flags.has(MonsterMiscType::ESCORT)) {
         lore_ptr->misc_flags.set(MonsterMiscType::ESCORT);
     }
 
-    if (lore_ptr->r_ptr->misc_flags.has(MonsterMiscType::MORE_ESCORT)) {
+    if (lore_ptr->monrace->misc_flags.has(MonsterMiscType::MORE_ESCORT)) {
         lore_ptr->misc_flags.set(MonsterMiscType::MORE_ESCORT);
     }
 }
 
 static void set_race_flags(lore_type *lore_ptr)
 {
-    if (!lore_ptr->r_ptr->r_tkills && !lore_ptr->know_everything) {
+    if (!lore_ptr->monrace->r_tkills && !lore_ptr->know_everything) {
         return;
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::ORC)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::ORC)) {
         lore_ptr->kind_flags.set(MonsterKindType::ORC);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::TROLL)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::TROLL)) {
         lore_ptr->kind_flags.set(MonsterKindType::TROLL);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::GIANT)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::GIANT)) {
         lore_ptr->kind_flags.set(MonsterKindType::GIANT);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::DRAGON)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::DRAGON)) {
         lore_ptr->kind_flags.set(MonsterKindType::DRAGON);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::DEMON)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::DEMON)) {
         lore_ptr->kind_flags.set(MonsterKindType::DEMON);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::UNDEAD)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::UNDEAD)) {
         lore_ptr->kind_flags.set(MonsterKindType::UNDEAD);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::EVIL)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::EVIL)) {
         lore_ptr->kind_flags.set(MonsterKindType::EVIL);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::GOOD)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::GOOD)) {
         lore_ptr->kind_flags.set(MonsterKindType::GOOD);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::ANIMAL)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::ANIMAL)) {
         lore_ptr->kind_flags.set(MonsterKindType::ANIMAL);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::AMBERITE)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::AMBERITE)) {
         lore_ptr->kind_flags.set(MonsterKindType::AMBERITE);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::HUMAN)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::HUMAN)) {
         lore_ptr->kind_flags.set(MonsterKindType::HUMAN);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::QUANTUM)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::QUANTUM)) {
         lore_ptr->kind_flags.set(MonsterKindType::QUANTUM);
     }
 
-    if (lore_ptr->r_ptr->kind_flags.has(MonsterKindType::ANGEL)) {
+    if (lore_ptr->monrace->kind_flags.has(MonsterKindType::ANGEL)) {
         lore_ptr->kind_flags.set(MonsterKindType::ANGEL);
     }
 
-    if (lore_ptr->r_ptr->misc_flags.has(MonsterMiscType::FORCE_DEPTH)) {
+    if (lore_ptr->monrace->misc_flags.has(MonsterMiscType::FORCE_DEPTH)) {
         lore_ptr->misc_flags.set(MonsterMiscType::FORCE_DEPTH);
     }
 
-    if (lore_ptr->r_ptr->misc_flags.has(MonsterMiscType::FORCE_MAXHP)) {
+    if (lore_ptr->monrace->misc_flags.has(MonsterMiscType::FORCE_MAXHP)) {
         lore_ptr->misc_flags.set(MonsterMiscType::FORCE_MAXHP);
     }
 
-    if (lore_ptr->r_ptr->misc_flags.has(MonsterMiscType::STALKER)) {
+    if (lore_ptr->monrace->misc_flags.has(MonsterMiscType::STALKER)) {
         lore_ptr->misc_flags.set(MonsterMiscType::STALKER);
     }
 }
@@ -146,13 +137,33 @@ void process_monster_lore(PlayerType *player_ptr, MonraceId r_idx, monster_lore_
     if (cheat_know || easy_lore || (mode == MONSTER_LORE_RESEARCH) || (mode == MONSTER_LORE_DEBUG)) {
         lore_ptr->know_everything = true;
     }
-
     set_flags_for_full_knowledge(lore_ptr);
-    set_msex_flags(lore_ptr);
     set_flags1(lore_ptr);
     set_race_flags(lore_ptr);
+    const auto &text = lore_ptr->monrace->text;
+
+    if (show_lore_summary) {
+        display_monster_kind_tags(lore_ptr);
+        display_monster_hp_ac_summary(lore_ptr);
+        display_monster_speed_summary(lore_ptr);
+        display_monster_alert_summary(lore_ptr);
+        display_monster_kills_summary(lore_ptr);
+        display_where_to_appear_summary(lore_ptr);
+        display_monster_exp_summary(lore_ptr);
+        display_monster_evolution_summary(lore_ptr);
+        hooked_roff("\n");
+        set_monster_aura_summary(lore_ptr);
+        display_monster_behavior_summary(lore_ptr);
+        display_monster_drops_summary(lore_ptr);
+        display_monster_melee_summary_line(lore_ptr);
+        display_monster_magic_rate(lore_ptr);
+        display_monster_magic_tables(player_ptr, lore_ptr);
+        display_monster_resistance_table(lore_ptr);
+        hook_c_roff(TERM_L_DARK, "------------------------------------------------------------\n");
+    }
+
     display_kill_numbers(lore_ptr);
-    const auto &text = lore_ptr->r_ptr->text;
+
     if (!text.empty()) {
         hooked_roff(text);
         hooked_roff("\n");
@@ -176,12 +187,12 @@ void process_monster_lore(PlayerType *player_ptr, MonraceId r_idx, monster_lore_
 
     display_lore_this(player_ptr, lore_ptr);
     if (lore_ptr->special_flags.has(MonsterSpecialType::DIMINISH_MAX_DAMAGE)) {
-        hooked_roff(format(_("%s^は", "%s^ "), Who::who(lore_ptr->msex).data()));
+        hooked_roff(fmt::format(_("{}は", "{} "), str_upcase_first(Who::who(lore_ptr->msex))));
         hook_c_roff(TERM_RED, _("致命的な威力の攻撃に対して大きな耐性を持っている。", "has the strong resistance for a critical damage.  "));
     }
     display_monster_aura(lore_ptr);
     if (lore_ptr->misc_flags.has(MonsterMiscType::REFLECTING)) {
-        hooked_roff(format(_("%s^は矢の呪文を跳ね返す。", "%s^ reflects bolt spells.  "), Who::who(lore_ptr->msex).data()));
+        hooked_roff(fmt::format(_("{}は矢の呪文を跳ね返す。", "{} reflects bolt spells.  "), str_upcase_first(Who::who(lore_ptr->msex))));
     }
 
     display_monster_collective(lore_ptr);

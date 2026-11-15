@@ -2,8 +2,9 @@
 #include "birth/birth-stat.h"
 #include "birth/birth-util.h"
 #include "cmd-io/cmd-gameoption.h"
+#include "core/asking-player.h"
 #include "game-option/game-option-page.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "locale/japanese.h"
 #include "main/sound-of-music.h"
 #include "player-info/class-info.h"
@@ -14,8 +15,8 @@
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
-#include "term/z-form.h"
 #include "util/int-char-converter.h"
+#include <fmt/format.h>
 #include <string>
 #include <vector>
 
@@ -174,20 +175,20 @@ static std::string cursor_of_adjusted_stat(const int *cval, int cs)
     auto m = adjust_stat(17, j);
     std::string maxv;
     if (m > 18) {
-        maxv = format("18/%02d", (m - 18));
+        maxv = fmt::format("18/{:02}", (m - 18));
     } else {
-        maxv = format("%2d", m);
+        maxv = fmt::format("{:2}", m);
     }
 
     m = adjust_stat(cval[cs], j);
     std::string inp;
     if (m > 18) {
-        inp = format("18/%02d", (m - 18));
+        inp = fmt::format("18/{:02}", (m - 18));
     } else {
-        inp = format("%2d", m);
+        inp = fmt::format("{:2}", m);
     }
 
-    return format("%6s       %2d   %+3d  %+3d  %+3d  =  %6s  %6s", stat_names[cs], cval[cs], rp_ptr->r_adj[cs], cp_ptr->c_adj[cs], ap_ptr->a_adj[cs], inp.data(), maxv.data());
+    return fmt::format("{:>6}       {:2}   {:+3}  {:+3}  {:+3}  =  {:>6}  {:>6}", fmt::bytes(stat_names[cs]), cval[cs], rp_ptr->r_adj[cs], cp_ptr->c_adj[cs], ap_ptr->a_adj[cs], fmt::bytes(inp), fmt::bytes(maxv));
 }
 
 /*!
@@ -203,7 +204,7 @@ static void display_autoroller_chance(int *cval)
     } else if (autoroll_chance < 1) {
         buf = _("確率: 非常に容易(1/10000以上)", "Prob: Quite Easy(>1/10000)     ");
     } else {
-        buf = format(_("確率: 約 1/%8d00             ", "Prob: ~ 1/%8d00                "), autoroll_chance);
+        buf = fmt::format(_("確率: 約 1/{:8}00             ", "Prob: ~ 1/{:8}00                "), autoroll_chance);
     }
     put_str(buf, 23, 25);
 }
@@ -216,7 +217,8 @@ bool get_stat_limits(PlayerType *player_ptr)
 {
     clear_from(10);
     put_str(_("能力値を抽選します。最低限得たい能力値を設定して下さい。", "Set minimum stats for picking up your charactor."), 10, 10);
-    put_str(_("2/8で項目選択、4/6で値の増減、Enterで次へ", "2/8 for Select, 4/6 for Change value, Enter for Goto next"), 11, 10);
+    constexpr auto prompt = _("2/8で項目選択、4/6で値の増減、Enterで次へ", "2/8 for Select, 4/6 for Change value, Enter for Goto next");
+    put_str(prompt, 11, 10);
     put_str(_("         基本値  種族 職業 性格     合計値  最大値", "           Base   Rac  Cla  Per      Total  Maximum"), 13, 10);
 
     int cval[A_MAX]{};
@@ -251,7 +253,7 @@ bool get_stat_limits(PlayerType *player_ptr)
             os = cs;
         }
 
-        char c = inkey();
+        char c = input_key_with_context({ InputKind::BIRTH, prompt, BirthInputDetails{ BirthStep::STAT_LIMITS } });
         switch (c) {
         case 'Q':
             birth_quit();
@@ -369,7 +371,8 @@ bool get_chara_limits(PlayerType *player_ptr, chara_limit_type *chara_limit_ptr)
 {
     static const std::vector<std::string> item_names = { _("年齢", "age"), _("身長(cm)", "height"), _("体重(kg)", "weight"), _("社会的地位", "social class") };
     clear_from(10);
-    put_str(_("2/4/6/8で項目選択、+/-で値の増減、Enterで次へ", "2/4/6/8 for Select, +/- for Change value, Enter for Goto next"), 11, 10);
+    constexpr auto prompt = _("2/4/6/8で項目選択、+/-で値の増減、Enterで次へ", "2/4/6/8 for Select, +/- for Change value, Enter for Goto next");
+    put_str(prompt, 11, 10);
     put_str(
         _("注意：身長と体重の最大値/最小値ぎりぎりの値は非常に出現確率が低くなります。", "Caution: Values near minimum or maximum are extremely rare."), 23, 2);
 
@@ -450,10 +453,10 @@ bool get_chara_limits(PlayerType *player_ptr, chara_limit_type *chara_limit_ptr)
     }
 
     for (int i = 0; i < 4; i++) {
-        auto buf = format("%-12s (%3d - %3d)", item_names[i].data(), mval[i * 2], mval[i * 2 + 1]);
+        auto buf = fmt::format("{:<12} ({:3} - {:3})", fmt::bytes(item_names[i]), mval[i * 2], mval[i * 2 + 1]);
         put_str(buf, 14 + i, 20);
         for (int j = 0; j < 2; j++) {
-            buf = format("     %3d", cval[i * 2 + j]);
+            buf = fmt::format("     {:3}", cval[i * 2 + j]);
             put_str(buf, 14 + i, 45 + 8 * j);
         }
     }
@@ -473,14 +476,14 @@ bool get_chara_limits(PlayerType *player_ptr, chara_limit_type *chara_limit_ptr)
             if (cs == max_items) {
                 c_put_str(TERM_YELLOW, accept, 19, 35);
             } else {
-                cur = format("     %3d", cval[cs]);
+                cur = fmt::format("     {:3}", cval[cs]);
                 c_put_str(TERM_YELLOW, cur, 14 + cs / 2, 45 + 8 * (cs % 2));
             }
 
             os = cs;
         }
 
-        char c = inkey();
+        char c = input_key_with_context({ InputKind::BIRTH, prompt, BirthInputDetails{ BirthStep::CHARA_LIMITS } });
         switch (c) {
         case 'Q':
             birth_quit();

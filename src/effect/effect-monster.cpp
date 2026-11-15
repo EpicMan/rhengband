@@ -7,7 +7,6 @@
 #include "effect/effect-monster.h"
 #include "avatar/avatar.h"
 #include "core/disturbance.h"
-#include "core/stuff-handler.h"
 #include "core/window-redrawer.h"
 #include "effect/attribute-types.h"
 #include "effect/effect-characteristics.h"
@@ -33,22 +32,20 @@
 #include "monster/monster-status.h"
 #include "monster/monster-update.h"
 #include "monster/monster-util.h"
-#include "object-enchant/special-object-flags.h"
 #include "spell-kind/blood-curse.h"
 #include "spell-kind/spells-polymorph.h"
 #include "spell-kind/spells-teleport.h"
 #include "sv-definition/sv-other-types.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "tracking/health-bar-tracker.h"
-#include "tracking/lore-tracker.h"
 #include "util/bit-flags-calculator.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
@@ -145,7 +142,7 @@ static ProcessResult exe_affect_monster_by_effect(PlayerType *player_ptr, Effect
         return result;
     }
 
-    bool do_effect = em_ptr->r_ptr->resistance_flags.has_not(MonsterResistanceType::RESIST_ALL);
+    bool do_effect = em_ptr->monrace->resistance_flags.has_not(MonsterResistanceType::RESIST_ALL);
     do_effect |= std::any_of(effect_arrtibute.cbegin(), effect_arrtibute.cend(), check);
 
     if (do_effect) {
@@ -156,14 +153,14 @@ static ProcessResult exe_affect_monster_by_effect(PlayerType *player_ptr, Effect
     ignore_res_all |= (em_ptr->attribute == AttributeType::MONSTER_MELEE);
     ignore_res_all |= (em_ptr->attribute == AttributeType::MONSTER_SHOOT);
 
-    if (em_ptr->r_ptr->resistance_flags.has(MonsterResistanceType::RESIST_ALL) && ignore_res_all) {
+    if (em_ptr->monrace->resistance_flags.has(MonsterResistanceType::RESIST_ALL) && ignore_res_all) {
         return switch_effects_monster(player_ptr, em_ptr);
     }
 
     em_ptr->note = _("には完全な耐性がある！", " is immune.");
     em_ptr->dam = 0;
     if (is_original_ap_and_seen(player_ptr, *em_ptr->m_ptr)) {
-        em_ptr->r_ptr->r_resistance_flags.set(MonsterResistanceType::RESIST_ALL);
+        em_ptr->monrace->r_resistance_flags.set(MonsterResistanceType::RESIST_ALL);
     }
 
     if (em_ptr->attribute == AttributeType::LITE_WEAK || em_ptr->attribute == AttributeType::KILL_WALL) {
@@ -184,7 +181,7 @@ static void effect_damage_killed_pet(PlayerType *player_ptr, EffectMonster *em_p
     if (em_ptr->known && !em_ptr->note.empty()) {
         angband_strcpy(em_ptr->m_name, monster_desc(player_ptr, *em_ptr->m_ptr, MD_TRUE_NAME), sizeof(em_ptr->m_name));
         if (em_ptr->see_s_msg) {
-            msg_format("%s^%s", em_ptr->m_name, em_ptr->note.data());
+            msg_print("{}{}", str_upcase_first(em_ptr->m_name), em_ptr->note);
         } else {
             player_ptr->current_floor_ptr->monster_noise = true;
         }
@@ -209,7 +206,7 @@ static void effect_damage_killed_pet(PlayerType *player_ptr, EffectMonster *em_p
 static void effect_damage_makes_sleep(PlayerType *player_ptr, EffectMonster *em_ptr)
 {
     if (!em_ptr->note.empty() && em_ptr->seen_msg) {
-        msg_format("%s^%s", em_ptr->m_name, em_ptr->note.data());
+        msg_print("{}{}", str_upcase_first(em_ptr->m_name), em_ptr->note);
     } else if (em_ptr->see_s_msg) {
         const auto m_name = monster_desc(player_ptr, *em_ptr->m_ptr, 0);
         const auto pain_message = em_ptr->m_ptr->get_pain_message(m_name, em_ptr->dam);
@@ -221,7 +218,7 @@ static void effect_damage_makes_sleep(PlayerType *player_ptr, EffectMonster *em_
     }
 
     if (em_ptr->do_sleep) {
-        (void)set_monster_csleep(player_ptr, em_ptr->g_ptr->m_idx, em_ptr->do_sleep);
+        (void)set_monster_csleep(*player_ptr->current_floor_ptr, em_ptr->g_ptr->m_idx, em_ptr->do_sleep);
     }
 }
 
@@ -241,10 +238,10 @@ static bool deal_effect_damage_from_monster(PlayerType *player_ptr, EffectMonste
 
     HealthBarTracker::get_instance().set_flag_if_tracking(em_ptr->g_ptr->m_idx);
     if (em_ptr->m_ptr->is_riding()) {
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
     }
 
-    (void)set_monster_csleep(player_ptr, em_ptr->g_ptr->m_idx, 0);
+    (void)set_monster_csleep(*player_ptr->current_floor_ptr, em_ptr->g_ptr->m_idx, 0);
     em_ptr->m_ptr->hp -= em_ptr->dam;
     if (em_ptr->m_ptr->hp < 0) {
         effect_damage_killed_pet(player_ptr, em_ptr);
@@ -301,7 +298,7 @@ static bool deal_effect_damage_from_player(PlayerType *player_ptr, EffectMonster
     }
 
     if (!em_ptr->note.empty() && em_ptr->seen) {
-        msg_format(_("%s%s", "%s^%s"), em_ptr->m_name, em_ptr->note.data());
+        msg_print("{}{}", str_upcase_first(em_ptr->m_name), em_ptr->note);
     } else if (em_ptr->known && (em_ptr->dam || !em_ptr->do_fear)) {
         const auto m_name = monster_desc(player_ptr, *em_ptr->m_ptr, 0);
         const auto pain_message = em_ptr->m_ptr->get_pain_message(m_name, em_ptr->dam);
@@ -316,7 +313,7 @@ static bool deal_effect_damage_from_player(PlayerType *player_ptr, EffectMonster
 
     if ((fear || em_ptr->do_fear) && em_ptr->seen) {
         sound(SoundKind::FLEE);
-        msg_format(_("%s^は恐怖して逃げ出した！", "%s^ flees in terror!"), em_ptr->m_name);
+        msg_print(_("{}は恐怖して逃げ出した！", "{} flees in terror!"), str_upcase_first(em_ptr->m_name));
     }
 
     return false;
@@ -353,7 +350,7 @@ static void deal_effect_damage_to_monster(PlayerType *player_ptr, EffectMonster 
     }
 
     if (em_ptr->do_sleep) {
-        (void)set_monster_csleep(player_ptr, em_ptr->g_ptr->m_idx, em_ptr->do_sleep);
+        (void)set_monster_csleep(*player_ptr->current_floor_ptr, em_ptr->g_ptr->m_idx, em_ptr->do_sleep);
     }
 }
 
@@ -368,10 +365,10 @@ static void effect_makes_change_virtues(PlayerType *player_ptr, EffectMonster *e
         return;
     }
 
-    if (em_ptr->r_ptr->kind_flags.has_not(MonsterKindType::EVIL) || one_in_(5)) {
+    if (em_ptr->monrace->kind_flags.has_not(MonsterKindType::EVIL) || one_in_(5)) {
         chg_virtue(player_ptr, Virtue::COMPASSION, -1);
     }
-    if (em_ptr->r_ptr->kind_flags.has_not(MonsterKindType::EVIL) || one_in_(5)) {
+    if (em_ptr->monrace->kind_flags.has_not(MonsterKindType::EVIL) || one_in_(5)) {
         chg_virtue(player_ptr, Virtue::HONOUR, -1);
     }
 }
@@ -383,7 +380,7 @@ static void effect_makes_change_virtues(PlayerType *player_ptr, EffectMonster *e
  */
 static void affected_monster_prevents_bad_status(EffectMonster *em_ptr)
 {
-    const auto &monrace = *em_ptr->r_ptr;
+    const auto &monrace = *em_ptr->monrace;
     auto can_avoid_polymorph = monrace.kind_flags.has(MonsterKindType::UNIQUE);
     can_avoid_polymorph |= monrace.misc_flags.has(MonsterMiscType::QUESTOR);
     can_avoid_polymorph |= em_ptr->m_ptr->is_riding();
@@ -407,7 +404,7 @@ static void affected_monster_prevents_bad_status(EffectMonster *em_ptr)
  */
 static void effect_damage_piles_stun(PlayerType *player_ptr, EffectMonster *em_ptr)
 {
-    const auto &monrace = *em_ptr->r_ptr;
+    const auto &monrace = *em_ptr->monrace;
     auto can_avoid_stun = em_ptr->do_stun == 0;
     can_avoid_stun |= monrace.resistance_flags.has(MonsterResistanceType::NO_STUN);
     if (can_avoid_stun) {
@@ -427,7 +424,7 @@ static void effect_damage_piles_stun(PlayerType *player_ptr, EffectMonster *em_p
         turns = em_ptr->do_stun;
     }
 
-    (void)set_monster_stunned(player_ptr, em_ptr->g_ptr->m_idx, turns);
+    (void)set_monster_stunned(*player_ptr->current_floor_ptr, em_ptr->g_ptr->m_idx, turns);
     em_ptr->get_angry = true;
 }
 
@@ -439,7 +436,7 @@ static void effect_damage_piles_stun(PlayerType *player_ptr, EffectMonster *em_p
  */
 static void effect_damage_piles_confusion(PlayerType *player_ptr, EffectMonster *em_ptr)
 {
-    if ((em_ptr->do_conf == 0) || (em_ptr->r_ptr->resistance_flags.has(MonsterResistanceType::NO_CONF))) {
+    if ((em_ptr->do_conf == 0) || (em_ptr->monrace->resistance_flags.has(MonsterResistanceType::NO_CONF))) {
         return;
     }
 
@@ -456,7 +453,7 @@ static void effect_damage_piles_confusion(PlayerType *player_ptr, EffectMonster 
         turns = em_ptr->do_conf;
     }
 
-    (void)set_monster_confused(player_ptr, em_ptr->g_ptr->m_idx, turns);
+    (void)set_monster_confused(*player_ptr->current_floor_ptr, em_ptr->g_ptr->m_idx, turns);
     em_ptr->get_angry = true;
 }
 
@@ -470,11 +467,11 @@ static void effect_damage_piles_confusion(PlayerType *player_ptr, EffectMonster 
  */
 static void effect_damage_piles_fear(PlayerType *player_ptr, EffectMonster *em_ptr)
 {
-    if (em_ptr->do_fear == 0 || em_ptr->r_ptr->resistance_flags.has(MonsterResistanceType::NO_FEAR)) {
+    if (em_ptr->do_fear == 0 || em_ptr->monrace->resistance_flags.has(MonsterResistanceType::NO_FEAR)) {
         return;
     }
 
-    (void)set_monster_monfear(player_ptr, em_ptr->g_ptr->m_idx, em_ptr->m_ptr->get_remaining_fear() + em_ptr->do_fear);
+    (void)set_monster_monfear(*player_ptr->current_floor_ptr, em_ptr->g_ptr->m_idx, em_ptr->m_ptr->get_remaining_fear() + em_ptr->do_fear);
     em_ptr->get_angry = true;
 }
 
@@ -514,7 +511,7 @@ static void effect_damage_makes_weak(EffectMonster *em_ptr)
  */
 static void effect_damage_makes_polymorph(PlayerType *player_ptr, EffectMonster *em_ptr)
 {
-    if (!em_ptr->do_polymorph || (randint1(90) <= em_ptr->r_ptr->level)) {
+    if (!em_ptr->do_polymorph || (randint1(90) <= em_ptr->monrace->level)) {
         return;
     }
 
@@ -528,7 +525,7 @@ static void effect_damage_makes_polymorph(PlayerType *player_ptr, EffectMonster 
     }
 
     em_ptr->m_ptr = &player_ptr->current_floor_ptr->m_list[em_ptr->g_ptr->m_idx];
-    em_ptr->r_ptr = &em_ptr->m_ptr->get_monrace();
+    em_ptr->monrace = em_ptr->m_ptr->get_monrace_shared();
 }
 
 /*!
@@ -625,7 +622,7 @@ static void update_phase_out_stat(PlayerType *player_ptr, EffectMonster *em_ptr)
     }
 
     HealthBarTracker::get_instance().set_trackee(em_ptr->g_ptr->m_idx);
-    handle_stuff(player_ptr);
+    redraw_stuff(player_ptr);
 }
 
 /*!
@@ -688,7 +685,7 @@ static void postprocess_by_taking_photo(PlayerType *player_ptr, EffectMonster *e
 
     ItemEntity item({ ItemKindType::STATUE, SV_PHOTO });
     item.pval = em_ptr->photo;
-    item.ident |= (IDENT_FULL_KNOWN);
+    item.set_identification_flag(IdentificationFlag::FULL_KNOWN);
     (void)drop_near(player_ptr, item, player_ptr->get_position());
 }
 
@@ -751,16 +748,11 @@ bool affect_monster(
     exe_affect_monster_by_damage(player_ptr, em_ptr);
 
     update_phase_out_stat(player_ptr, em_ptr);
-    const auto monster_is_valid = em_ptr->m_ptr->is_valid();
-    if (monster_is_valid) {
+    if (em_ptr->m_ptr->is_valid()) {
         update_monster(player_ptr, target_m_idx, false);
     }
 
     lite_spot(player_ptr, em_ptr->get_position());
-    if (LoreTracker::get_instance().is_tracking(em_ptr->m_ptr->r_idx) && (em_ptr->seen || !monster_is_valid)) {
-        RedrawingFlagsUpdater::get_instance().set_flag(SubWindowRedrawingFlag::MONSTER_LORE);
-    }
-
     exe_affect_monster_postprocess(player_ptr, em_ptr, fall_off_horse_effect);
     return em_ptr->obvious;
 }

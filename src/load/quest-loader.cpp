@@ -1,28 +1,29 @@
 #include "load/quest-loader.h"
 #include "artifact/fixed-art-types.h"
-#include "dungeon/quest.h"
 #include "load/angband-version-comparer.h"
 #include "load/load-util.h"
 #include "load/load-zangband.h"
 #include "load/savedata-old-flag-types.h"
 #include "object-enchant/trg-types.h"
 #include "system/angband-exceptions.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-definition.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/floor/floor-info.h"
-#include "system/floor/town-info.h"
 #include "system/floor/town-list.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/player-type-definition.h"
 #include "util/enum-converter.h"
+#include <fmt/format.h>
 
 errr load_town(void)
 {
-    auto max_towns_load = rd_u16b();
-    if (max_towns_load <= towns_info.size()) {
+    size_t max_towns_load = rd_u16b();
+    if (max_towns_load <= TownList::get_instance().size()) {
         return 0;
     }
 
-    load_note(format(_("町が多すぎる(%u)！", "Too many (%u) towns!"), max_towns_load));
+    load_note(fmt::format(_("町が多すぎる({})！", "Too many ({}) towns!"), max_towns_load));
     return 23;
 }
 
@@ -57,36 +58,25 @@ static void load_quest_completion(QuestType *q_ptr)
     }
 }
 
-static void load_quest_details(PlayerType *player_ptr, QuestType *q_ptr, const QuestId loading_quest_id)
+static void load_quest_details(PlayerType *player_ptr, QuestId loading_quest_id)
 {
-    q_ptr->cur_num = rd_s16b();
-    q_ptr->max_num = rd_s16b();
-    q_ptr->type = i2enum<QuestKindType>(rd_s16b());
+    auto &quests = QuestList::get_instance();
+    quests.set_defeated_monster(loading_quest_id, rd_s16b());
+    quests.set_max_monster(loading_quest_id, rd_s16b());
+    quests.set_type(loading_quest_id, i2enum<QuestKindType>(rd_s16b()));
 
-    q_ptr->r_idx = i2enum<MonraceId>(rd_s16b());
-    if ((q_ptr->type == QuestKindType::RANDOM) && !q_ptr->get_bounty().is_valid()) {
-        auto &quests = QuestList::get_instance();
+    quests.set_monrace_id(loading_quest_id, i2enum<MonraceId>(rd_s16b()));
+    if ((quests.is_quest_equals(loading_quest_id, QuestKindType::RANDOM)) && !quests.is_bounty_valid(loading_quest_id)) {
         determine_random_questor(player_ptr, quests.get_quest(loading_quest_id));
     }
-    q_ptr->reward_fa_id = i2enum<FixedArtifactId>(rd_s16b());
-    if (q_ptr->has_reward()) {
-        q_ptr->get_reward().gen_flags.set(ItemGenerationTraitType::QUESTITEM);
+
+    quests.reset_reward(loading_quest_id);
+    const auto reward_fa_id = i2enum<FixedArtifactId>(rd_s16b());
+    if (reward_fa_id != FixedArtifactId::NONE) {
+        quests.set_reward(loading_quest_id, reward_fa_id);
     }
 
-    q_ptr->flags = rd_byte();
-}
-
-static bool is_missing_id_ver_16(const QuestId q_idx)
-{
-    auto is_missing_id = (enum2i(q_idx) == 0);
-    is_missing_id |= (enum2i(q_idx) == 13);
-    is_missing_id |= (enum2i(q_idx) == 17);
-    is_missing_id |= (enum2i(q_idx) >= 35 && enum2i(q_idx) <= 39);
-    is_missing_id |= (enum2i(q_idx) >= 88 && enum2i(q_idx) <= 100);
-
-    auto is_deleted_random_quest = (enum2i(q_idx) >= 50 || enum2i(q_idx) <= 88);
-
-    return is_missing_id || is_deleted_random_quest;
+    quests.set_flags(loading_quest_id, rd_byte());
 }
 
 static bool is_loadable_quest(const QuestId q_idx, const byte max_rquests_load)
@@ -96,15 +86,9 @@ static bool is_loadable_quest(const QuestId q_idx, const byte max_rquests_load)
         return true;
     }
 
-    bool is_missing_id;
-
-    if (loading_savefile_version_is_older_than(17)) {
-        is_missing_id = is_missing_id_ver_16(q_idx);
-    } else {
-        is_missing_id = false;
-    }
-
-    if (!is_missing_id) {
+    // バージョン17以降のセーブデータに今は存在しないクエスト番号があれば、サポート対象外とする。
+    // 16以前は欠番や削除されたランダムクエストの番号が含まれるため、読み捨てる
+    if (!loading_savefile_version_is_older_than(17)) {
         const std::string msg(_("削除されたクエストのあるセーブデータはサポート対象外です。",
             "The save data with deleted quests is unsupported."));
         throw SaveDataNotSupportedException(msg);
@@ -169,7 +153,7 @@ void analyze_quests(PlayerType *player_ptr, const uint16_t max_quests_load, cons
             continue;
         }
 
-        load_quest_details(player_ptr, &quest, quest_id);
+        load_quest_details(player_ptr, quest_id);
         if (h_older_than(0, 3, 11)) {
             set_zangband_quest(player_ptr, &quest, quest_id, old_inside_quest);
         } else {

@@ -4,11 +4,11 @@ AUTOMAKE_OPTIONS = foreign
 
 angband_files = \
 	ArtifactDefinitions.jsonc BaseitemDefinitions.jsonc ClassMagicDefinitions.jsonc \
-	ClassSkillDefinitions.txt DungeonDefinitions.txt EgoDefinitions.txt \
-	MonraceDefinitions.jsonc MonsterMessages.jsonc QuestDefinitionList.txt \
-	QuestPreferences.txt SpellDefinitions.jsonc TerrainDefinitions.txt \
-	TownDefinitionList.txt TownPreferences.txt VaultDefinitions.txt \
-	WildernessDefinition.txt
+	ClassSkillDefinitions.jsonc DungeonDefinitions.jsonc EgoDefinitions.jsonc \
+	MonraceDefinitions.jsonc MonsterMessages.jsonc QuestPreferences.jsonc \
+	SpellDefinitions.jsonc TerrainDefinitions.jsonc \
+	TownDefinitionList.jsonc TownPreferences.jsonc VaultDefinitions.jsonc \
+	WildernessDefinition.jsonc
 
 EXTRA_DIST = \
   $(angband_files)

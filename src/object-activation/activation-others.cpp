@@ -41,14 +41,14 @@
 #include "status/bad-status-setter.h"
 #include "status/body-improvement.h"
 #include "status/buff-setter.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/projection-path-calculator.h"
 #include "target/target-checker.h"
 #include "target/target-getter.h"
@@ -105,12 +105,12 @@ bool activate_scare(PlayerType *player_ptr)
     return true;
 }
 
-bool activate_aggravation(PlayerType *player_ptr, ItemEntity *o_ptr, std::string_view name)
+bool activate_aggravation(PlayerType *player_ptr, const ItemEntity &item, std::string_view name)
 {
-    if (o_ptr->is_specific_artifact(FixedArtifactId::HYOUSIGI)) {
+    if (item.is_specific_artifact(FixedArtifactId::HYOUSIGI)) {
         msg_print(_("拍子木を打った。", "You beat your wooden clappers."));
     } else {
-        msg_format(_("%sは不快な物音を立てた。", "The %s sounds an unpleasant noise."), name.data());
+        msg_print(_("{}は不快な物音を立てた。", "The {} sounds an unpleasant noise."), name);
     }
 
     aggravate_monsters(player_ptr, 0);
@@ -131,12 +131,12 @@ bool activate_stone_mud(PlayerType *player_ptr)
 
 bool activate_judgement(PlayerType *player_ptr, std::string_view name)
 {
-    msg_format(_("%sは赤く明るく光った！", "The %s flashes bright red!"), name.data());
+    msg_print(_("{}は赤く明るく光った！", "The {} flashes bright red!"), name);
     chg_virtue(player_ptr, Virtue::KNOWLEDGE, 1);
     chg_virtue(player_ptr, Virtue::ENLIGHTEN, 1);
     wiz_lite(player_ptr, false);
 
-    msg_format(_("%sはあなたの体力を奪った...", "The %s drains your vitality..."), name.data());
+    msg_print(_("{}はあなたの体力を奪った...", "The {} drains your vitality..."), name);
     take_hit(player_ptr, DAMAGE_LOSELIFE, Dice::roll(3, 8), _("審判の宝石", "the Jewel of Judgement"));
 
     (void)detect_traps(player_ptr, DETECT_RAD_DEFAULT, true);
@@ -157,7 +157,7 @@ bool activate_telekinesis(PlayerType *player_ptr, std::string_view name)
         return false;
     }
 
-    msg_format(_("%sを伸ばした。", "You stretched your %s."), name.data());
+    msg_print(_("{}を伸ばした。", "You stretched your {}."), name);
     fetch_item(player_ptr, dir, 500, true);
     return true;
 }
@@ -173,7 +173,7 @@ bool activate_unique_detection(PlayerType *player_ptr)
 
         const auto &monrace = monster.get_monrace();
         if (monrace.kind_flags.has(MonsterKindType::UNIQUE)) {
-            msg_format(_("%s． ", "%s. "), monrace.name.data());
+            msg_print(_("{}． ", "{}. "), monrace.name);
         }
 
         const auto message = monrace.get_message(monrace.name, MonsterMessageType::MESSAGE_DETECT_UNIQUE);
@@ -187,7 +187,7 @@ bool activate_unique_detection(PlayerType *player_ptr)
 
 bool activate_dispel_curse(PlayerType *player_ptr, std::string_view name)
 {
-    msg_format(_("%sが真実を照らし出す...", "The %s exhibits the truth..."), name.data());
+    msg_print(_("{}が真実を照らし出す...", "The {} exhibits the truth..."), name);
     (void)remove_all_curse(player_ptr);
     (void)probing(player_ptr);
     return true;
@@ -290,7 +290,7 @@ bool activate_whirlwind(PlayerType *player_ptr)
 
 bool activate_blinding_light(PlayerType *player_ptr, std::string_view name)
 {
-    msg_format(_("%sが眩しい光で輝いた...", "The %s gleams with blinding light..."), name.data());
+    msg_print(_("{}が眩しい光で輝いた...", "The {} gleams with blinding light..."), name);
     (void)fire_ball(player_ptr, AttributeType::LITE, Direction::self(), 300, 6);
     confuse_monsters(player_ptr, 3 * player_ptr->lev / 2);
     return true;
@@ -324,7 +324,7 @@ bool activate_recharge(PlayerType *player_ptr)
 
 bool activate_recharge_extra(PlayerType *player_ptr, std::string_view name)
 {
-    msg_format(_("%sが白く輝いた．．．", "The %s gleams with blinding light..."), name.data());
+    msg_print(_("{}が白く輝いた．．．", "The {} gleams with blinding light..."), name);
     return recharge(player_ptr, 1000);
 }
 
@@ -374,14 +374,27 @@ bool activate_protection_elbereth(PlayerType *player_ptr)
     (void)bss.set_blindness(0);
     (void)bss.hallucination(0);
     set_blessed(player_ptr, randint0(25) + 25, true);
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ABILITY_SCORE);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ABILITY_SCORE);
     return true;
 }
 
 bool activate_light(PlayerType *player_ptr, std::string_view name)
 {
-    msg_format(_("%sから澄んだ光があふれ出た...", "The %s wells with clear light..."), name.data());
+    msg_print(_("{}から澄んだ光があふれ出た...", "The {} wells with clear light..."), name);
     (void)lite_area(player_ptr, Dice::roll(2, 15), 3);
+    return true;
+}
+
+/*!
+ * @brief 発動：暗黒生成
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param name 発動アイテム名
+ * @return 常にTRUE
+ */
+bool activate_darkness(PlayerType *player_ptr, std::string_view name)
+{
+    msg_print(_("{}が光を吸い込んだ...", "The {} absorbs light..."), name);
+    (void)unlite_area(player_ptr, Dice::roll(2, 15), 3);
     return true;
 }
 
@@ -391,17 +404,17 @@ bool activate_recall(PlayerType *player_ptr)
     return recall_player(player_ptr, randint0(21) + 15);
 }
 
-bool activate_tree_creation(PlayerType *player_ptr, ItemEntity *o_ptr, std::string_view name)
+bool activate_tree_creation(PlayerType *player_ptr, const ItemEntity &item, std::string_view name)
 {
-    const auto randart_name = o_ptr->is_random_artifact() ? o_ptr->randart_name->data() : "";
-    msg_format(_("%s%sから明るい緑の光があふれ出た...", "The %s%s wells with clear light..."), name.data(), randart_name);
+    const auto randart_name = item.is_random_artifact() ? item.randart_name->data() : "";
+    msg_print(_("{}{}から明るい緑の光があふれ出た...", "The {}{} wells with clear light..."), name, randart_name);
     return tree_creation(player_ptr, player_ptr->y, player_ptr->x);
 }
 
-bool activate_animate_dead(PlayerType *player_ptr, ItemEntity *o_ptr)
+bool activate_animate_dead(PlayerType *player_ptr, const ItemEntity &item)
 {
     msg_print(_("黄金色の光が溢れ出た...", "It emitted a golden light..."));
-    if (o_ptr->is_specific_artifact(FixedArtifactId::EXCALIBORG)) {
+    if (item.is_specific_artifact(FixedArtifactId::EXCALIBORG)) {
         msg_print(_("ぴぴるぴるぴるぴぴるぴ～♪", "Pipiru piru piru pipiru pii"));
     }
 

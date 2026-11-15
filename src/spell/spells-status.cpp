@@ -41,17 +41,19 @@
 #include "status/sight-setter.h"
 #include "system/baseitem/baseitem-definition.h"
 #include "system/baseitem/baseitem-list.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/terrain/terrain-characteristics.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/target-getter.h"
 #include "timed-effect/timed-effects.h"
 #include "util/bit-flags-calculator.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
+#include <fmt/format.h>
 
 /*!
  * @brief モンスター回復処理
@@ -210,14 +212,7 @@ bool time_walk(PlayerType *player_ptr)
     msg_erase();
 
     player_ptr->energy_need -= 1000 + (100 + player_ptr->csp - 50) * TURNS_PER_TICK / 10;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::MAP);
-    rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-    static constexpr auto flags = {
-        SubWindowRedrawingFlag::OVERHEAD,
-        SubWindowRedrawingFlag::DUNGEON,
-    };
-    rfu.set_flags(flags);
+    DeferredUpdateRequests::get_instance().request_monster_update_and_map_redrawing();
     handle_stuff(player_ptr);
     return true;
 }
@@ -256,10 +251,10 @@ void roll_hitdice(PlayerType *player_ptr, spell_operation options)
 
     player_ptr->knowledge &= ~(KNOW_HPRATE);
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(StatusRecalculatingFlag::HP);
-    rfu.set_flag(MainWindowRedrawingFlag::HP);
-    rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(StatusRecalculatingFlag::HP);
+    dur.set_flag(MainWindowRedrawingFlag::HP);
+    dur.set_flag(SubWindowRedrawingFlag::PLAYER);
     if (!(options & SPOP_NO_UPDATE)) {
         handle_stuff(player_ptr);
     }
@@ -269,7 +264,7 @@ void roll_hitdice(PlayerType *player_ptr, spell_operation options)
     }
 
     if (options & SPOP_DEBUG) {
-        msg_format(_("現在の体力ランクは %d/100 です。", "Your life rate is %d/100 now."), player_ptr->calc_life_rating());
+        msg_print(_("現在の体力ランクは {}/100 です。", "Your life rate is {}/100 now."), player_ptr->calc_life_rating());
         player_ptr->knowledge |= KNOW_HPRATE;
         return;
     }
@@ -463,7 +458,7 @@ bool true_healing(PlayerType *player_ptr, int pow)
 
 bool restore_mana(PlayerType *player_ptr, bool magic_eater)
 {
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (PlayerClass(player_ptr).equals(PlayerClassType::MAGIC_EATER) && magic_eater) {
         // 魔力復活による、魔道具術師の取り込んだ魔法の回復量
         // 取り込み数が10回未満: 3 回分回復
@@ -486,7 +481,7 @@ bool restore_mana(PlayerType *player_ptr, bool magic_eater)
         }
 
         msg_print(_("頭がハッキリとした。", "You feel your head clear."));
-        rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+        dur.set_flag(SubWindowRedrawingFlag::PLAYER);
         return true;
     }
 
@@ -497,12 +492,7 @@ bool restore_mana(PlayerType *player_ptr, bool magic_eater)
     player_ptr->csp = player_ptr->msp;
     player_ptr->csp_frac = 0;
     msg_print(_("頭がハッキリとした。", "You feel your head clear."));
-    rfu.set_flag(MainWindowRedrawingFlag::MP);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::SPELL,
-        SubWindowRedrawingFlag::PLAYER,
-    };
-    rfu.set_flags(flags_swrf);
+    dur.set_flag(MainWindowRedrawingFlag::MP);
     return true;
 }
 
@@ -548,49 +538,44 @@ bool fishing(PlayerType *player_ptr)
     const auto &grid = floor.get_grid(pos);
     if (grid.has_monster()) {
         const auto m_name = monster_desc(player_ptr, floor.m_list[grid.m_idx], 0);
-        msg_format(_("%sが邪魔だ！", "%s^ is standing in your way."), m_name.data());
+        msg_print(_("{}が邪魔だ！", "{} is standing in your way."), str_upcase_first(m_name));
         PlayerEnergy(player_ptr).reset_player_turn();
         return false;
     }
 
     set_action(player_ptr, ACTION_FISH);
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::ACTION);
     return true;
 }
 
 /*!
  * @brief 装備を脱ぎ捨てて小宇宙を燃やす
  * @param player_ptr プレイヤー情報への参照ポインタ
- * @param o_ptr_ptr 脱ぐ装備品への参照ポインタのポインタ
- * @return 脱いだらTRUE、脱がなかったらFALSE
- * @details
- * 脱いで落とした装備にtimeoutを設定するために装備品のアドレスを返す。
+ * @param item_casting 脱ぐ装備品への参照
+ * @return 脱いだら脱いだ後のアイテムへのポインタ、脱がなかったらnullptr
+ * @details 脱いで落とした装備にtimeoutを設定するために装備品のアドレスを返す.
  */
-bool cosmic_cast_off(PlayerType *player_ptr, ItemEntity **o_ptr_ptr)
+std::shared_ptr<ItemEntity> cosmic_cast_off(PlayerType *player_ptr, const ItemEntity &item_casting)
 {
-    auto *o_ptr = *o_ptr_ptr;
-
     /* Cast off activated item */
     INVENTORY_IDX slot;
     for (slot = INVEN_MAIN_HAND; slot <= INVEN_FEET; slot++) {
-        if (o_ptr == player_ptr->inventory[slot].get()) {
+        if (&item_casting == player_ptr->inventory[slot].get()) {
             break;
         }
     }
 
     if (slot > INVEN_FEET) {
-        return false;
+        return nullptr;
     }
 
-    auto item = o_ptr->clone();
-    inven_item_increase(player_ptr, slot, (0 - o_ptr->number));
+    auto item = item_casting.clone();
+    inven_item_increase(player_ptr, slot, -item.number);
     inven_item_optimize(player_ptr, slot);
 
     const auto old_o_idx = drop_near(player_ptr, item, player_ptr->get_position());
-    *o_ptr_ptr = player_ptr->current_floor_ptr->o_list[old_o_idx].get();
-
     const auto item_name = describe_flavor(player_ptr, item, OD_NAME_ONLY);
-    msg_format(_("%sを脱ぎ捨てた。", "You cast off %s."), item_name.data());
+    msg_print(_("{}を脱ぎ捨てた。", "You cast off {}."), item_name);
     sound(SoundKind::TAKE_OFF);
 
     /* Get effects */
@@ -610,7 +595,7 @@ bool cosmic_cast_off(PlayerType *player_ptr, ItemEntity **o_ptr_ptr)
         msg_print(_("気が爆発寸前になった。", "Your force absorbs the explosion."));
     }
 
-    return true;
+    return old_o_idx > 0 ? player_ptr->current_floor_ptr->o_list[old_o_idx] : nullptr;
 }
 
 /*!
@@ -690,5 +675,5 @@ void status_shuffle(PlayerType *player_ptr)
         }
     }
 
-    RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
+    DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
 }

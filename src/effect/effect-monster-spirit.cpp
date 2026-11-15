@@ -7,11 +7,11 @@
 #include "monster/monster-status-setter.h"
 #include "monster/monster-status.h"
 #include "monster/monster-util.h"
+#include "system/deferred-update-requests.h"
 #include "system/grid-type-definition.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "tracking/health-bar-tracker.h"
 #include "util/bit-flags-calculator.h"
 #include "util/string-processor.h"
@@ -22,11 +22,11 @@ ProcessResult effect_monster_drain_mana(PlayerType *player_ptr, EffectMonster *e
     if (em_ptr->seen) {
         em_ptr->obvious = true;
     }
-    auto ability_flags = em_ptr->r_ptr->ability_flags;
+    auto ability_flags = em_ptr->monrace->ability_flags;
     bool has_mana = ability_flags.reset(RF_ABILITY_NOMAGIC_MASK).any();
     if (!has_mana) {
         if (em_ptr->see_s_msg) {
-            msg_format(_("%sには効果がなかった。", "%s is unaffected."), em_ptr->m_name);
+            msg_print(_("{}には効果がなかった。", "{} is unaffected."), em_ptr->m_name);
         }
 
         em_ptr->dam = 0;
@@ -34,7 +34,7 @@ ProcessResult effect_monster_drain_mana(PlayerType *player_ptr, EffectMonster *e
     }
 
     if (!em_ptr->is_monster()) {
-        msg_format(_("%sから精神エネルギーを吸いとった。", "You draw psychic energy from %s."), em_ptr->m_name);
+        msg_print(_("{}から精神エネルギーを吸いとった。", "You draw psychic energy from {}."), em_ptr->m_name);
         (void)hp_player(player_ptr, em_ptr->dam);
         em_ptr->dam = 0;
         return ProcessResult::PROCESS_CONTINUE;
@@ -51,13 +51,13 @@ ProcessResult effect_monster_drain_mana(PlayerType *player_ptr, EffectMonster *e
     }
 
     HealthBarTracker::get_instance().set_flag_if_tracking(em_ptr->src_idx);
-    if (em_ptr->m_caster_ptr && em_ptr->m_caster_ptr->is_riding()) {
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
+    if (em_ptr->m_caster_ptr->is_riding()) {
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
     }
 
     if (em_ptr->see_s_msg) {
         angband_strcpy(em_ptr->killer, monster_desc(player_ptr, *em_ptr->m_caster_ptr, 0), sizeof(em_ptr->killer));
-        msg_format(_("%s^は気分が良さそうだ。", "%s^ appears healthier."), em_ptr->killer);
+        msg_print(_("{}は気分が良さそうだ。", "{} appears healthier."), str_upcase_first(em_ptr->killer));
     }
 
     em_ptr->dam = 0;
@@ -70,31 +70,31 @@ ProcessResult effect_monster_mind_blast(PlayerType *player_ptr, EffectMonster *e
         em_ptr->obvious = true;
     }
     if (em_ptr->is_player()) {
-        msg_format(_("%sをじっと睨んだ。", "You gaze intently at %s."), em_ptr->m_name);
+        msg_print(_("{}をじっと睨んだ。", "You gaze intently at {}."), em_ptr->m_name);
     }
 
-    bool has_immute = em_ptr->r_ptr->kind_flags.has(MonsterKindType::UNIQUE);
-    has_immute |= em_ptr->r_ptr->resistance_flags.has(MonsterResistanceType::NO_CONF);
-    has_immute |= (em_ptr->r_ptr->level > randint1(std::max(1, em_ptr->caster_lev - 10)) + 10);
+    bool has_immute = em_ptr->monrace->kind_flags.has(MonsterKindType::UNIQUE);
+    has_immute |= em_ptr->monrace->resistance_flags.has(MonsterResistanceType::NO_CONF);
+    has_immute |= (em_ptr->monrace->level > randint1(std::max(1, em_ptr->caster_lev - 10)) + 10);
 
     if (has_immute) {
-        if (em_ptr->r_ptr->resistance_flags.has(MonsterResistanceType::NO_CONF)) {
+        if (em_ptr->monrace->resistance_flags.has(MonsterResistanceType::NO_CONF)) {
             if (is_original_ap_and_seen(player_ptr, *em_ptr->m_ptr)) {
-                em_ptr->r_ptr->resistance_flags.set(MonsterResistanceType::NO_CONF);
+                em_ptr->monrace->r_resistance_flags.set(MonsterResistanceType::NO_CONF);
             }
         }
 
         em_ptr->note = _("には効果がなかった。", " is unaffected.");
         em_ptr->dam = 0;
-    } else if (em_ptr->r_ptr->misc_flags.has(MonsterMiscType::EMPTY_MIND)) {
+    } else if (em_ptr->monrace->misc_flags.has(MonsterMiscType::EMPTY_MIND)) {
         if (is_original_ap_and_seen(player_ptr, *em_ptr->m_ptr)) {
-            em_ptr->r_ptr->r_misc_flags.set(MonsterMiscType::EMPTY_MIND);
+            em_ptr->monrace->r_misc_flags.set(MonsterMiscType::EMPTY_MIND);
         }
         em_ptr->note = _("には完全な耐性がある！", " is immune.");
         em_ptr->dam = 0;
-    } else if (em_ptr->r_ptr->misc_flags.has(MonsterMiscType::WEIRD_MIND)) {
+    } else if (em_ptr->monrace->misc_flags.has(MonsterMiscType::WEIRD_MIND)) {
         if (is_original_ap_and_seen(player_ptr, *em_ptr->m_ptr)) {
-            em_ptr->r_ptr->r_misc_flags.set(MonsterMiscType::WEIRD_MIND);
+            em_ptr->monrace->r_misc_flags.set(MonsterMiscType::WEIRD_MIND);
         }
         em_ptr->note = _("には耐性がある。", " resists.");
         em_ptr->dam /= 3;
@@ -118,32 +118,32 @@ ProcessResult effect_monster_brain_smash(PlayerType *player_ptr, EffectMonster *
         em_ptr->obvious = true;
     }
     if (em_ptr->is_player()) {
-        msg_format(_("%sをじっと睨んだ。", "You gaze intently at %s."), em_ptr->m_name);
+        msg_print(_("{}をじっと睨んだ。", "You gaze intently at {}."), em_ptr->m_name);
     }
 
-    bool has_immute = em_ptr->r_ptr->kind_flags.has(MonsterKindType::UNIQUE);
-    has_immute |= em_ptr->r_ptr->resistance_flags.has(MonsterResistanceType::NO_CONF);
-    has_immute |= (em_ptr->r_ptr->level > randint1(std::max(1, em_ptr->caster_lev - 10)) + 10);
+    bool has_immute = em_ptr->monrace->kind_flags.has(MonsterKindType::UNIQUE);
+    has_immute |= em_ptr->monrace->resistance_flags.has(MonsterResistanceType::NO_CONF);
+    has_immute |= (em_ptr->monrace->level > randint1(std::max(1, em_ptr->caster_lev - 10)) + 10);
 
     if (has_immute) {
-        if (em_ptr->r_ptr->resistance_flags.has(MonsterResistanceType::NO_CONF)) {
+        if (em_ptr->monrace->resistance_flags.has(MonsterResistanceType::NO_CONF)) {
             if (is_original_ap_and_seen(player_ptr, *em_ptr->m_ptr)) {
-                em_ptr->r_ptr->resistance_flags.set(MonsterResistanceType::NO_CONF);
+                em_ptr->monrace->r_resistance_flags.set(MonsterResistanceType::NO_CONF);
             }
         }
 
         em_ptr->note = _("には効果がなかった。", " is unaffected.");
         em_ptr->dam = 0;
-    } else if (em_ptr->r_ptr->misc_flags.has(MonsterMiscType::EMPTY_MIND)) {
+    } else if (em_ptr->monrace->misc_flags.has(MonsterMiscType::EMPTY_MIND)) {
         if (is_original_ap_and_seen(player_ptr, *em_ptr->m_ptr)) {
-            em_ptr->r_ptr->r_misc_flags.set(MonsterMiscType::EMPTY_MIND);
+            em_ptr->monrace->r_misc_flags.set(MonsterMiscType::EMPTY_MIND);
         }
 
         em_ptr->note = _("には完全な耐性がある！", " is immune.");
         em_ptr->dam = 0;
-    } else if (em_ptr->r_ptr->misc_flags.has(MonsterMiscType::WEIRD_MIND)) {
+    } else if (em_ptr->monrace->misc_flags.has(MonsterMiscType::WEIRD_MIND)) {
         if (is_original_ap_and_seen(player_ptr, *em_ptr->m_ptr)) {
-            em_ptr->r_ptr->r_misc_flags.set(MonsterMiscType::WEIRD_MIND);
+            em_ptr->monrace->r_misc_flags.set(MonsterMiscType::WEIRD_MIND);
         }
 
         em_ptr->note = _("には耐性がある！", " resists!");
@@ -159,7 +159,7 @@ ProcessResult effect_monster_brain_smash(PlayerType *player_ptr, EffectMonster *
             em_ptr->do_stun = randint0(8) + 8;
         }
 
-        (void)set_monster_slow(player_ptr, em_ptr->g_ptr->m_idx, em_ptr->m_ptr->get_remaining_deceleration() + 10);
+        (void)set_monster_slow(*player_ptr->current_floor_ptr, em_ptr->g_ptr->m_idx, em_ptr->m_ptr->get_remaining_deceleration() + 10);
     }
 
     return ProcessResult::PROCESS_CONTINUE;

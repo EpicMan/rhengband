@@ -1,6 +1,7 @@
 #include "core/player-processor.h"
 #include "action/run-execution.h"
 #include "action/travel-execution.h"
+#include "bot/bot-json-output.h"
 #include "core/disturbance.h"
 #include "core/special-internal-keys.h"
 #include "core/speed-table.h"
@@ -29,7 +30,7 @@
 #include "monster/monster-util.h"
 #include "mutation/mutation-investor-remover.h"
 #include "player-base/player-class.h"
-#include "player-info/bluemage-data-type.h"
+#include "player-info/bluemage-data.h"
 #include "player-info/mane-data-type.h"
 #include "player-info/samurai-data-type.h"
 #include "player-info/sniper-data-type.h"
@@ -37,21 +38,25 @@
 #include "player/attack-defense-types.h"
 #include "player/eldritch-horror.h"
 #include "player/player-skill.h"
+#include "realm/realm-song.h"
 #include "spell-kind/spells-random.h"
 #include "spell-realm/spells-crusade.h"
 #include "spell-realm/spells-hex.h"
 #include "spell-realm/spells-song.h"
 #include "status/action-setter.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/floor/wilderness-grid.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/screen-processor.h"
 #include "timed-effect/timed-effects.h"
 #include "tracking/health-bar-tracker.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
+#include "view/original-tiles.h"
 #include "world/world-turn-processor.h"
+#include <fmt/format.h>
 
 bool load = true;
 bool can_save = false;
@@ -71,7 +76,7 @@ static void process_fishing(PlayerType *player_ptr)
             const auto pos = player_ptr->get_neighbor(player_ptr->fishing_dir);
             if (auto m_idx = place_specific_monster(player_ptr, pos.y, pos.x, r_idx, PM_NO_KAGE)) {
                 const auto m_name = monster_desc(player_ptr, floor.m_list[*m_idx], 0);
-                msg_print(_(format("%sが釣れた！", m_name.data()), "You have a good catch!"));
+                msg_print(_("{}が釣れた！", "You have a good catch!"), m_name);
                 success = true;
             }
         }
@@ -90,13 +95,28 @@ bool continuous_action_running(PlayerType *player_ptr)
 }
 
 /*!
- * @brief プレイヤーの行動処理 / Process the player
- * @note
- * Notice the annoying code to handle "pack overflow", which\n
- * must come first just in case somebody manages to corrupt\n
- * the savefiles by clever use of menu commands or something.\n
+ * @brief プレイヤーの手番の始めに、時刻を表示し、画面の描き方を入力待ちに合わせる
+ * @param player_ptr プレイヤーへの参照ポインタ
  */
-void process_player(PlayerType *player_ptr)
+static void prepare_turn_display(PlayerType *player_ptr)
+{
+    if (!command_rep) {
+        WorldTurnProcessor(player_ptr).print_time();
+    }
+
+    if (fresh_once && (continuous_action_running(player_ptr) || !command_rep)) {
+        stop_term_fresh();
+    }
+}
+
+/*!
+ * @brief プレイヤーの手番の頭の処理 (行動力の充填と、手番ごとの効果の経過)
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @return プレイヤーの手番が来たら true
+ * @details 突然変異の獲得・太古の怨念の発動と、闘技場の観戦中のモンスターの表示は、
+ * 行動力を充填する前に呼ばれるたびに行う。手番が来なければ、その後の処理は行わずに false を返す。
+ */
+static bool start_player_turn(PlayerType *player_ptr)
 {
     if (player_ptr->hack_mutation) {
         msg_print(_("何か変わった気がする！", "You feel different!"));
@@ -124,20 +144,15 @@ void process_player(PlayerType *player_ptr)
         }
 
         WorldTurnProcessor(player_ptr).print_time();
-    } else if (!(load && player_ptr->energy_need <= 0)) {
+    } else {
         player_ptr->energy_need -= speed_to_energy(player_ptr->pspeed);
     }
 
     if (player_ptr->energy_need > 0) {
-        return;
-    }
-    if (!command_rep) {
-        WorldTurnProcessor(player_ptr).print_time();
+        return false;
     }
 
-    if (fresh_once && (continuous_action_running(player_ptr) || !command_rep)) {
-        stop_term_fresh();
-    }
+    prepare_turn_display(player_ptr);
 
     if (player_ptr->resting < 0) {
         if (player_ptr->resting == COMMAND_ARG_REST_FULL_HEALING) {
@@ -167,55 +182,55 @@ void process_player(PlayerType *player_ptr)
     }
 
     const auto effects = player_ptr->effects();
-    if (player_ptr->riding && !effects->confusion().is_confused() && !effects->blindness().is_blind()) {
+    if (player_ptr->riding && !effects->confusion().is_active() && !effects->blindness().is_active()) {
         const auto &monster = player_ptr->current_floor_ptr->m_list[player_ptr->riding];
         const auto &monrace = monster.get_monrace();
+        auto &floor = *player_ptr->current_floor_ptr;
         if (monster.is_asleep()) {
             const auto m_name = monster_desc(player_ptr, monster, 0);
-            (void)set_monster_csleep(player_ptr, player_ptr->riding, 0);
-            msg_format(_("%s^を起こした。", "You have woken %s up."), m_name.data());
+            (void)set_monster_csleep(floor, player_ptr->riding, 0);
+            msg_print(_("{}を起こした。", "You have woken {} up."), m_name);
         }
 
         if (monster.is_stunned()) {
-            if (set_monster_stunned(player_ptr, player_ptr->riding,
+            if (set_monster_stunned(floor, player_ptr->riding,
                     (randint0(monrace.level) < player_ptr->skill_exp[PlayerSkillKindType::RIDING]) ? 0 : (monster.get_remaining_stun() - 1))) {
                 const auto m_name = monster_desc(player_ptr, monster, 0);
-                msg_format(_("%s^を朦朧状態から立ち直らせた。", "%s^ is no longer stunned."), m_name.data());
+                msg_print(_("{}を朦朧状態から立ち直らせた。", "{} is no longer stunned."), str_upcase_first(m_name));
             }
         }
 
         if (monster.is_confused()) {
-            if (set_monster_confused(player_ptr, player_ptr->riding,
+            if (set_monster_confused(floor, player_ptr->riding,
                     (randint0(monrace.level) < player_ptr->skill_exp[PlayerSkillKindType::RIDING]) ? 0 : (monster.get_remaining_confusion() - 1))) {
                 const auto m_name = monster_desc(player_ptr, monster, 0);
-                msg_format(_("%s^を混乱状態から立ち直らせた。", "%s^ is no longer confused."), m_name.data());
+                msg_print(_("{}を混乱状態から立ち直らせた。", "{} is no longer confused."), str_upcase_first(m_name));
             }
         }
 
         if (monster.is_fearful()) {
-            if (set_monster_monfear(player_ptr, player_ptr->riding,
+            if (set_monster_monfear(floor, player_ptr->riding,
                     (randint0(monrace.level) < player_ptr->skill_exp[PlayerSkillKindType::RIDING]) ? 0 : (monster.get_remaining_fear() - 1))) {
                 const auto m_name = monster_desc(player_ptr, monster, 0);
-                msg_format(_("%s^を恐怖から立ち直らせた。", "%s^ is no longer fearful."), m_name.data());
+                msg_print(_("{}を恐怖から立ち直らせた。", "{} is no longer fearful."), str_upcase_first(m_name));
             }
         }
 
         handle_stuff(player_ptr);
     }
 
-    load = false;
     if (player_ptr->lightspeed) {
         set_lightspeed(player_ptr, player_ptr->lightspeed - 1, true);
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (PlayerClass(player_ptr).equals(PlayerClassType::FORCETRAINER) && get_current_ki(player_ptr)) {
         if (get_current_ki(player_ptr) < 40) {
             set_current_ki(player_ptr, true, 0);
         } else {
             set_current_ki(player_ptr, false, -40);
         }
-        rfu.set_flag(StatusRecalculatingFlag::BONUS);
+        dur.set_flag(StatusRecalculatingFlag::BONUS);
     }
 
     if (player_ptr->action == ACTION_LEARN) {
@@ -230,7 +245,7 @@ void process_player(PlayerType *player_ptr)
             s64b_sub(&(player_ptr->csp), &(player_ptr->csp_frac), cost, cost_frac);
         }
 
-        rfu.set_flag(MainWindowRedrawingFlag::MP);
+        dur.set_flag(MainWindowRedrawingFlag::MP);
     }
 
     if (PlayerClass(player_ptr).samurai_stance_is(SamuraiStanceType::MUSOU)) {
@@ -238,19 +253,47 @@ void process_player(PlayerType *player_ptr)
             set_action(player_ptr, ACTION_NONE);
         } else {
             player_ptr->csp -= 2;
-            rfu.set_flag(MainWindowRedrawingFlag::MP);
+            dur.set_flag(MainWindowRedrawingFlag::MP);
         }
     }
 
+    return true;
+}
+
+/*!
+ * @brief プレイヤーの行動処理 / Process the player
+ * @details セーブを読み込んだ直後に行動力が残っていれば、^S など手番の途中でセーブしている。
+ * 手番の頭の処理はセーブの前に済んでいるので、もう一度行わずに入力待ちから再開する。
+ * @note
+ * Notice the annoying code to handle "pack overflow", which\n
+ * must come first just in case somebody manages to corrupt\n
+ * the savefiles by clever use of menu commands or something.\n
+ */
+void process_player(PlayerType *player_ptr)
+{
+    // 闘技場の観戦中は、読み込むと process_dungeon() が行動力を 0 にする (手番の途中のセーブではない)
+    const auto &system = AngbandSystem::get_instance();
+    const auto resumes_turn = load && (player_ptr->energy_need <= 0) && !system.is_phase_out();
+    load = false;
+    if (resumes_turn) {
+        prepare_turn_display(player_ptr);
+    } else if (!start_player_turn(player_ptr)) {
+        return;
+    }
+
+    const auto effects = player_ptr->effects();
+    auto &dur = DeferredUpdateRequests::get_instance();
+
     /*** Handle actual user input ***/
     while (player_ptr->energy_need <= 0) {
-        rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+        dur.set_flag(SubWindowRedrawingFlag::PLAYER);
         player_ptr->sutemi = false;
         player_ptr->counter = false;
         player_ptr->now_damaged = false;
 
         update_monsters(player_ptr, false);
-        handle_stuff(player_ptr);
+        handle_stuff_with_inventory_arrangement(player_ptr);
+        window_stuff_including_deferred(player_ptr);
         move_cursor_relative(player_ptr->y, player_ptr->x);
         if (fresh_before) {
             term_fresh_force();
@@ -264,7 +307,7 @@ void process_player(PlayerType *player_ptr)
         PlayerEnergy energy(player_ptr);
         energy.reset_player_turn();
         const auto is_knocked_out = effects->stun().is_knocked_out();
-        const auto is_paralyzed = effects->paralysis().is_paralyzed();
+        const auto is_paralyzed = effects->paralysis().is_active();
         if (system.is_phase_out()) {
             move_cursor_relative(player_ptr->y, player_ptr->x);
             command_cmd = SPECIAL_KEY_BUILDING;
@@ -278,7 +321,7 @@ void process_player(PlayerType *player_ptr)
                     set_action(player_ptr, ACTION_NONE);
                 }
 
-                rfu.set_flag(MainWindowRedrawingFlag::ACTION);
+                dur.set_flag(MainWindowRedrawingFlag::ACTION);
             }
 
             energy.set_player_turn_energy(100);
@@ -290,8 +333,8 @@ void process_player(PlayerType *player_ptr)
             travel.step(player_ptr);
         } else if (command_rep) {
             command_rep--;
-            rfu.set_flag(MainWindowRedrawingFlag::ACTION);
-            handle_stuff(player_ptr);
+            dur.set_flag(MainWindowRedrawingFlag::ACTION);
+            redraw_stuff(player_ptr);
             msg_flag = false;
             prt("", 0, 0);
             mark_monsters_present(player_ptr);
@@ -303,10 +346,11 @@ void process_player(PlayerType *player_ptr)
                 SubWindowRedrawingFlag::SIGHT_MONSTERS,
                 SubWindowRedrawingFlag::PETS,
             };
-            rfu.set_flags(flags);
+            dur.set_flags(flags);
             window_stuff(player_ptr);
 
             can_save = true;
+            output_bot_json_snapshot(player_ptr);
             InputKeyRequestor(player_ptr, false).request_command();
             can_save = false;
             mark_monsters_present(player_ptr);
@@ -321,17 +365,21 @@ void process_player(PlayerType *player_ptr)
                 player_ptr->energy_need += (int16_t)((int32_t)player_ptr->energy_use * ENERGY_NEED() / 100L);
             }
 
-            if (effects->hallucination().is_hallucinated()) {
-                rfu.set_flag(MainWindowRedrawingFlag::MAP);
+            if (effects->hallucination().is_active()) {
+                dur.request_map_redrawing();
             }
 
+            // 感知の印は下で行動ごとに外すので、途切れないよう外す前に感知し直すか、印を保つ
+            check_emission(player_ptr);
+            keep_detection_song_marks(player_ptr);
+            original_tiles::advance_liquid_animation(*player_ptr);
             for (MONSTER_IDX m_idx = 1; m_idx < player_ptr->current_floor_ptr->m_max; m_idx++) {
                 auto &monster = player_ptr->current_floor_ptr->m_list[m_idx];
                 if (!monster.is_valid()) {
                     continue;
                 }
 
-                const auto &monrace = monster.get_appearance_monrace();
+                const auto &monrace = monster.get_apparent_monrace();
 
                 // モンスターのシンボル/カラーの更新
                 if (monster.ml && monrace.visual_flags.has_any_of({ MonsterVisualType::MULTI_COLOR, MonsterVisualType::SHAPECHANGER })) {
@@ -359,7 +407,7 @@ void process_player(PlayerType *player_ptr)
                         update_monster(player_ptr, m_idx, false);
                         HealthBarTracker::get_instance().set_flag_if_tracking(m_idx);
                         if (monster.is_riding()) {
-                            rfu.set_flag(MainWindowRedrawingFlag::UHEALTH);
+                            dur.set_flag(MainWindowRedrawingFlag::UHEALTH);
                         }
 
                         lite_spot(player_ptr, monster.get_position());
@@ -375,23 +423,17 @@ void process_player(PlayerType *player_ptr)
                 }
 
                 mane_data->new_mane = false;
-                rfu.set_flag(MainWindowRedrawingFlag::IMITATION);
+                dur.set_flag(MainWindowRedrawingFlag::IMITATION);
             }
 
             if (player_ptr->action == ACTION_LEARN) {
-                auto mane_data = PlayerClass(player_ptr).get_specific_data<bluemage_data_type>();
+                auto mane_data = PlayerClass(player_ptr).get_specific_data<BluemageData>();
                 mane_data->new_magic_learned = false;
-                rfu.set_flag(MainWindowRedrawingFlag::ACTION);
+                dur.set_flag(MainWindowRedrawingFlag::ACTION);
             }
 
             if (player_ptr->timewalk && (player_ptr->energy_need > -1000)) {
-                rfu.set_flag(MainWindowRedrawingFlag::MAP);
-                rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-                static constexpr auto flags_swrf = {
-                    SubWindowRedrawingFlag::OVERHEAD,
-                    SubWindowRedrawingFlag::DUNGEON,
-                };
-                rfu.set_flags(flags_swrf);
+                dur.request_monster_update_and_map_redrawing();
                 msg_print(_("「時は動きだす…」", "You feel time flowing around you once more."));
                 msg_erase();
                 player_ptr->timewalk = false;
@@ -424,7 +466,7 @@ void process_player(PlayerType *player_ptr)
  */
 void process_upkeep_with_speed(PlayerType *player_ptr)
 {
-    if (!load && player_ptr->enchant_energy_need > 0 && !player_ptr->leaving) {
+    if (player_ptr->enchant_energy_need > 0 && !player_ptr->leaving) {
         player_ptr->enchant_energy_need -= speed_to_energy(player_ptr->pspeed);
     }
 
@@ -433,27 +475,11 @@ void process_upkeep_with_speed(PlayerType *player_ptr)
     }
 
     while (player_ptr->enchant_energy_need <= 0) {
-        if (!load) {
-            check_music(player_ptr);
-        }
-
-        if (!load) {
-            check_emission(player_ptr);
-        }
-
-        if (!load) {
-            check_demigod(player_ptr);
-        }
-
+        check_music(player_ptr);
+        check_demigod(player_ptr);
         SpellHex spell_hex(player_ptr);
-        if (!load) {
-            spell_hex.decrease_mana();
-        }
-
-        if (!load) {
-            spell_hex.continue_revenge();
-        }
-
+        spell_hex.decrease_mana();
+        spell_hex.continue_revenge();
         player_ptr->enchant_energy_need += ENERGY_NEED();
     }
 }

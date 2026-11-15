@@ -26,16 +26,18 @@
 #include "player/player-status.h"
 #include "spell-kind/spells-random.h"
 #include "status/experience.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
+#include "system/monrace/monrace-records.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "timed-effect/timed-effects.h"
 #include "tracking/health-bar-tracker.h"
 #include "tracking/lore-tracker.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 #include <string>
@@ -99,7 +101,7 @@ bool MonsterDamageProcessor::mon_take_hit(std::string_view note)
     }
 
     if (AngbandWorld::get_instance().wizard) {
-        msg_format(_("合計%d/%dのダメージを与えた。", "You do %d (out of %d) damage."), monster.dealt_damage, monster.maxhp);
+        msg_print(_("合計{}/{}のダメージを与えた。", "You do {} (out of {}) damage."), monster.dealt_damage, monster.maxhp);
     }
 
     if (this->process_dead_exp_virtue(note, exp_mon)) {
@@ -118,7 +120,7 @@ bool MonsterDamageProcessor::genocide_chaos_patron()
     }
 
     this->set_redraw();
-    (void)set_monster_csleep(this->player_ptr, this->m_idx, 0);
+    (void)set_monster_csleep(*this->player_ptr->current_floor_ptr, this->m_idx, 0);
     set_superstealth(this->player_ptr, false);
 
     return this->m_idx == 0;
@@ -147,7 +149,7 @@ bool MonsterDamageProcessor::process_dead_exp_virtue(std::string_view note, cons
 
     sound(SoundKind::KILL);
     this->show_kill_message(note, m_name);
-    this->show_bounty_message(m_name);
+    this->show_bounty_message();
     monster_death(this->player_ptr, this->m_idx, true, this->attribute_flags);
     delete_monster_idx(this->player_ptr, this->m_idx);
     this->get_exp_from_mon(exp_mon, exp_mon.max_maxhp * 2);
@@ -164,19 +166,15 @@ void MonsterDamageProcessor::death_special_flag_monster()
     auto &monster = this->player_ptr->current_floor_ptr->m_list[this->m_idx];
     auto monrace_id = monster.r_idx;
     auto &monrace = monster.get_monrace();
+    auto &monrace_records = MonraceRecords::get_instance();
     if (monrace.misc_flags.has(MonsterMiscType::TANUKI)) {
         monster.ap_r_idx = monrace_id;
-        if (monrace.r_sights < MAX_SHORT) {
-            monrace.r_sights++;
-        }
+        monrace_records.increment_seen_count(monrace_id);
     }
 
     if (monster.mflag2.has(MonsterConstantFlagType::CHAMELEON)) {
-        auto &real_monrace = monster.get_real_monrace();
         monrace_id = monster.get_real_monrace_id();
-        if (real_monrace.r_sights < MAX_SHORT) {
-            real_monrace.r_sights++;
-        }
+        monrace_records.increment_seen_count(monrace_id);
     }
 
     if (monster.mflag2.has(MonsterConstantFlagType::CLONED)) {
@@ -201,7 +199,7 @@ void MonsterDamageProcessor::increase_kill_numbers()
     auto &monrace = monster.get_real_monrace();
     monrace.increment_akills();
 
-    const auto is_hallucinated = this->player_ptr->effects()->hallucination().is_hallucinated();
+    const auto is_hallucinated = this->player_ptr->effects()->hallucination().is_active();
     if (((monster.ml == 0) || is_hallucinated) && monrace.kind_flags.has_not(MonsterKindType::UNIQUE)) {
         return;
     }
@@ -230,7 +228,7 @@ void MonsterDamageProcessor::death_amberites(std::string_view m_name)
     auto curses = 1 + randint1(3);
     auto stop_ty = false;
     auto count = 0;
-    msg_format(_("%s^は恐ろしい血の呪いをあなたにかけた！", "%s^ puts a terrible blood curse on you!"), m_name.data());
+    msg_print(_("{}は恐ろしい血の呪いをあなたにかけた！", "{} puts a terrible blood curse on you!"), str_upcase_first(m_name));
     curse_equipment(this->player_ptr, 100, 50);
     do {
         stop_ty = activate_ty_curse(this->player_ptr, stop_ty, &count);
@@ -262,14 +260,16 @@ void MonsterDamageProcessor::show_kill_message(std::string_view note, std::strin
     const auto &floor = *this->player_ptr->current_floor_ptr;
     const auto &monster = floor.m_list[this->m_idx];
     if (!note.empty()) {
-        msg_format("%s^%s", m_name.data(), note.data());
+        msg_print("{}{}", str_upcase_first(m_name), note);
         return;
     }
 
     if (!monster.ml) {
-        auto mes = is_echizen(this->player_ptr) ? _("せっかくだから%sを殺した。", "Because it's time, you have killed %s.")
-                                                : _("%sを殺した。", "You have killed %s.");
-        msg_format(mes, m_name.data());
+        if (is_echizen(this->player_ptr)) {
+            msg_print(_("せっかくだから{}を殺した。", "Because it's time, you have killed {}."), m_name);
+        } else {
+            msg_print(_("{}を殺した。", "You have killed {}."), m_name);
+        }
         return;
     }
 
@@ -281,9 +281,11 @@ void MonsterDamageProcessor::show_kill_message(std::string_view note, std::strin
             return;
         }
 
-        auto mes = is_echizen(this->player_ptr) ? _("せっかくだから%sを葬り去った。", "Because it's time, you have slain %s.")
-                                                : _("%sを葬り去った。", "You have slain %s.");
-        msg_format(mes, m_name.data());
+        if (is_echizen(this->player_ptr)) {
+            msg_print(_("せっかくだから{}を葬り去った。", "Because it's time, you have slain {}."), m_name);
+        } else {
+            msg_print(_("{}を葬り去った。", "You have slain {}."), m_name);
+        }
         return;
     }
 
@@ -292,21 +294,23 @@ void MonsterDamageProcessor::show_kill_message(std::string_view note, std::strin
         return;
     }
 
-    auto mes = is_echizen(this->player_ptr) ? _("せっかくだから%sを倒した。", "Because it's time, you have destroyed %s.")
-                                            : _("%sを倒した。", "You have destroyed %s.");
-    msg_format(mes, m_name.data());
+    if (is_echizen(this->player_ptr)) {
+        msg_print(_("せっかくだから{}を倒した。", "Because it's time, you have destroyed {}."), m_name);
+    } else {
+        msg_print(_("{}を倒した。", "You have destroyed {}."), m_name);
+    }
 }
 
 void MonsterDamageProcessor::show_explosion_message(std::string_view died_mes, std::string_view m_name)
 {
     std::stringstream ss;
-    ss << _(m_name, format("%s^", m_name.data()));
+    ss << _(m_name, str_upcase_first(m_name));
     ss << died_mes;
     msg_print(ss.str());
     return;
 }
 
-void MonsterDamageProcessor::show_bounty_message(std::string_view m_name)
+void MonsterDamageProcessor::show_bounty_message()
 {
     auto &floor = *this->player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[this->m_idx];
@@ -320,7 +324,8 @@ void MonsterDamageProcessor::show_bounty_message(std::string_view m_name)
     }
 
     if (monrace.is_bounty(true)) {
-        msg_format(_("%sの首には賞金がかかっている。", "There is a price on %s's head."), m_name.data());
+        const auto m_name = monster_desc(this->player_ptr, monster, MD_TRUE_NAME | _(0, MD_POSSESSIVE));
+        msg_print(_("{}の首には賞金がかかっている。", "There is a price on {} head."), m_name);
     }
 }
 
@@ -405,7 +410,7 @@ void MonsterDamageProcessor::set_redraw()
     auto &monster = this->player_ptr->current_floor_ptr->m_list[this->m_idx];
     HealthBarTracker::get_instance().set_flag_if_tracking(this->m_idx);
     if (monster.is_riding()) {
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
     }
 }
 
@@ -414,7 +419,7 @@ void MonsterDamageProcessor::add_monster_fear()
     const auto &monster = this->player_ptr->current_floor_ptr->m_list[this->m_idx];
     if (monster.is_fearful() && (this->dam > 0)) {
         auto fear_remining = monster.get_remaining_fear() - randint1(this->dam);
-        if (set_monster_monfear(this->player_ptr, this->m_idx, fear_remining)) {
+        if (set_monster_monfear(*this->player_ptr->current_floor_ptr, this->m_idx, fear_remining)) {
             *this->fear = false;
         }
     }
@@ -432,5 +437,5 @@ void MonsterDamageProcessor::add_monster_fear()
     *this->fear = true;
     auto fear_condition = (this->dam >= monster.hp) && (percentage > 7);
     auto fear_value = randint1(10) + (fear_condition ? 20 : (11 - percentage) * 5);
-    (void)set_monster_monfear(this->player_ptr, this->m_idx, fear_value);
+    (void)set_monster_monfear(*this->player_ptr->current_floor_ptr, this->m_idx, fear_value);
 }

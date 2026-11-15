@@ -15,8 +15,10 @@
 #include "player-base/player-class.h"
 #include "player/player-realm.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "util/int-char-converter.h"
+#include <algorithm>
+#include <iterator>
 
 /*!
  * @brief オブジェクト選択時の選択アルファベットラベルを返す /
@@ -36,9 +38,9 @@ char index_to_label(int i)
  * @param o_ptr 名称を取得する元のオブジェクト構造体参照ポインタ
  * @return 対応する装備部位ID
  */
-int16_t wield_slot(PlayerType *player_ptr, const ItemEntity *o_ptr)
+short wield_slot(PlayerType *player_ptr, const ItemEntity &item)
 {
-    switch (o_ptr->bi_key.tval()) {
+    switch (item.bi_key.tval()) {
     case ItemKindType::DIGGING:
     case ItemKindType::HAFTED:
     case ItemKindType::POLEARM:
@@ -123,8 +125,60 @@ bool check_book_realm(PlayerType *player_ptr, const BaseitemKey &bi_key)
     return pr.realm1().equals(book_realm) || pr.realm2().equals(book_realm);
 }
 
-ItemEntity *ref_item(PlayerType *player_ptr, INVENTORY_IDX i_idx)
+/*!
+ * @brief 所持品IDからアイテムを返す
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param i_idx 所持品ID
+ * @return 対応するアイテムへの参照ポインタ
+ * @details 返り値をshared_ptrとして保持せず".get()"で取得した生ポインタや"*"で取得した参照を保持し続けてはいけない.
+ * アイテムがインベントリや床から削除された際にダングリングポインタになる可能性がある.
+ */
+std::shared_ptr<ItemEntity> ref_item(PlayerType *player_ptr, short i_idx)
 {
     auto &floor = *player_ptr->current_floor_ptr;
-    return i_idx >= 0 ? player_ptr->inventory[i_idx].get() : floor.o_list[0 - i_idx].get();
+    return i_idx >= 0 ? player_ptr->inventory[i_idx] : floor.o_list[0 - i_idx];
+}
+
+/*!
+ * @brief 保持しているアイテムへの参照から、現在の配列上の位置を取得する
+ * @details アイテム削除や並べ替えで変わるインデックスではなく、実体の同一性で探す。
+ * @return 配列内のインデックス。アイテムが空または既に削除された場合はnullopt。
+ */
+tl::optional<short> find_item_index(std::span<const std::shared_ptr<ItemEntity>> items, const std::shared_ptr<ItemEntity> &item)
+{
+    if (!item) {
+        return tl::nullopt;
+    }
+
+    const auto it = std::find(items.begin(), items.end(), item);
+    if (it == items.end()) {
+        return tl::nullopt;
+    }
+
+    return static_cast<short>(std::distance(items.begin(), it));
+}
+
+/*!
+ * @brief 保持しているアイテムの、現在の所持品IDを取得する
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param is_inventory 所持品から探すならtrue、床上から探すならfalse
+ * @param item 探すアイテム
+ * @return 所持品ID (床上のアイテムは負の値)。アイテムが空または既に削除された場合はnullopt。
+ * @details 効果の前に選んだ所持品IDは、効果によるアイテムの削除で変わるため、実体から探し直す。
+ * 所持品から削除されたアイテムは、消去された状態で所持品の末尾に移されるだけで配列には残るため、
+ * 消去されているかどうかも確かめる。
+ */
+tl::optional<short> find_current_i_idx(PlayerType *player_ptr, bool is_inventory, const std::shared_ptr<ItemEntity> &item)
+{
+    if (!item || !item->is_valid()) {
+        return tl::nullopt;
+    }
+
+    const auto &items = is_inventory ? player_ptr->inventory : player_ptr->current_floor_ptr->o_list;
+    const auto idx = find_item_index(items, item);
+    if (!idx) {
+        return tl::nullopt;
+    }
+
+    return is_inventory ? *idx : static_cast<short>(-*idx);
 }

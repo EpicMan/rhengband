@@ -11,10 +11,10 @@
 #include "effect/effect-processor.h"
 #include "floor/floor-util.h"
 #include "floor/pattern-walk.h"
+#include "game-option/cheat-types.h"
 #include "grid/grid.h"
 #include "io/gf-descriptions.h"
 #include "io/input-key-acceptor.h"
-#include "mind/mind-blue-mage.h"
 #include "monster-floor/monster-generator.h"
 #include "monster-floor/monster-summon.h"
 #include "monster-floor/place-monster-types.h"
@@ -22,7 +22,7 @@
 #include "mutation/mutation-processor.h"
 #include "object-activation/activation-others.h"
 #include "player-base/player-class.h"
-#include "player-info/bluemage-data-type.h"
+#include "player-info/bluemage-data.h"
 #include "player-info/smith-data-type.h"
 #include "smith/object-smith.h"
 #include "spell-kind/spells-launcher.h"
@@ -35,6 +35,7 @@
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
+#include "system/monrace/monrace-service.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
 #include "target/grid-selector.h"
@@ -45,8 +46,10 @@
 #include "util/enum-converter.h"
 #include "util/flag-group.h"
 #include "util/int-char-converter.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "wizard/wizard-messages.h"
+#include <fmt/format.h>
 #include <string_view>
 #include <vector>
 
@@ -62,18 +65,16 @@ const std::vector<debug_spell_command> debug_spell_commands_list = {
 
 std::vector<MonraceId> wiz_collect_monster_candidates(char symbol)
 {
-    const auto &monraces = MonraceList::get_instance();
-
-    if (symbol == KTRL('M')) {
-        const auto monster_name = input_string("Monster name: ", MAX_MONSTER_NAME);
-        if (!monster_name || monster_name->empty()) {
-            return {};
-        }
-
-        return monraces.search_by_name(*monster_name, false);
+    if (symbol != KTRL('M')) {
+        return MonraceService::search_by_symbol(symbol, false);
     }
 
-    return monraces.search_by_symbol(symbol, false);
+    const auto monster_name = input_string("Monster name: ", MAX_MONSTER_NAME);
+    if (!monster_name || monster_name->empty()) {
+        return {};
+    }
+
+    return MonraceService::search_by_name(*monster_name, false);
 }
 
 tl::optional<MonraceId> wiz_select_summon_monrace_id()
@@ -129,7 +130,7 @@ void wiz_summon_specific_monster_common(PlayerType *player_ptr, MonraceId monrac
         summon_named_creature(player_ptr, 0, player_ptr->y, player_ptr->x, *summon_monrace_id, mode)
             .transform(index_to_monster);
     if (!monster) {
-        msg_print_wizard(player_ptr, 1, "Monster isn't summoned correctly...");
+        msg_print_wizard(player_ptr, CHEAT_MONSTER, "Monster isn't summoned correctly...");
         return;
     }
 
@@ -179,7 +180,7 @@ void wiz_debug_spell(PlayerType *player_ptr)
             (d.command_function.spell5.spell_function)(player_ptr);
             return;
         default:
-            msg_format("Command not found.");
+            msg_print("Command not found.");
             return;
         }
     }
@@ -210,7 +211,7 @@ void wiz_summon_horde(PlayerType *player_ptr)
     auto pos = p_pos;
     auto attempts = 1000;
     while (--attempts) {
-        pos = scatter(player_ptr, p_pos, 3, PROJECT_NONE);
+        pos = scatter(floor, p_pos, 3, PROJECT_NONE);
         if (floor.is_empty_at(pos) && (pos != p_pos)) {
             break;
         }
@@ -239,7 +240,7 @@ void wiz_teleport_back(PlayerType *player_ptr)
  */
 void wiz_learn_blue_magic_all(PlayerType *player_ptr)
 {
-    auto bluemage_data = PlayerClass(player_ptr).get_specific_data<bluemage_data_type>();
+    auto bluemage_data = PlayerClass(player_ptr).get_specific_data<BluemageData>();
     if (!bluemage_data) {
         return;
     }
@@ -277,7 +278,7 @@ void wiz_generate_random_monster(PlayerType *player_ptr, int num)
     constexpr auto flags = PM_ALLOW_SLEEP | PM_ALLOW_GROUP | PM_ALLOW_UNIQUE | PM_NO_QUEST;
     for (auto i = 0; i < num; i++) {
         if (!alloc_monster(player_ptr, 0, flags, summon_specific, 5)) {
-            msg_print_wizard(player_ptr, 1, "Monster isn't generated correctly...");
+            msg_print_wizard(player_ptr, CHEAT_MONSTER, "Monster isn't generated correctly...");
             return;
         }
     }
@@ -297,7 +298,7 @@ void wiz_summon_random_monster(PlayerType *player_ptr, int num)
     const auto x = player_ptr->x;
     for (auto i = 0; i < num; i++) {
         if (!summon_specific(player_ptr, y, x, level, SUMMON_NONE, flags)) {
-            msg_print_wizard(player_ptr, 1, "Monster isn't summoned correctly...");
+            msg_print_wizard(player_ptr, CHEAT_MONSTER, "Monster isn't summoned correctly...");
             return;
         }
     }
@@ -368,7 +369,7 @@ void wiz_kill_target(PlayerType *player_ptr, int initial_dam, AttributeType effe
             const auto &gf_description = gf_descriptions[i];
             auto name = std::string_view(gf_description.name).substr(3); // 先頭の"GF_"を取り除く
             auto num = enum2i(gf_description.num);
-            put_str(format("%03d:%-.10s^", num, name.data()), 1 + i / 5, 1 + (i % 5) * 16);
+            put_str(fmt::format("{:03}:{}", num, str_upcase_first(name.substr(0, 10))), 1 + i / 5, 1 + (i % 5) * 16);
         }
 
         const auto input_effect_id = input_numerics("EffectID", 1, max - 1, idx);

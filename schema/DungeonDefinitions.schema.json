@@ -1,0 +1,585 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "DungeonDefinitions.schema.jsonc",
+  "title": "DungeonDefinitions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "dungeons"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "dungeons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dungeon"
+      }
+    }
+  },
+  "$defs": {
+    "localizedText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ja", "en"],
+      "properties": {
+        "ja": {
+          "type": "string"
+        },
+        "en": {
+          "type": "string"
+        }
+      }
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wild_y", "wild_x"],
+      "properties": {
+        "wild_y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32766
+        },
+        "wild_x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32766
+        }
+      }
+    },
+    "entrancePosition": {
+      "$comment": "Dungeons other than the wilderness (ID 0) have their entrance inside the largest wilderness (MAX_WID x MAX_HGT in src/floor/floor-base-definitions.h) excluding the edges.",
+      "type": "object",
+      "properties": {
+        "wild_y": {
+          "$comment": "maximum = MAX_HGT - 2",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "wild_x": {
+          "$comment": "maximum = MAX_WID - 2",
+          "minimum": 1,
+          "maximum": 196
+        }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minDepth", "maxDepth", "minPlayerLevel", "objGood", "objGreat", "pit", "nest"],
+      "properties": {
+        "minDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "maxDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        },
+        "minPlayerLevel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "objGood": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "objGreat": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "pit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pitKind"
+          },
+          "uniqueItems": true
+        },
+        "nest": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nestKind"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "monsters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minCount", "additionalSpawnProbability", "normalMonsterRate", "flagsMode"],
+      "properties": {
+        "minCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "additionalSpawnProbability": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "normalMonsterRate": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "flagsMode": {
+          "type": "string",
+          "enum": ["NONE", "AND", "NAND", "OR", "NOR"]
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/monsterFlag"
+          }
+        },
+        "spells": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/monsterSpell"
+          }
+        },
+        "symbols": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1
+          }
+        }
+      }
+    },
+    "floor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tiles", "tunnelRate"],
+      "properties": {
+        "tiles": {
+          "description": "床の地形と、その地形が選ばれる割合 (百分率)。rate の合計はちょうど100にする",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/floorTile"
+          }
+        },
+        "tunnelRate": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32767
+        }
+      }
+    },
+    "final_floor": {
+      "type": "object",
+      "additionalProperties": false,
+      "dependentRequired": { "artifact": ["guardian"] },
+      "minProperties": 1,
+      "properties": {
+        "guardian": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32766
+        },
+        "object": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32767
+        },
+        "artifact": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32766
+        }
+      }
+    },
+    "wall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tiles", "outer", "inner", "streams"],
+      "properties": {
+        "tiles": {
+          "description": "壁の地形と、その地形が選ばれる割合 (百分率)。rate の合計はちょうど100にする",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/wallTile"
+          }
+        },
+        "outer": {
+          "$ref": "#/$defs/wallTerrain"
+        },
+        "inner": {
+          "$ref": "#/$defs/wallTerrain"
+        },
+        "streams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/stream"
+          }
+        }
+      }
+    },
+    "floorTile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "rate"],
+      "properties": {
+        "type": {
+          "enum": [
+            "DEEP_LAVA",
+            "DEEP_WATER",
+            "DIRT",
+            "FLOOR",
+            "FLOWER",
+            "GLASS_FLOOR",
+            "GRASS",
+            "SHALLOW_LAVA",
+            "SHALLOW_WATER"
+          ]
+        },
+        "rate": {
+          "description": "この地形が床に選ばれる割合 (百分率)。各0～100で、tiles の合計はちょうど100にする (合計は読み込み時とCIの意味検証で確認する)。0の地形は抽選に登録しない",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "wallTile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "rate"],
+      "properties": {
+        "type": {
+          "enum": [
+            "DARK_PIT",
+            "DEEP_LAVA",
+            "DEEP_WATER",
+            "GLASS_WALL",
+            "GRANITE",
+            "MAGMA_TREASURE",
+            "MOUNTAIN_WALL",
+            "PERMANENT",
+            "QUARTZ_TREASURE",
+            "SHALLOW_WATER",
+            "TREE"
+          ]
+        },
+        "rate": {
+          "description": "この地形が壁に選ばれる割合 (百分率)。各0～100で、tiles の合計はちょうど100にする (合計は読み込み時とCIの意味検証で確認する)。0の地形は抽選に登録しない",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "wallTerrain": {
+      "type": "string",
+      "enum": [
+        "BRAKE",
+        "DARK_PIT",
+        "DEEP_LAVA",
+        "DEEP_WATER",
+        "GLASS_WALL",
+        "GRANITE",
+        "MAGMA_VEIN",
+        "MOUNTAIN_WALL",
+        "NONE",
+        "PERMANENT",
+        "QUARTZ_VEIN",
+        "SHALLOW_WATER",
+        "TREE"
+      ]
+    },
+    "hex16String": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{4}$"
+    },
+    "dungeonFlag": {
+      "type": "string",
+      "enum": [
+        "ACID_RIVER",
+        "ARCADE",
+        "ARENA",
+        "BEGINNER",
+        "CAVE",
+        "CAVERN",
+        "CHAMELEON",
+        "CURTAIN",
+        "DARKNESS",
+        "DESTROY",
+        "FORGET",
+        "GLASS_DOOR",
+        "GLASS_ROOM",
+        "LAKE_ACID",
+        "LAKE_LAVA",
+        "LAKE_POISONOUS",
+        "LAKE_RUBBLE",
+        "LAKE_TREE",
+        "LAKE_WATER",
+        "LARGE",
+        "LARGEST",
+        "LAVA_RIVER",
+        "MAZE",
+        "NO_CAVE",
+        "NO_DOORS",
+        "NO_MAGIC",
+        "NO_MELEE",
+        "NO_VAULT",
+        "POISONOUS_RIVER",
+        "SMALL",
+        "SMALLEST",
+        "WATER_RIVER",
+        "WINNER"
+      ]
+    },
+    "monsterFlag": {
+      "description": "共通のモンスターフラグに加え、性別 (r_info_sex の MALE/FEMALE) も条件にできる",
+      "anyOf": [
+        { "$ref": "common/MonsterFlag.schema.json#/$defs/monsterFlag" },
+        { "type": "string", "enum": ["MALE", "FEMALE"] }
+      ]
+    },
+    "monsterSpell": {
+      "type": "string",
+      "enum": [
+        "ANIM_DEAD",
+        "BA_ABYSS",
+        "BA_ACID",
+        "BA_CHAO",
+        "BA_COLD",
+        "BA_DARK",
+        "BA_ELEC",
+        "BA_FIRE",
+        "BA_LITE",
+        "BA_MANA",
+        "BA_METEOR",
+        "BA_NETH",
+        "BA_NUKE",
+        "BA_POIS",
+        "BA_VOID",
+        "BA_WATE",
+        "BLIND",
+        "BLINK",
+        "BO_ABYSS",
+        "BO_ACID",
+        "BO_COLD",
+        "BO_ELEC",
+        "BO_FIRE",
+        "BO_ICEE",
+        "BO_LITE",
+        "BO_MANA",
+        "BO_METEOR",
+        "BO_NETH",
+        "BO_PLAS",
+        "BO_VOID",
+        "BO_WATE",
+        "BRAIN_SMASH",
+        "BR_ABYSS",
+        "BR_ACID",
+        "BR_CHAO",
+        "BR_COLD",
+        "BR_CONF",
+        "BR_DARK",
+        "BR_DISE",
+        "BR_DISI",
+        "BR_ELEC",
+        "BR_FIRE",
+        "BR_FORC",
+        "BR_GRAV",
+        "BR_INER",
+        "BR_LITE",
+        "BR_MANA",
+        "BR_NETH",
+        "BR_NEXU",
+        "BR_NUKE",
+        "BR_PLAS",
+        "BR_POIS",
+        "BR_SHAR",
+        "BR_SOUN",
+        "BR_TIME",
+        "BR_VOID",
+        "CAUSE_1",
+        "CAUSE_2",
+        "CAUSE_3",
+        "CAUSE_4",
+        "CONF",
+        "DARKNESS",
+        "DISPEL",
+        "DRAIN_MANA",
+        "FORGET",
+        "HAND_DOOM",
+        "HASTE",
+        "HEAL",
+        "HOLD",
+        "INVULNER",
+        "MIND_BLAST",
+        "MISSILE",
+        "PSY_SPEAR",
+        "ROCKET",
+        "SCARE",
+        "SHOOT",
+        "SHRIEK",
+        "SLOW",
+        "SPECIAL",
+        "S_AMBERITES",
+        "S_ANGEL",
+        "S_ANT",
+        "S_CYBER",
+        "S_DEAD_UNIQUE",
+        "S_DEMON",
+        "S_DRAGON",
+        "S_HI_DRAGON",
+        "S_HI_UNDEAD",
+        "S_HOUND",
+        "S_HYDRA",
+        "S_KIN",
+        "S_MONSTER",
+        "S_MONSTERS",
+        "S_SPIDER",
+        "S_UNDEAD",
+        "S_UNIQUE",
+        "TELE_AWAY",
+        "TELE_LEVEL",
+        "TELE_TO",
+        "TPORT",
+        "TRAPS",
+        "WORLD",
+        "XXX1",
+        "XXX2",
+        "XXX3",
+        "XXX4"
+      ]
+    },
+    "dungeon": {
+      "type": "object",
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "id": {
+            "not": {
+              "const": 0
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "position": {
+            "$ref": "#/$defs/entrancePosition"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "position",
+        "generation",
+        "monsters",
+        "floor",
+        "wall",
+        "flags"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "name": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "description": {
+          "$ref": "#/$defs/localizedText"
+        },
+        "position": {
+          "$ref": "#/$defs/position"
+        },
+        "generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "monsters": {
+          "$ref": "#/$defs/monsters"
+        },
+        "floor": {
+          "$ref": "#/$defs/floor"
+        },
+        "final_floor": {
+          "$ref": "#/$defs/final_floor"
+        },
+        "wall": {
+          "$ref": "#/$defs/wall"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dungeonFlag"
+          }
+        }
+      }
+    },
+    "pitKind": {
+      "type": "string",
+      "enum": [
+        "CHAPEL",
+        "DARK_ELF",
+        "DEMON",
+        "DRAGON",
+        "GIANT",
+        "HORROR",
+        "ORC",
+        "SYMBOL_EVIL",
+        "SYMBOL_GOOD",
+        "TROLL"
+      ]
+    },
+    "nestKind": {
+      "type": "string",
+      "enum": [
+        "CLONE",
+        "JELLY",
+        "SYMBOL_GOOD",
+        "SYMBOL_EVIL",
+        "MIMIC",
+        "HORROR",
+        "KENNEL",
+        "ANIMAL",
+        "CHAPEL",
+        "UNDEAD"
+      ]
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "count", "chance", "priority"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/wallTerrain"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 255
+        },
+        "chance": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        }
+      }
+    }
+  }
+}

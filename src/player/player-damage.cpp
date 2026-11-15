@@ -20,7 +20,7 @@
 #include "inventory/inventory-damage.h"
 #include "inventory/inventory-slot-types.h"
 #include "io/files-util.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "io/report.h"
 #include "io/write-diary.h"
 #include "main/music-definitions-table.h"
@@ -52,13 +52,15 @@
 #include "status/base-status.h"
 #include "status/element-resistance.h"
 #include "system/building-type-definition.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
+#include "system/dungeon/quest-definition.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/inner-game-data.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
 #include "timed-effect/timed-effects.h"
@@ -103,24 +105,20 @@ static bool acid_minus_ac(PlayerType *player_ptr)
     const auto item_name = describe_flavor(player_ptr, item, OD_OMIT_PREFIX | OD_NAME_ONLY);
     const auto item_flags = item.get_flags();
     if (item.ac + item.to_a <= 0) {
-        msg_format(_("%sは既にボロボロだ！", "Your %s is already fully corroded!"), item_name.data());
+        msg_print(_("{}は既にボロボロだ！", "Your {} is already fully corroded!"), item_name);
         return false;
     }
 
     if (item_flags.has(TR_IGNORE_ACID)) {
-        msg_format(_("しかし%sには効果がなかった！", "Your %s is unaffected!"), item_name.data());
+        msg_print(_("しかし{}には効果がなかった！", "Your {} is unaffected!"), item_name);
         return true;
     }
 
-    msg_format(_("%sが酸で腐食した！", "Your %s is corroded!"), item_name.data());
+    msg_print(_("{}が酸で腐食した！", "Your {} is corroded!"), item_name);
     item.to_a--;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(StatusRecalculatingFlag::BONUS);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::PLAYER,
-    };
-    rfu.set_flags(flags_swrf);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(StatusRecalculatingFlag::BONUS);
+    dur.set_flag(SubWindowRedrawingFlag::PLAYER);
     calc_android_exp(player_ptr);
     return true;
 }
@@ -276,7 +274,7 @@ int cold_dam(PlayerType *player_ptr, int dam, std::string_view kb_str, bool aura
  */
 static void death_save(PlayerType *player_ptr)
 {
-    if (!cheat_save && !save_player(player_ptr, SaveType::CLOSE_GAME)) {
+    if (!cheat_save && !save_player(player_ptr)) {
         msg_print(_("セーブ失敗！", "death save failed!"));
     }
 }
@@ -362,9 +360,8 @@ int take_hit(PlayerType *player_ptr, int damage_type, int damage, std::string_vi
         player_ptr->chp = 0;
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::HP);
-    rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(MainWindowRedrawingFlag::HP);
     if (damage_type != DAMAGE_GENO && player_ptr->chp == 0) {
         chg_virtue(player_ptr, Virtue::SACRIFICE, 1);
         chg_virtue(player_ptr, Virtue::CHANCE, 2);
@@ -411,9 +408,9 @@ int take_hit(PlayerType *player_ptr, int damage_type, int damage, std::string_vi
             }
         } else {
             const auto effects = player_ptr->effects();
-            const auto is_hallucinated = effects->hallucination().is_hallucinated();
+            const auto is_hallucinated = effects->hallucination().is_active();
             auto paralysis_state = "";
-            if (effects->paralysis().is_paralyzed()) {
+            if (effects->paralysis().is_active()) {
                 paralysis_state = player_ptr->free_act ? _("彫像状態で", " while being the statue") : _("麻痺状態で", " while paralyzed");
             }
 
@@ -434,7 +431,7 @@ int take_hit(PlayerType *player_ptr, int damage_type, int damage, std::string_vi
 
         world.total_winner = false;
         if (is_seppuku_by_won) {
-            world.add_retired_class(player_ptr->pclass);
+            InnerGameData::get_instance().add_retired_class(player_ptr->pclass);
             exe_write_diary(floor, DiaryKind::DESCRIPTION, 0, _("勝利の後切腹した。", "committed seppuku after the winning."));
         } else {
             std::string place;
@@ -516,8 +513,11 @@ int take_hit(PlayerType *player_ptr, int damage_type, int damage, std::string_vi
         term_clear();
 
         /* 桜散る */
+        auto &rng = get_external_rng();
         for (auto i = 0; i < 40; i++) {
-            term_putstr(randint0(w / 2) * 2, randint0(h), 2, TERM_VIOLET, "υ");
+            const auto x = randint0(rng, w / 2) * 2;
+            const auto y = randint0(rng, h);
+            term_putstr(x, y, 2, TERM_VIOLET, "υ");
         }
 
         auto str = death_message.data();
@@ -554,7 +554,8 @@ int take_hit(PlayerType *player_ptr, int damage_type, int damage, std::string_vi
 #ifdef WORLD_SCORE
         screen_dump = make_screen_dump(player_ptr);
 #endif
-        (void)inkey();
+        // 辞世の句などを画面に表示しただけで、プロンプトは表示していない
+        (void)input_key_with_context(InputKind::ANY_KEY, "");
         return damage;
 #else
         msg_print(death_message);
@@ -570,7 +571,7 @@ int take_hit(PlayerType *player_ptr, int damage_type, int damage, std::string_vi
 
         sound(SoundKind::WARN);
         if (record_danger && (old_chp > hp_warning_threshold)) {
-            if (player_ptr->effects()->hallucination().is_hallucinated() && damage_type == DAMAGE_ATTACK) {
+            if (player_ptr->effects()->hallucination().is_active() && damage_type == DAMAGE_ATTACK) {
                 hit_from = _("何か", "something");
             }
 

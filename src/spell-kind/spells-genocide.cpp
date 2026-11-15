@@ -20,13 +20,15 @@
 #include "monster/monster-status.h"
 #include "player/player-damage.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/bit-flags-calculator.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
+#include <fmt/format.h>
 
 /*!
  * @brief モンスターへの単体抹殺処理サブルーチン / Delete a non-unique/non-quest monster
@@ -37,7 +39,7 @@
  * @param spell_name 抹殺効果を起こした魔法の名前
  * @return 効力があった場合TRUEを返す
  */
-bool genocide_aux(PlayerType *player_ptr, MONSTER_IDX m_idx, int power, bool player_cast, int dam_side, concptr spell_name)
+bool genocide_aux(PlayerType *player_ptr, MONSTER_IDX m_idx, int power, bool player_cast, int dam_side, std::string_view spell_name)
 {
     auto &floor = *player_ptr->current_floor_ptr;
     auto &monster = floor.m_list[m_idx];
@@ -73,19 +75,19 @@ bool genocide_aux(PlayerType *player_ptr, MONSTER_IDX m_idx, int power, bool pla
         const auto see_m = is_seen(player_ptr, monster);
         const auto m_name = monster_desc(player_ptr, monster, 0);
         if (see_m) {
-            msg_format(_("%s^には効果がなかった。", "%s^ is unaffected."), m_name.data());
+            msg_print(_("{}には効果がなかった。", "{} is unaffected."), str_upcase_first(m_name));
         }
 
         if (monster.is_asleep()) {
-            (void)set_monster_csleep(player_ptr, m_idx, 0);
+            (void)set_monster_csleep(*player_ptr->current_floor_ptr, m_idx, 0);
             if (monster.ml) {
-                msg_format(_("%s^が目を覚ました。", "%s^ wakes up."), m_name.data());
+                msg_print(_("{}が目を覚ました。", "{} wakes up."), str_upcase_first(m_name));
             }
         }
 
         if (monster.is_friendly() && !monster.is_pet()) {
             if (see_m) {
-                msg_format(_("%sは怒った！", "%s^ gets angry!"), m_name.data());
+                msg_print(_("{}は怒った！", "{} gets angry!"), str_upcase_first(m_name));
             }
 
             monster.set_hostile();
@@ -97,13 +99,12 @@ bool genocide_aux(PlayerType *player_ptr, MONSTER_IDX m_idx, int power, bool pla
     }
 
     if (player_cast) {
-        take_hit(player_ptr, DAMAGE_GENO, randint1(dam_side), format(_("%s^の呪文を唱えた疲労", "the strain of casting %s^"), spell_name));
+        take_hit(player_ptr, DAMAGE_GENO, randint1(dam_side), fmt::format(_("{}の呪文を唱えた疲労", "the strain of casting {}"), str_upcase_first(spell_name)));
     }
 
     move_cursor_relative(player_ptr->y, player_ptr->x);
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(MainWindowRedrawingFlag::HP);
-    rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(MainWindowRedrawingFlag::HP);
     handle_stuff(player_ptr);
     term_fresh();
     term_xtra(TERM_XTRA_DELAY, delay_factor);

@@ -5,9 +5,9 @@ bool smart_cheat; /* Monsters exploit players weaknesses (*) */
 bool vanilla_town; /* Use 'vanilla' town without quests and wilderness */
 bool lite_town; /* Use 'lite' town without a wilderness */
 bool ironman_shops; /* Stores are permanently closed (*) */
-bool ironman_small_levels; /* Always create unusually small dungeon levels (*) */
+bool ironman_smallest_floor; /* Always generate the smallest dungeon floors (*) */
 bool ironman_downward; /* Disable recall and use of up stairs (*) */
-bool ironman_empty_levels; /* Always create empty 'on_defeat_arena_monster' levels (*) */
+bool ironman_force_arena_floor; /* Always create empty 'on_defeat_arena_monster' levels (*) */
 bool ironman_rooms; /* Always generate very unusual rooms (*) */
 bool ironman_nightmare; /* Nightmare mode(it isn't even remotely fair!)(*) */
 bool left_hander; /* Left-Hander */
@@ -15,7 +15,6 @@ bool preserve_mode; /* Preserve artifacts (*) */
 bool autoroller; /* Allow use of autoroller for stats (*) */
 bool autochara; /* Autoroll for weight, height and social status */
 bool powerup_home; /* Increase capacity of your home (*) */
-bool permanent_descent; /* Cannot go to a shallower level (*) */
 bool keep_savefile; //!< 同一のセーブファイルでゲームを開始する / Start game with same savefile thet is loaded
 /* New Options */
 bool easy_id; /* Items identified on walkover (*) */

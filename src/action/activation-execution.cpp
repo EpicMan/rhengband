@@ -34,62 +34,31 @@
 #include "spell-realm/spells-song.h"
 #include "sv-definition/sv-lite-types.h"
 #include "sv-definition/sv-ring-types.h"
-#include "system/artifact-type-definition.h"
 #include "system/baseitem/baseitem-key.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/target-getter.h"
 #include "term/screen-processor.h"
 #include "timed-effect/timed-effects.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 
-static void decide_activation_level(ae_type *ae_ptr)
-{
-    if (ae_ptr->o_ptr->is_fixed_artifact()) {
-        ae_ptr->lev = ae_ptr->o_ptr->get_fixed_artifact().level;
-        return;
-    }
-
-    if (ae_ptr->o_ptr->is_random_artifact()) {
-        const auto it_activation = ae_ptr->o_ptr->find_activation_info();
-        if (it_activation != activation_info.end()) {
-            ae_ptr->lev = it_activation->level;
-        }
-
-        return;
-    }
-
-    const auto tval = ae_ptr->o_ptr->bi_key.tval();
-    if (((tval == ItemKindType::RING) || (tval == ItemKindType::AMULET)) && ae_ptr->o_ptr->is_ego()) {
-        ae_ptr->lev = ae_ptr->o_ptr->get_ego().level;
-    }
-}
-
+/*!
+ * @brief 混乱による技能補正を適用し、発動の成功・失敗重みを設定する
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param ae_ptr 発動情報への参照ポインタ
+ */
 static void decide_chance_fail(PlayerType *player_ptr, ae_type *ae_ptr)
 {
-    ae_ptr->chance = player_ptr->skill_dev;
-    if (player_ptr->effects()->confusion().is_confused()) {
-        ae_ptr->chance = ae_ptr->chance / 2;
+    auto skill = player_ptr->skill_dev;
+    if (player_ptr->effects()->confusion().is_active()) {
+        skill /= 2;
     }
 
-    ae_ptr->fail = ae_ptr->lev + 5;
-    if (ae_ptr->chance > ae_ptr->fail) {
-        ae_ptr->fail -= (ae_ptr->chance - ae_ptr->fail) * 2;
-    } else {
-        ae_ptr->chance -= (ae_ptr->fail - ae_ptr->chance) * 2;
-    }
-
-    if (ae_ptr->fail < USE_DEVICE) {
-        ae_ptr->fail = USE_DEVICE;
-    }
-
-    if (ae_ptr->chance < USE_DEVICE) {
-        ae_ptr->chance = USE_DEVICE;
-    }
+    ae_ptr->decide_chance_fail(skill);
 }
 
 static void decide_activation_success(PlayerType *player_ptr, ae_type *ae_ptr)
@@ -128,12 +97,12 @@ static bool check_activation_conditions(PlayerType *player_ptr, ae_type *ae_ptr)
         return false;
     }
 
-    if (ae_ptr->o_ptr->timeout) {
+    if (ae_ptr->item->timeout) {
         msg_print(_("それは微かに音を立て、輝き、消えた...", "It whines, glows and fades..."));
         return false;
     }
 
-    if (ae_ptr->o_ptr->is_fuel() && (ae_ptr->o_ptr->fuel == 0)) {
+    if (ae_ptr->item->is_fuel() && (ae_ptr->item->fuel == 0)) {
         msg_print(_("燃料がない。", "It has no fuel."));
         PlayerEnergy(player_ptr).reset_player_turn();
         return false;
@@ -145,46 +114,50 @@ static bool check_activation_conditions(PlayerType *player_ptr, ae_type *ae_ptr)
 /*!
  * @brief アイテムの発動効果を処理する。
  * @param player_ptr プレイヤーへの参照ポインタ
- * @param o_ptr 対象のオブジェクト構造体ポインタ
- * @return 発動実行の是非を返す。
+ * @param item 対象アイテムへの参照
  */
-static bool activate_artifact(PlayerType *player_ptr, ItemEntity *o_ptr)
+static void activate_artifact(PlayerType *player_ptr, std::shared_ptr<ItemEntity> &item)
 {
-    const auto it_activation = o_ptr->find_activation_info();
+    const auto it_activation = item->find_activation_info();
     if (it_activation == activation_info.end()) {
         msg_print("Activation information is not found.");
-        return false;
+        return;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, OD_NAME_ONLY | OD_OMIT_PREFIX | OD_BASE_NAME);
-    if (!switch_activation(player_ptr, &o_ptr, it_activation->index, item_name)) {
-        return false;
+    const auto item_name = describe_flavor(player_ptr, *item, OD_NAME_ONLY | OD_OMIT_PREFIX | OD_BASE_NAME);
+    const auto &[has_activated, item_activated] = switch_activation(player_ptr, *item, it_activation->index, item_name);
+    if (!has_activated) {
+        return;
+    }
+
+    if (item_activated) {
+        item = item_activated;
     }
 
     if (it_activation->constant) {
-        o_ptr->timeout = static_cast<short>(*it_activation->constant);
+        item->timeout = static_cast<short>(*it_activation->constant);
         if (it_activation->dice > 0) {
-            o_ptr->timeout += static_cast<short>(randint1(it_activation->dice));
+            item->timeout += static_cast<short>(randint1(it_activation->dice));
         }
 
-        return true;
+        return;
     }
 
     switch (it_activation->index) {
     case RandomArtActType::BR_FIRE:
-        o_ptr->timeout = o_ptr->bi_key == BaseitemKey(ItemKindType::RING, SV_RING_FLAMES) ? 200 : 250;
-        return true;
+        item->timeout = item->bi_key == BaseitemKey(ItemKindType::RING, SV_RING_FLAMES) ? 200 : 250;
+        return;
     case RandomArtActType::BR_COLD:
-        o_ptr->timeout = o_ptr->bi_key == BaseitemKey(ItemKindType::RING, SV_RING_ICE) ? 200 : 250;
-        return true;
+        item->timeout = item->bi_key == BaseitemKey(ItemKindType::RING, SV_RING_ICE) ? 200 : 250;
+        return;
     case RandomArtActType::TERROR:
-        o_ptr->timeout = 3 * (player_ptr->lev + 10);
-        return true;
+        item->timeout = 3 * (player_ptr->lev + 10);
+        return;
     case RandomArtActType::MURAMASA:
-        return true;
+        return;
     default:
-        msg_format("Special timeout is not implemented: %d.", enum2i(it_activation->index));
-        return false;
+        msg_print("Special timeout is not implemented: {}.", enum2i(it_activation->index));
+        return;
     }
 }
 
@@ -196,28 +169,23 @@ static bool activate_artifact(PlayerType *player_ptr, ItemEntity *o_ptr)
 void exe_activate(PlayerType *player_ptr, INVENTORY_IDX i_idx)
 {
     PlayerEnergy(player_ptr).set_player_turn_energy(100);
-    ae_type tmp_ae;
-    ae_type *ae_ptr = initialize_ae_type(player_ptr, &tmp_ae, i_idx);
-    decide_activation_level(ae_ptr);
-    decide_chance_fail(player_ptr, ae_ptr);
+    ae_type ae(player_ptr, i_idx);
+    ae.decide_activation_level();
+    decide_chance_fail(player_ptr, &ae);
     if (cmd_limit_time_walk(player_ptr)) {
         return;
     }
 
-    decide_activation_success(player_ptr, ae_ptr);
-    if (!check_activation_conditions(player_ptr, ae_ptr)) {
+    decide_activation_success(player_ptr, &ae);
+    if (!check_activation_conditions(player_ptr, &ae)) {
         return;
     }
 
     msg_print(_("始動させた...", "You activate it..."));
     sound(SoundKind::ZAP);
-    if (ae_ptr->o_ptr->has_activation()) {
-        (void)activate_artifact(player_ptr, ae_ptr->o_ptr);
-        static constexpr auto flags = {
-            SubWindowRedrawingFlag::INVENTORY,
-            SubWindowRedrawingFlag::EQUIPMENT,
-        };
-        RedrawingFlagsUpdater::get_instance().set_flags(flags);
+    if (ae.item->has_activation()) {
+        activate_artifact(player_ptr, ae.item);
+        DeferredUpdateRequests::get_instance().request_carried_item_lists_redrawing();
         return;
     }
 

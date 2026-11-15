@@ -222,6 +222,7 @@
           "chance": 1,
           "message": {
             "ja": [""],
+            "en": [],
           },
         },
         {
@@ -313,6 +314,7 @@
           "chance": 1,
           "message": {
             "ja": ["「にくむ、にくむ、にくむぅぅぅ！」"],
+            "en": [],
           },
         },
         {
@@ -477,9 +479,9 @@
               "says, 'Saruman is a fool, and a dirty treacherous fool.'",
               "says, 'I left a fool.'",
               "yells, 'Nazgul, Nazgul!'",
-              "says, 'Fine leadership!　I hope the great Ugluk will lead us out again.'",
+              "says, 'Fine leadership! I hope the great Ugluk will lead us out again.'",
               "hisses, 'My dear tender little fools.'",
-              "says, 'Well, my little ones!　Enjoying your nice rest?'",
+              "says, 'Well, my little ones! Enjoying your nice rest?'",
               "snarls, 'Have you got it -- either of you?'",
             ],
           },
@@ -695,7 +697,7 @@
           "chance": 8,
           "message": {
             "ja": [
-              "「カラス共の言うことを聞いたか？ やつらは”復讐せよ”と鳴いているんだ！」",
+              "「カラス共の言うことを聞いたか？ やつらは“復讐せよ”と鳴いているんだ！」",
               "「ハイホ！ハイホ！決闘だ！決闘だ！」",
               "「私は幸せな奴等が嫌いだ。嬉しかったことなどない。」",
               "「あの指輪に近づくな！」",
@@ -2748,6 +2750,7 @@
               "「全ての拳士はこの拳王の前にひれ伏すのだ。」",
               "「おまえなどこの親指一本で十分！」 ",
             ],
+            "en": [],
           },
         },
         {
@@ -3438,10 +3441,10 @@
             ],
             "en": [
               "trampled the wreckage of the Internet Exploder.",
-              "ridiculed when he saw the Internet Exploder.",
+              "scoffed at the Internet Exploder.",
               "is sending sensitive data without your permission.",
               "sent an ad to your email address.",
-              "was attempted to crack by someone, but the protection was not breached.",
+              "was relieved when a cracker could not breach its sandbox.",
               "grasped your propensity.",
             ],
           },
@@ -4104,11 +4107,29 @@
       ],
     },
     {
+      "id_list": [1419 /*M.O.C.C.O.S, the Evil Goddess*/],
+      "message": [
+        {
+          "action": "SPEAK_ALL",
+          "chance": 8,
+          "message": {
+            "ja": ["「崇めよ、我を」", "「限定版買えよ」", "「お前も限定版を買うんだよ！」"],
+            "en": [
+              "says, 'Worship me.'",
+              "says, 'Buy the limited edition.'",
+              "shouts, 'You're buying the limited edition too!'",
+            ],
+          },
+        },
+      ],
+    },
+    {
       "name": "DEFAULT",
       "message": [
         {
           "action": "MESSAGE_REFLECT",
           "chance": 1,
+          "use_name": false,
           "message": {
             "ja": ["攻撃は跳ね返った！"],
             "en": ["The attack bounces!"],
@@ -4125,6 +4146,7 @@
         {
           "action": "MESSAGE_TIMESTART",
           "chance": 1,
+          "use_name": false,
           "message": {
             "ja": ["「時は動きだす…」"],
             "en": ["You feel time flowing around you once more."],

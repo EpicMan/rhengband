@@ -1,4 +1,5 @@
 #include "cmd-io/cmd-floor.h"
+#include "bot/bot-json-output.h"
 #include "core/asking-player.h"
 #include "core/stuff-handler.h"
 #include "core/window-redrawer.h"
@@ -7,16 +8,16 @@
 #include "io/cursor.h"
 #include "io/screen-util.h"
 #include "main/sound-of-music.h"
+#include "system/deferred-update-requests.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/target-checker.h"
 #include "target/target-setter.h"
 #include "target/target-types.h"
-#include "term/z-form.h"
 #include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
 #include "window/main-window-util.h"
 #include "world/world.h"
+#include <fmt/format.h>
 
 /*!
  * @brief ターゲットを設定するコマンドのメインルーチン
@@ -45,9 +46,15 @@ void do_cmd_look(PlayerType *player_ptr)
         SubWindowRedrawingFlag::SIGHT_MONSTERS,
         SubWindowRedrawingFlag::FLOOR_ITEMS,
     };
-    RedrawingFlagsUpdater::get_instance().set_flags(flags);
-    handle_stuff(player_ptr);
-    if (target_set(player_ptr, TARGET_LOOK).is_okay()) {
+    DeferredUpdateRequests::get_instance().set_flags(flags);
+    window_stuff(player_ptr);
+    // 注視を終えた後のメッセージの待ちでは注視の情報を載せないよう、注視の間だけ登録する
+    const auto is_targeted = [player_ptr] {
+        const BotScreenScope bot_screen(make_bot_look_screen());
+        output_bot_json_screen_snapshot(player_ptr);
+        return target_set(player_ptr, TARGET_LOOK).is_okay();
+    }();
+    if (is_targeted) {
         msg_print(_("ターゲット決定。", "Target Selected."));
     }
 }
@@ -67,10 +74,10 @@ void do_cmd_locate(PlayerType *player_ptr)
     const auto &[wid, hgt] = get_screen_size();
     POSITION y2 = y1 = panel_row_min;
     POSITION x2 = x1 = panel_col_min;
-    constexpr auto fmt = _("マップ位置 [%d(%02d),%d(%02d)] (プレイヤーの%s)  方向?", "Map sector [%d(%02d),%d(%02d)], which is%s your sector.  Direction?");
+    constexpr auto fmt = _("マップ位置 [{}({:02}),{}({:02})] (プレイヤーの{})  方向?", "Map sector [{}({:02}),{}({:02})], which is{} your sector.  Direction?");
     while (true) {
         const auto &dirstring = dirstrings[(y2 < y1) ? 0 : ((y2 > y1) ? 2 : 1)][(x2 < x1) ? 0 : ((x2 > x1) ? 2 : 1)];
-        const auto prompt = format(fmt, y2 / (hgt / 2), y2 % (hgt / 2), x2 / (wid / 2), x2 % (wid / 2), dirstring.data());
+        const auto prompt = fmt::format(fmt, y2 / (hgt / 2), y2 % (hgt / 2), x2 / (wid / 2), x2 % (wid / 2), dirstring);
         auto dir = Direction::none();
         while (!dir) {
             const auto command = input_command(prompt);
@@ -96,13 +103,6 @@ void do_cmd_locate(PlayerType *player_ptr)
     }
 
     verify_panel(player_ptr);
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-    rfu.set_flag(MainWindowRedrawingFlag::MAP);
-    static constexpr auto flags = {
-        SubWindowRedrawingFlag::OVERHEAD,
-        SubWindowRedrawingFlag::DUNGEON,
-    };
-    rfu.set_flags(flags);
+    DeferredUpdateRequests::get_instance().request_monster_update_and_map_redrawing();
     handle_stuff(player_ptr);
 }

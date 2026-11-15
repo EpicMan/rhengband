@@ -2,7 +2,8 @@
 #include "birth/birth-stat.h"
 #include "birth/birth-util.h"
 #include "birth/game-play-initializer.h"
-#include "io/input-key-acceptor.h"
+#include "core/asking-player.h"
+#include "io/input-context.h"
 #include "mind/mind-elementalist.h"
 #include "player-base/player-class.h"
 #include "player-info/class-info.h"
@@ -13,8 +14,8 @@
 #include "player/player-status.h"
 #include "player/process-name.h"
 #include "player/race-info-table.h"
+#include "system/deferred-update-requests.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/screen-processor.h"
 #include "util/enum-converter.h"
 
@@ -38,9 +39,9 @@ bool ask_quick_start(PlayerType *player_ptr)
                 "Do you want to use the quick start function (same character as your last one)."),
         11, 2);
     while (true) {
-        char c;
-        put_str(_("クイック・スタートを使いますか？[y/N]", "Use quick start? [y/N]"), 14, 10);
-        c = inkey();
+        constexpr auto prompt = _("クイック・スタートを使いますか？[y/N]", "Use quick start? [y/N]");
+        put_str(prompt, 14, 10);
+        const auto c = input_key_with_context(InputKind::CONFIRM, prompt);
         if (c == 'Q') {
             quit("");
         } else if (c == 'S') {
@@ -66,11 +67,7 @@ bool ask_quick_start(PlayerType *player_ptr)
     ap_ptr = &personality_info[player_ptr->ppersonality];
 
     get_extra(player_ptr, false);
-    static constexpr auto flags = {
-        StatusRecalculatingFlag::BONUS,
-        StatusRecalculatingFlag::HP,
-    };
-    RedrawingFlagsUpdater::get_instance().set_flags(flags);
+    DeferredUpdateRequests::get_instance().request_bonus_and_max_hp_recalculation();
     update_creature(player_ptr);
     player_ptr->chp = player_ptr->mhp;
     player_ptr->csp = player_ptr->msp;

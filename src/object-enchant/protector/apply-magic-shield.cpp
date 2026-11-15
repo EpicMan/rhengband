@@ -11,7 +11,7 @@
 #include "object-enchant/object-boost.h"
 #include "object-enchant/object-ego.h"
 #include "sv-definition/sv-protector-types.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 
 /*
  * @brief コンストラクタ
@@ -39,6 +39,17 @@ void ShieldEnchanter::apply_magic()
     }
 
     if (this->power <= 1) {
+        return;
+    }
+
+    if (this->has_ego_request()) {
+        if (const auto &ego = this->get_specific_ego_request()) {
+            this->o_ptr->ego_idx = *ego;
+        } else {
+            while (!this->o_ptr->is_ego()) {
+                this->give_ego_index();
+            }
+        }
         return;
     }
 

@@ -22,15 +22,17 @@
 #include "object/item-use-flags.h"
 #include "object/object-info.h"
 #include "object/object-mark-types.h"
+#include "perception/simple-perception.h"
 #include "player/player-move.h"
 #include "spell-kind/spells-perception.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/target-checker.h"
-#include "term/z-form.h"
+#include "timed-effect/timed-effect.h"
+#include "timed-effect/timed-effects.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
@@ -40,9 +42,6 @@
 #endif
 #include <fmt/format.h>
 #include <range/v3/all.hpp>
-#include <perception/simple-perception.h>
-#include <avatar/avatar.h>
-#include <object-enchant/special-object-flags.h>
 
 /*!
  * @brief 規定の処理にできるアイテムがプレイヤーの利用可能範囲内にあるかどうかを返す /
@@ -52,8 +51,8 @@
  */
 bool can_get_item(PlayerType *player_ptr, const ItemTester &item_tester)
 {
-    for (int j = 0; j < INVEN_TOTAL; j++) {
-        if (item_tester.okay(player_ptr->inventory[j].get())) {
+    for (const auto i_idx : INVEN_ALL_SLOTS) {
+        if (item_tester.okay(player_ptr->inventory[i_idx].get())) {
             return true;
         }
     }
@@ -98,9 +97,7 @@ static void py_pickup_all_golds_on_floor(PlayerType *player_ptr, const Grid &gri
 
         delete_object_idx(player_ptr, i_idx);
 
-        auto &rfu = RedrawingFlagsUpdater::get_instance();
-        rfu.set_flag(MainWindowRedrawingFlag::GOLD);
-        rfu.set_flag(SubWindowRedrawingFlag::PLAYER);
+        DeferredUpdateRequests::get_instance().request_gold_redrawing();
     }
 }
 
@@ -146,11 +143,14 @@ static void py_pickup_multiple_items(PlayerType *player_ptr, bool pickup)
     for (auto pick_count = 0; pick_count < count_of_pickable_items; ++pick_count) {
         constexpr auto q = _("どれを拾いますか？", "Get which item? ");
         constexpr auto s = _("もうザックには床にあるどのアイテムも入らない。", "You no longer have any room for the objects on the floor.");
-        short i_idx;
-        if (!choose_object(player_ptr, &i_idx, q, s, (USE_FLOOR), tester)) {
+        const auto &[item, i_idx] = choose_item(player_ptr, q, s, USE_FLOOR, tester);
+        if (!item) {
             break;
         }
         process_player_pickup_item(player_ptr, -i_idx);
+
+        // 拾ったときの鑑定で自動破壊の印が付いたアイテムを、次を選ぶ前に壊してザックの空きを作る。
+        update_inventory_arrangement(player_ptr);
     }
 }
 
@@ -266,87 +266,60 @@ void process_player_pickup_item(PlayerType *player_ptr, OBJECT_IDX o_idx)
 void carry(PlayerType *player_ptr, bool pickup)
 {
     verify_panel(player_ptr);
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-    rfu.set_flag(MainWindowRedrawingFlag::MAP);
-    rfu.set_flag(SubWindowRedrawingFlag::OVERHEAD);
+    DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
     handle_stuff(player_ptr);
     const auto &grid = player_ptr->current_floor_ptr->grid_array[player_ptr->y][player_ptr->x];
-
-    /* Instant Pseudo-ID, still ID average equipment, or *ID* if easy_id enabled */
-    /* TODO: Not if confused or blind */
-    {
-        for (auto it = grid.o_idx_list.begin(); it != grid.o_idx_list.end();) {
-            const auto this_o_idx = *it++;
-            auto &item = *player_ptr->current_floor_ptr->o_list[this_o_idx];
-
-            if (easy_id) {
-                auto &baseitem = item.get_baseitem();
-                baseitem.mark_awareness(true);
-                item.mark_as_known();
-                item.marked.set(OmType::TOUCHED);
-            } else {
-                /* skip IDed or already-sensed items */
-                if (any_bits(item.ident, IDENT_SENSE) || item.is_known()) {
-                    continue;
-                }
-
-                item_feel_type feel = FEEL_NONE;
-
-                switch (item.bi_key.tval()) {
-                case ItemKindType::SHOT:
-                case ItemKindType::ARROW:
-                case ItemKindType::BOLT:
-                case ItemKindType::BOW:
-                case ItemKindType::DIGGING:
-                case ItemKindType::HAFTED:
-                case ItemKindType::POLEARM:
-                case ItemKindType::SWORD:
-                case ItemKindType::BOOTS:
-                case ItemKindType::GLOVES:
-                case ItemKindType::HELM:
-                case ItemKindType::CROWN:
-                case ItemKindType::SHIELD:
-                case ItemKindType::CLOAK:
-                case ItemKindType::SOFT_ARMOR:
-                case ItemKindType::HARD_ARMOR:
-                case ItemKindType::DRAG_ARMOR:
-                case ItemKindType::CARD:
-                case ItemKindType::LITE:
-                    /* Now do pseudo */
-                    feel = pseudo_value_check_heavy(&item);
-
-                    /* ID average equipment, ammo,and lights */
-                    if (feel == FEEL_AVERAGE) {
-                        item.mark_as_known();
-                        item.marked.set(OmType::TOUCHED);
-                    } else {
-                        item.ident |= (IDENT_SENSE);
-                        item.feeling = feel;
-                    }
-                    break;
-
-                case ItemKindType::RING:
-                case ItemKindType::AMULET:
-                    /* Now do pseudo */
-                    item.ident |= (IDENT_SENSE);
-                    item.feeling = pseudo_value_check_heavy(&item);
-                    break;
-
-                default:
-                    break;
-                }
-            }
-        }
-    }
-
     autopick_pickup_items(player_ptr, grid);
+
+    // 自動拾いや拾ったときの鑑定で自動破壊の印が付いたアイテムを、拾う候補を数える前に壊す。
+    // carry() は移動のコマンドからだけ呼ばれ、所持品の番号を持たない。
+    update_inventory_arrangement(player_ptr);
 
     if (!grid.o_idx_list.empty()) {
         disturb(player_ptr, false, false);
     }
 
     py_pickup_all_golds_on_floor(player_ptr, grid);
+
+    /*Pseudo-ID everything on the ground*/
+    if (!player_ptr->effects()->confusion().is_active() && !player_ptr->effects()->blindness().is_active()) {
+        bool heavy = false;
+        switch (player_ptr->pclass) {
+        case PlayerClassType::WARRIOR:
+        case PlayerClassType::ARCHER:
+        case PlayerClassType::SAMURAI:
+        case PlayerClassType::CAVALRY:
+        case PlayerClassType::SMITH:
+        case PlayerClassType::ROGUE:
+        case PlayerClassType::NINJA:
+        case PlayerClassType::RANGER:
+        case PlayerClassType::PALADIN:
+        case PlayerClassType::SNIPER:
+        case PlayerClassType::CHAOS_WARRIOR:
+        case PlayerClassType::TOURIST:
+        case PlayerClassType::BERSERKER:
+            heavy = true;
+            break;
+        default:
+            break;
+        }
+
+        for (auto it = grid.o_idx_list.begin(); it != grid.o_idx_list.end();) {
+            const auto this_o_idx = *it++;
+            auto &item = *player_ptr->current_floor_ptr->o_list[this_o_idx];
+
+            if (item.is_equipment()) {
+                item_feel_type feel = (heavy ? pseudo_value_check_heavy(&item) : pseudo_value_check_light(&item));
+                if (feel == FEEL_AVERAGE) {
+                    if (item.is_weapon_armour_ammo() || item.bi_key.tval() == ItemKindType::LITE) {
+                        identify_item(player_ptr, &item);
+                    }
+                } else {
+                    item.sense(feel);
+                }
+            }
+        }
+    }
 
     if (easy_floor) {
         py_pickup_floor(player_ptr, pickup);
@@ -364,5 +337,9 @@ void carry(PlayerType *player_ptr, bool pickup)
         }
 
         py_pickup_single_item(player_ptr, this_o_idx, pickup);
+
+        // 拾ったときの鑑定で自動破壊の印が付いたアイテムを、次を調べる前に壊してザックの空きを作る。
+        // 床のアイテムの印はループの前に処理済みなので、ここで床の一覧の要素が消えることはない。
+        update_inventory_arrangement(player_ptr);
     }
 }

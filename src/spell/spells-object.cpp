@@ -18,7 +18,6 @@
 #include "object-enchant/item-magic-applier.h"
 #include "object-enchant/object-boost.h"
 #include "object-enchant/object-ego.h"
-#include "object-enchant/special-object-flags.h"
 #include "object-enchant/trc-types.h"
 #include "object-enchant/trg-types.h"
 #include "object-hook/hook-armor.h"
@@ -31,17 +30,21 @@
 #include "sv-definition/sv-other-types.h"
 #include "sv-definition/sv-scroll-types.h"
 #include "sv-definition/sv-weapon-types.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-definition.h"
+#include "system/artifact/artifact-list.h"
+#include "system/artifact/artifact-record.h"
 #include "system/baseitem/baseitem-key.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/screen-processor.h"
 #include "util/bit-flags-calculator.h"
+#include "util/dice.h"
 #include "util/probability-table.h"
 #include "view/display-messages.h"
+#include <fmt/format.h>
 #include <variant>
 
 /*!
@@ -102,12 +105,11 @@ struct AmusementRewardItemVisitor {
 
     tl::optional<ItemEntity> operator()(const FixedArtifactId &fa_id) const
     {
-        const auto &artifact = ArtifactList::get_instance().get_artifact(fa_id);
-        if (artifact.is_generated) {
+        if (ArtifactRecords::get_instance().get_generated(fa_id)) {
             return tl::nullopt;
         }
 
-        ItemEntity item(artifact.bi_key);
+        ItemEntity item(ArtifactList::get_instance().get_artifact(fa_id).bi_key);
         item.fa_id = fa_id;
         ItemMagicApplier(player_ptr, &item, 1, AM_NO_FIXED_ART).execute();
 
@@ -191,6 +193,26 @@ void acquirement(PlayerType *player_ptr, POSITION y1, POSITION x1, int num, bool
 }
 
 /*!
+ * @brief 防具呪縛・武器呪縛で呪われたエゴにした品の、擬似鑑定の感触を呪いに合わせる
+ * @param item 呪縛した品
+ * @details 呪いを付けたときと同じく感触を呪いに合わせる (ItemEntity::match_feeling_to_curses())。
+ * 呪縛した品は呪われたエゴ (BLASTED・SHATTERED) になるので、次の感触は重い擬似鑑定で感じ直したときと同じ {無価値} にする。
+ * - {恐ろしい}: 固定アーティファクトはアーティファクトでなくなる (ランダムアーティファクトは名前が残り、アーティファクトのまま)
+ * - {上質}・{並} から求めた {呪われている}: 重い擬似鑑定でしか付かず、アーティファクトでもエゴでもないと分かっていた品
+ * ({呪われていない}・感触なしはランダムアーティファクトのことがあるので {呪われている} のまま)
+ */
+static void update_feeling_on_blasting(ItemEntity &item)
+{
+    const auto was_ordinary = (item.feeling == FEEL_GOOD) || (item.feeling == FEEL_AVERAGE);
+    item.match_feeling_to_curses();
+    const auto is_blasted_artifact = (item.feeling == FEEL_TERRIBLE) && !item.is_fixed_or_random_artifact();
+    const auto is_blasted_ordinary = was_ordinary && (item.feeling == FEEL_CURSED);
+    if (is_blasted_artifact || is_blasted_ordinary) {
+        item.feeling = FEEL_WORTHLESS;
+    }
+}
+
+/*!
  * @brief 防具呪縛処理 /
  * Curse the players armor
  * @return 何も持っていない場合を除き、常にTRUEを返す
@@ -208,113 +230,99 @@ bool curse_armor(PlayerType *player_ptr)
 
     if (item.is_fixed_or_random_artifact() && one_in_(2)) {
 #ifdef JP
-        msg_format("%sが%sを包み込もうとしたが、%sはそれを跳ね返した！", "恐怖の暗黒オーラ", "防具", item_name.data());
+        msg_print("恐怖の暗黒オーラが防具を包み込もうとしたが、{}はそれを跳ね返した！", item_name);
 #else
-        msg_format("A %s tries to %s, but your %s resists the effects!", "terrible black aura", "surround your armor", item_name.data());
+        msg_print("A terrible black aura tries to surround your armor, but your {} resists the effects!", item_name);
 #endif
         return true;
     }
 
-    msg_format(_("恐怖の暗黒オーラがあなたの%sを包み込んだ！", "A terrible black aura blasts your %s!"), item_name.data());
+    msg_print(_("恐怖の暗黒オーラがあなたの{}を包み込んだ！", "A terrible black aura blasts your {}!"), item_name);
     chg_virtue(player_ptr, Virtue::ENCHANT, -5);
     item.fa_id = FixedArtifactId::NONE;
     item.ego_idx = EgoType::BLASTED;
-    item.to_a = 0 - randint1(5) - randint1(5);
+    item.to_a = -Dice::roll(2, 5);
     item.to_h = 0;
     item.to_d = 0;
     item.ac = 0;
     item.damage_dice = Dice(0, 0);
     item.art_flags.clear();
     item.curse_flags.set(CurseTraitType::CURSED);
-    item.ident |= IDENT_BROKEN;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::BONUS,
-        StatusRecalculatingFlag::MP,
-    };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::PLAYER,
-    };
-    rfu.set_flags(flags_swrf);
+    item.set_identification_flag(IdentificationFlag::BROKEN);
+    update_feeling_on_blasting(item);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    // エゴ・アーティファクトの能力が無くなる
+    dur.request_equipment_change_updates();
+    dur.set_flag(SubWindowRedrawingFlag::PLAYER);
+    calc_android_exp(player_ptr);
     return true;
 }
 
 /*!
- * @brief 武器呪縛処理 /
- * Curse the players weapon
+ * @brief 武器呪縛処理
  * @param player_ptr 所持者の参照ポインタ
  * @param force 無条件に呪縛を行うならばTRUE
- * @param o_ptr 呪縛する武器のアイテム情報参照ポインタ
+ * @param item 呪縛する武器アイテムへの参照
  * @return 何も持っていない場合を除き、常にTRUEを返す
  * @todo 元のreturnは間違っているが、修正後の↓文がどれくらい正しいかは要チェック
  */
-bool curse_weapon_object(PlayerType *player_ptr, bool force, ItemEntity *o_ptr)
+bool curse_weapon_object(PlayerType *player_ptr, bool force, ItemEntity &item)
 {
-    if (!o_ptr->is_valid()) {
+    if (!item.is_valid()) {
         return false;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, OD_OMIT_PREFIX);
-    if (o_ptr->is_fixed_or_random_artifact() && one_in_(2) && !force) {
+    const auto item_name = describe_flavor(player_ptr, item, OD_OMIT_PREFIX);
+    if (item.is_fixed_or_random_artifact() && one_in_(2) && !force) {
 #ifdef JP
-        msg_format("%sが%sを包み込もうとしたが、%sはそれを跳ね返した！", "恐怖の暗黒オーラ", "武器", item_name.data());
+        msg_print("恐怖の暗黒オーラが武器を包み込もうとしたが、{}はそれを跳ね返した！", item_name);
 #else
-        msg_format("A %s tries to %s, but your %s resists the effects!", "terrible black aura", "surround your weapon", item_name.data());
+        msg_print("A terrible black aura tries to surround your weapon, but your {} resists the effects!", item_name);
 #endif
         return true;
     }
 
     if (!force) {
-        msg_format(_("恐怖の暗黒オーラがあなたの%sを包み込んだ！", "A terrible black aura blasts your %s!"), item_name.data());
+        msg_print(_("恐怖の暗黒オーラがあなたの{}を包み込んだ！", "A terrible black aura blasts your {}!"), item_name);
     }
 
     chg_virtue(player_ptr, Virtue::ENCHANT, -5);
-    o_ptr->fa_id = FixedArtifactId::NONE;
-    o_ptr->ego_idx = EgoType::SHATTERED;
-    o_ptr->to_h = 0 - randint1(5) - randint1(5);
-    o_ptr->to_d = 0 - randint1(5) - randint1(5);
-    o_ptr->to_a = 0;
-    o_ptr->ac = 0;
-    o_ptr->damage_dice = Dice(0, 0);
-    o_ptr->art_flags.clear();
-    o_ptr->curse_flags.set(CurseTraitType::CURSED);
-    o_ptr->ident |= IDENT_BROKEN;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::BONUS,
-        StatusRecalculatingFlag::MP,
-    };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::PLAYER,
-    };
-    rfu.set_flags(flags_swrf);
+    item.fa_id = FixedArtifactId::NONE;
+    item.ego_idx = EgoType::SHATTERED;
+    item.to_h = -Dice::roll(2, 5);
+    item.to_d = -Dice::roll(2, 5);
+    item.to_a = 0;
+    item.ac = 0;
+    item.damage_dice = Dice(0, 0);
+    item.art_flags.clear();
+    item.curse_flags.set(CurseTraitType::CURSED);
+    item.set_identification_flag(IdentificationFlag::BROKEN);
+    update_feeling_on_blasting(item);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    // エゴ・アーティファクトの能力が無くなる
+    dur.request_equipment_change_updates();
+    dur.set_flag(SubWindowRedrawingFlag::PLAYER);
+    calc_android_exp(player_ptr);
     return true;
 }
 
 /*!
- * @brief ボルトのエゴ化処理(火炎エゴのみ) /
- * Enchant some bolts
+ * @brief ボルトのエゴ化処理 (火炎エゴのみ)
  * @param player_ptr プレイヤーへの参照ポインタ
  */
 void brand_bolts(PlayerType *player_ptr)
 {
-    for (auto i = 0; i < INVEN_PACK; i++) {
-        auto *o_ptr = player_ptr->inventory[i].get();
-        if (o_ptr->bi_key.tval() != ItemKindType::BOLT) {
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        auto &item = *player_ptr->inventory[i_idx];
+        if (item.bi_key.tval() != ItemKindType::BOLT) {
             continue;
         }
 
-        if (o_ptr->is_fixed_or_random_artifact() || o_ptr->is_ego()) {
+        if (item.is_fixed_or_random_artifact() || item.is_ego()) {
             continue;
         }
 
-        if (o_ptr->is_cursed() || o_ptr->is_broken()) {
+        if (item.is_cursed() || item.is_broken()) {
             continue;
         }
 
@@ -323,8 +331,11 @@ void brand_bolts(PlayerType *player_ptr)
         }
 
         msg_print(_("クロスボウの矢が炎のオーラに包まれた！", "Your bolts are covered in a fiery aura!"));
-        o_ptr->ego_idx = EgoType::FLAME;
-        enchant_equipment(o_ptr, randint0(3) + 4, ENCH_TOHIT | ENCH_TODAM);
+        item.ego_idx = EgoType::FLAME;
+        enchant_equipment(item, randint0(3) + 4, ENCH_TOHIT | ENCH_TODAM);
+
+        // 修正値の強化に失敗しても、エゴは付いている
+        DeferredUpdateRequests::get_instance().request_inventory_arrangement();
         return;
     }
 
@@ -336,41 +347,38 @@ void brand_bolts(PlayerType *player_ptr)
 }
 
 /*!
- * @brief 呪いの打ち破り処理 /
- * Break the curse of an item
- * @param o_ptr 呪い装備情報の参照ポインタ
+ * @brief 呪いの打ち破り処理
+ * @param item 呪い装備への参照
  */
-static void break_curse(ItemEntity *o_ptr)
+static void break_curse(ItemEntity &item)
 {
-    const auto has_heavier_curse = o_ptr->curse_flags.has_any_of({ CurseTraitType::PERMA_CURSE, CurseTraitType::HEAVY_CURSE });
-    const auto is_curse_broken = o_ptr->is_cursed() && !has_heavier_curse && one_in_(4);
+    const auto has_heavier_curse = item.curse_flags.has_any_of({ CurseTraitType::PERMA_CURSE, CurseTraitType::HEAVY_CURSE });
+    const auto is_curse_broken = item.is_cursed() && !has_heavier_curse && one_in_(4);
     if (!is_curse_broken) {
         return;
     }
 
     msg_print(_("かけられていた呪いが打ち破られた！", "The curse is broken!"));
-    o_ptr->curse_flags.clear();
-    o_ptr->ident |= IDENT_SENSE;
-    o_ptr->feeling = FEEL_NONE;
+    item.remove_curses();
 }
 
 /*!
  * @brief 装備修正強化処理
- * @param o_ptr 強化するアイテムの参照ポインタ
+ * @param item 強化するアイテムへの参照
  * @param n 強化基本量
  * @param eflag 強化オプション(命中/ダメージ/AC)
  * @return 強化に成功した場合TRUEを返す
  */
-bool enchant_equipment(ItemEntity *o_ptr, int n, int eflag)
+bool enchant_equipment(ItemEntity &item, int n, int eflag)
 {
-    auto prob = o_ptr->number * 100;
-    if (o_ptr->is_ammo()) {
+    auto prob = item.number * 100;
+    if (item.is_ammo()) {
         prob = prob / 20;
     }
 
     int chance;
     auto res = false;
-    auto a = o_ptr->is_fixed_or_random_artifact();
+    auto a = item.is_fixed_or_random_artifact();
     auto force = (eflag & ENCH_FORCE);
     for (int i = 0; i < n; i++) {
         if (!force && randint0(prob) >= 100) {
@@ -378,37 +386,37 @@ bool enchant_equipment(ItemEntity *o_ptr, int n, int eflag)
         }
 
         if (eflag & ENCH_TOHIT) {
-            if (o_ptr->to_h < 0) {
+            if (item.to_h < 0) {
                 chance = 0;
-            } else if (o_ptr->to_h > 15) {
+            } else if (item.to_h > 15) {
                 chance = 1000;
             } else {
-                chance = enchant_table[o_ptr->to_h];
+                chance = enchant_table[item.to_h];
             }
 
             if (force || ((randint1(1000) > chance) && (!a || one_in_(2)))) {
-                o_ptr->to_h++;
+                item.to_h++;
                 res = true;
-                if (o_ptr->to_h >= 0) {
-                    break_curse(o_ptr);
+                if (item.to_h >= 0) {
+                    break_curse(item);
                 }
             }
         }
 
         if (eflag & ENCH_TODAM) {
-            if (o_ptr->to_d < 0) {
+            if (item.to_d < 0) {
                 chance = 0;
-            } else if (o_ptr->to_d > 15) {
+            } else if (item.to_d > 15) {
                 chance = 1000;
             } else {
-                chance = enchant_table[o_ptr->to_d];
+                chance = enchant_table[item.to_d];
             }
 
             if (force || ((randint1(1000) > chance) && (!a || one_in_(2)))) {
-                o_ptr->to_d++;
+                item.to_d++;
                 res = true;
-                if (o_ptr->to_d >= 0) {
-                    break_curse(o_ptr);
+                if (item.to_d >= 0) {
+                    break_curse(item);
                 }
             }
         }
@@ -417,19 +425,19 @@ bool enchant_equipment(ItemEntity *o_ptr, int n, int eflag)
             continue;
         }
 
-        if (o_ptr->to_a < 0) {
+        if (item.to_a < 0) {
             chance = 0;
-        } else if (o_ptr->to_a > 15) {
+        } else if (item.to_a > 15) {
             chance = 1000;
         } else {
-            chance = enchant_table[o_ptr->to_a];
+            chance = enchant_table[item.to_a];
         }
 
         if (force || ((randint1(1000) > chance) && (!a || one_in_(2)))) {
-            o_ptr->to_a++;
+            item.to_a++;
             res = true;
-            if (o_ptr->to_a >= 0) {
-                break_curse(o_ptr);
+            if (item.to_a >= 0) {
+                break_curse(item);
             }
         }
     }
@@ -438,21 +446,10 @@ bool enchant_equipment(ItemEntity *o_ptr, int n, int eflag)
         return false;
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::BONUS,
-        StatusRecalculatingFlag::COMBINATION,
-        StatusRecalculatingFlag::REORDER,
-    };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::PLAYER,
-        SubWindowRedrawingFlag::FLOOR_ITEMS,
-        SubWindowRedrawingFlag::FOUND_ITEMS,
-    };
-    rfu.set_flags(flags_swrf);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(StatusRecalculatingFlag::BONUS);
+    dur.request_inventory_arrangement();
+    dur.request_item_lists_redrawing();
     return true;
 }
 
@@ -473,30 +470,29 @@ bool enchant_spell(PlayerType *player_ptr, HIT_PROB num_hit, int num_dam, ARMOUR
 
     constexpr auto q = _("どのアイテムを強化しますか? ", "Enchant which item? ");
     constexpr auto s = _("強化できるアイテムがない。", "You have nothing to enchant.");
-    short i_idx;
     const auto options = USE_EQUIP | USE_INVEN | USE_FLOOR | IGNORE_BOTHHAND_SLOT;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, options, item_tester);
-    if (o_ptr == nullptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, options, item_tester);
+    if (!item) {
         return false;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, (OD_OMIT_PREFIX | OD_NAME_ONLY));
+    const auto item_name = describe_flavor(player_ptr, *item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
 #ifdef JP
-    msg_format("%s は明るく輝いた！", item_name.data());
+    msg_print("{} は明るく輝いた！", item_name);
 #else
-    msg_format("%s %s glow%s brightly!", ((i_idx >= 0) ? "Your" : "The"), item_name.data(), ((o_ptr->number > 1) ? "" : "s"));
+    msg_print("{} {} glow{} brightly!", ((i_idx >= 0) ? "Your" : "The"), item_name, ((item->number > 1) ? "" : "s"));
 #endif
 
     auto is_enchant_successful = false;
-    if (enchant_equipment(o_ptr, num_hit, ENCH_TOHIT)) {
+    if (enchant_equipment(*item, num_hit, ENCH_TOHIT)) {
         is_enchant_successful = true;
     }
 
-    if (enchant_equipment(o_ptr, num_dam, ENCH_TODAM)) {
+    if (enchant_equipment(*item, num_dam, ENCH_TODAM)) {
         is_enchant_successful = true;
     }
 
-    if (enchant_equipment(o_ptr, num_ac, ENCH_TOAC)) {
+    if (enchant_equipment(*item, num_ac, ENCH_TOAC)) {
         is_enchant_successful = true;
     }
 
@@ -525,18 +521,17 @@ void brand_weapon(PlayerType *player_ptr, int brand_type)
 {
     constexpr auto q = _("どの武器を強化しますか? ", "Enchant which weapon? ");
     constexpr auto s = _("強化できる武器がない。", "You have nothing to enchant.");
-    short i_idx;
     const auto options = USE_EQUIP | IGNORE_BOTHHAND_SLOT;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, options, FuncItemTester(&ItemEntity::allow_enchant_melee_weapon));
-    if (o_ptr == nullptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, options, FuncItemTester(&ItemEntity::allow_enchant_melee_weapon));
+    if (!item) {
         return;
     }
 
-    const auto &bi_key = o_ptr->bi_key;
+    const auto &bi_key = item->bi_key;
     auto special_weapon = bi_key == BaseitemKey(ItemKindType::SWORD, SV_POISON_NEEDLE);
     special_weapon |= bi_key == BaseitemKey(ItemKindType::POLEARM, SV_DEATH_SCYTHE);
     special_weapon |= bi_key == BaseitemKey(ItemKindType::SWORD, SV_DIAMOND_EDGE);
-    const auto is_normal_item = o_ptr->is_valid() && !o_ptr->is_fixed_or_random_artifact() && !o_ptr->is_ego() && !o_ptr->is_cursed() && !special_weapon;
+    const auto is_normal_item = item->is_valid() && !item->is_fixed_or_random_artifact() && !item->is_ego() && !item->is_cursed() && !special_weapon;
     if (!is_normal_item) {
         if (flush_failure) {
             flush();
@@ -548,98 +543,101 @@ void brand_weapon(PlayerType *player_ptr, int brand_type)
         return;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, (OD_OMIT_PREFIX | OD_NAME_ONLY));
+    const auto item_name = describe_flavor(player_ptr, *item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
     concptr act = nullptr;
     switch (brand_type) {
     case 17:
-        if (o_ptr->bi_key.tval() == ItemKindType::SWORD) {
+        if (item->bi_key.tval() == ItemKindType::SWORD) {
             act = _("は鋭さを増した！", "becomes very sharp!");
-            o_ptr->ego_idx = EgoType::SHARPNESS;
-            o_ptr->pval = (PARAMETER_VALUE)m_bonus(5, player_ptr->current_floor_ptr->dun_level) + 1;
-            if ((o_ptr->bi_key.sval() == SV_HAYABUSA) && (o_ptr->pval > 2)) {
-                o_ptr->pval = 2;
+            item->ego_idx = EgoType::SHARPNESS;
+            item->pval = (PARAMETER_VALUE)m_bonus(5, player_ptr->current_floor_ptr->dun_level) + 1;
+            if ((item->bi_key.sval() == SV_HAYABUSA) && (item->pval > 2)) {
+                item->pval = 2;
             }
         } else {
             act = _("は破壊力を増した！", "seems very powerful.");
-            o_ptr->ego_idx = EgoType::EARTHQUAKES;
-            o_ptr->pval = (PARAMETER_VALUE)m_bonus(3, player_ptr->current_floor_ptr->dun_level);
+            item->ego_idx = EgoType::EARTHQUAKES;
+            item->pval = (PARAMETER_VALUE)m_bonus(3, player_ptr->current_floor_ptr->dun_level);
         }
 
         break;
     case 16:
         act = _("は人間の血を求めている！", "seems to be looking for humans!");
-        o_ptr->ego_idx = EgoType::KILL_HUMAN;
+        item->ego_idx = EgoType::KILL_HUMAN;
         break;
     case 15:
         act = _("は電撃に覆われた！", "covered with lightning!");
-        o_ptr->ego_idx = EgoType::BRAND_ELEC;
+        item->ego_idx = EgoType::BRAND_ELEC;
         break;
     case 14:
         act = _("は酸に覆われた！", "coated with acid!");
-        o_ptr->ego_idx = EgoType::BRAND_ACID;
+        item->ego_idx = EgoType::BRAND_ACID;
         break;
     case 13:
         act = _("は邪悪なる怪物を求めている！", "seems to be looking for evil monsters!");
-        o_ptr->ego_idx = EgoType::KILL_EVIL;
+        item->ego_idx = EgoType::KILL_EVIL;
         break;
     case 12:
         act = _("は異世界の住人の肉体を求めている！", "seems to be looking for demons!");
-        o_ptr->ego_idx = EgoType::KILL_DEMON;
+        item->ego_idx = EgoType::KILL_DEMON;
         break;
     case 11:
         act = _("は屍を求めている！", "seems to be looking for undead!");
-        o_ptr->ego_idx = EgoType::KILL_UNDEAD;
+        item->ego_idx = EgoType::KILL_UNDEAD;
         break;
     case 10:
         act = _("は動物の血を求めている！", "seems to be looking for animals!");
-        o_ptr->ego_idx = EgoType::KILL_ANIMAL;
+        item->ego_idx = EgoType::KILL_ANIMAL;
         break;
     case 9:
         act = _("はドラゴンの血を求めている！", "seems to be looking for dragons!");
-        o_ptr->ego_idx = EgoType::KILL_DRAGON;
+        item->ego_idx = EgoType::KILL_DRAGON;
         break;
     case 8:
         act = _("はトロルの血を求めている！", "seems to be looking for troll!s");
-        o_ptr->ego_idx = EgoType::KILL_TROLL;
+        item->ego_idx = EgoType::KILL_TROLL;
         break;
     case 7:
         act = _("はオークの血を求めている！", "seems to be looking for orcs!");
-        o_ptr->ego_idx = EgoType::KILL_ORC;
+        item->ego_idx = EgoType::KILL_ORC;
         break;
     case 6:
         act = _("は巨人の血を求めている！", "seems to be looking for giants!");
-        o_ptr->ego_idx = EgoType::KILL_GIANT;
+        item->ego_idx = EgoType::KILL_GIANT;
         break;
     case 5:
         act = _("は非常に不安定になったようだ。", "seems very unstable now.");
-        o_ptr->ego_idx = EgoType::TRUMP;
-        o_ptr->pval = randnum1<short>(2);
+        item->ego_idx = EgoType::TRUMP;
+        item->pval = randnum1<short>(2);
         break;
     case 4:
         act = _("は血を求めている！", "thirsts for blood!");
-        o_ptr->ego_idx = EgoType::VAMPIRIC;
+        item->ego_idx = EgoType::VAMPIRIC;
         break;
     case 3:
         act = _("は毒に覆われた。", "is coated with poison.");
-        o_ptr->ego_idx = EgoType::BRAND_POIS;
+        item->ego_idx = EgoType::BRAND_POIS;
         break;
     case 2:
         act = _("は純ログルスに飲み込まれた。", "is engulfed in raw Logrus!");
-        o_ptr->ego_idx = EgoType::CHAOTIC;
+        item->ego_idx = EgoType::CHAOTIC;
         break;
     case 1:
         act = _("は炎のシールドに覆われた！", "is covered in a fiery shield!");
-        o_ptr->ego_idx = EgoType::BRAND_FIRE;
+        item->ego_idx = EgoType::BRAND_FIRE;
         break;
     default:
         act = _("は深く冷たいブルーに輝いた！", "glows deep, icy blue!");
-        o_ptr->ego_idx = EgoType::BRAND_COLD;
+        item->ego_idx = EgoType::BRAND_COLD;
         break;
     }
 
-    msg_format(_("あなたの%s%s", "Your %s %s"), item_name.data(), act);
-    enchant_equipment(o_ptr, randint0(3) + 4, ENCH_TOHIT | ENCH_TODAM);
-    o_ptr->discount = 99;
+    msg_print(_("あなたの{}{}", "Your {} {}"), item_name, act);
+    enchant_equipment(*item, randint0(3) + 4, ENCH_TOHIT | ENCH_TODAM);
+    item->discount = 99;
     chg_virtue(player_ptr, Virtue::ENCHANT, 2);
     calc_android_exp(player_ptr);
+
+    // 修正値の強化に失敗しても、エゴの能力は付いている
+    DeferredUpdateRequests::get_instance().request_equipment_change_updates();
 }

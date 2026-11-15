@@ -4,20 +4,22 @@
 #include "game-option/input-options.h"
 #include "game-option/keymap-directory-getter.h"
 #include "io/cursor.h"
+#include "io/input-context.h"
 #include "io/input-key-acceptor.h"
 #include "io/screen-util.h"
 #include "system/building-type-definition.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/terrain/terrain-characteristics.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/target-checker.h"
 #include "target/target-sorter.h"
 #include "term/screen-processor.h"
 #include "timed-effect/timed-effects.h"
 #include "util/candidate-selector.h"
+#include "util/enum-converter.h"
 #include "util/finalizer.h"
 #include "util/int-char-converter.h"
 #include "util/string-processor.h"
@@ -41,7 +43,7 @@ static std::vector<Pos2D> tgt_pt_prepare(PlayerType *player_ptr)
     std::vector<Pos2D> positions;
     const auto &floor = *player_ptr->current_floor_ptr;
     const auto p_pos = player_ptr->get_position();
-    const auto is_hallucinated = player_ptr->effects()->hallucination().is_hallucinated();
+    const auto is_hallucinated = player_ptr->effects()->hallucination().is_active();
     for (const auto &pos : floor.get_area(FloorBoundary::OUTER_WALL_EXCLUSIVE)) {
         if (pos == p_pos) {
             positions.push_back(pos);
@@ -85,7 +87,7 @@ static tl::optional<Pos2D> select_building_pos(const FloorType &floor)
     const auto describer = [&](const Pos2D &pos) {
         const auto &grid = floor.get_grid(pos);
         const auto &terrain = grid.get_terrain();
-        return buildings.at(terrain.subtype).name;
+        return buildings.at(enum2i(terrain.building_type)).name;
     };
 
     const auto choice = cs.select(pos_buildings, describer);
@@ -96,8 +98,8 @@ static tl::optional<Pos2D> select_building_pos(const FloorType &floor)
  * @brief 指定したシンボルのマスかどうかを判定するための条件式コールバック
  */
 std::unordered_map<int, std::function<bool(const Grid &)>> tgt_pt_symbol_call_back = {
-    { '<', [](const Grid &grid) { return grid.has(TerrainCharacteristics::STAIRS) && grid.has(TerrainCharacteristics::LESS); } },
-    { '>', [](const Grid &grid) { return grid.has(TerrainCharacteristics::STAIRS) && grid.has(TerrainCharacteristics::MORE); } },
+    { '<', [](const Grid &grid) { return grid.has(TerrainCharacteristics::STAIRS) && grid.has(TerrainCharacteristics::UP_STAIRS); } },
+    { '>', [](const Grid &grid) { return grid.has(TerrainCharacteristics::STAIRS) && grid.has(TerrainCharacteristics::DOWN_STAIRS); } },
     { '+', [](const Grid &grid) { return grid.has(TerrainCharacteristics::BLDG); } },
     { '0', [](const Grid &grid) { return grid.has(TerrainCharacteristics::STORE) && grid.is_symbol('0'); } },
     { '!', [](const Grid &grid) { return grid.has(TerrainCharacteristics::STORE) && grid.is_symbol('1'); } },
@@ -176,10 +178,7 @@ void tgt_pt_info::move_to_symbol(PlayerType *player_ptr)
         this->n = 0;
         this->pos = player_ptr->get_position();
         verify_panel(player_ptr);
-        auto &rfu = RedrawingFlagsUpdater::get_instance();
-        rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-        rfu.set_flag(MainWindowRedrawingFlag::MAP);
-        rfu.set_flag(SubWindowRedrawingFlag::OVERHEAD);
+        DeferredUpdateRequests::get_instance().request_monster_update_and_map_redrawing();
         handle_stuff(player_ptr);
     } else {
         const auto cx = (panel_col_min + panel_col_max) / 2;
@@ -210,11 +209,17 @@ tl::optional<Pos2D> point_target(PlayerType *player_ptr)
     info.ch = 0;
     info.n = 0;
     tl::optional<Pos2D> pos_target;
+    constexpr auto prompt = _("場所を選んでスペースキーを押して下さい。", "Select a point and press space.");
     while ((info.ch != ESCAPE) && !pos_target) {
-        prt(_("場所を選んでスペースキーを押して下さい。", "Select a point and press space."), 0, 0);
+        prt(prompt, 0, 0);
         auto move_fast = false;
         move_cursor_relative(info.pos.y, info.pos.x);
-        info.ch = inkey();
+        {
+            const PointInputDetails details{ .pos = info.pos };
+            const InputContextScope input_context({ InputKind::POINT, prompt, details });
+            info.ch = inkey();
+        }
+
         switch (info.ch) {
         case ESCAPE:
             break;
@@ -317,10 +322,7 @@ tl::optional<Pos2D> point_target(PlayerType *player_ptr)
 
     prt("", 0, 0);
     verify_panel(player_ptr);
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-    rfu.set_flag(MainWindowRedrawingFlag::MAP);
-    rfu.set_flag(SubWindowRedrawingFlag::OVERHEAD);
+    DeferredUpdateRequests::get_instance().request_monster_update_and_map_redrawing();
     handle_stuff(player_ptr);
     return pos_target;
 }

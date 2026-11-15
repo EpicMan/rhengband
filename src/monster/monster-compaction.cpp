@@ -8,7 +8,7 @@
 #include "monster/monster-info.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
@@ -76,9 +76,8 @@ static void compact_monsters_aux(PlayerType *player_ptr, MONSTER_IDX i1, MONSTER
     floor.m_list[i2] = std::exchange(floor.m_list[i1], {});
 
     for (const auto mte : MONSTER_TIMED_EFFECT_RANGE) {
-        const auto index = floor.get_mproc_index(i1, mte);
-        if (index >= 0) {
-            floor.mproc_list[mte][*index] = i2;
+        if (floor.remove_mproc(i1, mte)) {
+            floor.add_mproc(i2, mte);
         }
     }
 }

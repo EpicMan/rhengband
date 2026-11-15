@@ -14,7 +14,7 @@
 #include "player-status/player-energy.h"
 #include "racial/racial-switcher.h"
 #include "racial/racial-util.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
 #include "timed-effect/timed-effects.h"
@@ -46,7 +46,7 @@ bool exe_racial_power(PlayerType *player_ptr, const int32_t command)
  */
 PERCENTAGE racial_chance(PlayerType *player_ptr, rpi_type *rpi_ptr)
 {
-    if ((player_ptr->lev < rpi_ptr->min_level) || player_ptr->effects()->confusion().is_confused()) {
+    if ((player_ptr->lev < rpi_ptr->min_level) || player_ptr->effects()->confusion().is_active()) {
         return 0;
     }
 
@@ -56,7 +56,7 @@ PERCENTAGE racial_chance(PlayerType *player_ptr, rpi_type *rpi_ptr)
     }
 
     const auto &player_stun = player_ptr->effects()->stun();
-    if (player_stun.is_stunned()) {
+    if (player_stun.is_active()) {
         difficulty += player_stun.current();
     } else if (player_ptr->lev > rpi_ptr->min_level) {
         PERCENTAGE lev_adj = (PERCENTAGE)((player_ptr->lev - rpi_ptr->min_level) / 3);
@@ -102,7 +102,7 @@ static void adjust_racial_power_difficulty(PlayerType *player_ptr, rpi_type *rpi
     }
 
     const auto &player_stun = player_ptr->effects()->stun();
-    if (player_stun.is_stunned()) {
+    if (player_stun.is_active()) {
         *difficulty += player_stun.current();
     } else if (player_ptr->lev > rpi_ptr->min_level) {
         int lev_adj = ((player_ptr->lev - rpi_ptr->min_level) / 3);
@@ -135,7 +135,7 @@ racial_level_check_result check_racial_level(PlayerType *player_ptr, rpi_type *r
 
     PlayerEnergy energy(player_ptr);
     if (player_ptr->lev < min_level) {
-        msg_format(_("この能力を使用するにはレベル %d に達していなければなりません。", "You need to attain level %d to use this power."), min_level);
+        msg_print(_("この能力を使用するにはレベル {} に達していなければなりません。", "You need to attain level {} to use this power."), min_level);
         energy.reset_player_turn();
         return RACIAL_CANCEL;
     }
@@ -152,7 +152,9 @@ racial_level_check_result check_racial_level(PlayerType *player_ptr, rpi_type *r
 
     adjust_racial_power_difficulty(player_ptr, rpi_ptr, &difficulty);
     energy.set_player_turn_energy(100);
-    if (randint1(player_ptr->stat_cur[use_stat]) >= ((difficulty / 2) + randint1(difficulty / 2))) {
+    const auto stat_roll = randint1(player_ptr->stat_cur[use_stat]);
+    const auto difficulty_roll = (difficulty / 2) + randint1(difficulty / 2);
+    if (stat_roll >= difficulty_roll) {
         return RACIAL_SUCCESS;
     }
 

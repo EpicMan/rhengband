@@ -8,64 +8,69 @@
 #include "autopick/autopick-entry.h"
 #include "autopick/autopick-initializer.h"
 #include "autopick/autopick-inserter-killer.h"
+#include "autopick/autopick-menu-data-table.h"
 #include "autopick/autopick-pref-processor.h"
 #include "autopick/autopick-reader-writer.h"
 #include "autopick/autopick-util.h"
 #include "cmd-io/cmd-save.h"
+#include "core/asking-player.h"
+#include "io/input-context.h"
 #include "io/input-key-acceptor.h"
 #include "io/read-pref-file.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
 #include "util/bit-flags-calculator.h"
 #include "util/finalizer.h"
 #include "util/int-char-converter.h"
 #include "world/world.h"
+#include <fmt/format.h>
 #include <set>
 
-text_body_type::text_body_type(int cx, int cy)
+AutopickTextBody::AutopickTextBody(int cx, int cy)
     : cx(cx)
     , cy(cy)
+    , lines(1)
 {
 }
 
 /*
  * Check special key code and get a movement command id
  */
-static int analyze_move_key(text_body_type *tb, uint32_t skey)
+static EditorCommandId analyze_move_key(AutopickTextBody *tb, uint32_t skey)
 {
-    int com_id;
+    EditorCommandId com_id;
     if (!(skey & SKEY_MASK)) {
-        return 0;
+        return EditorCommandId::NONE;
     }
 
     switch (skey & ~SKEY_MOD_MASK) {
     case SKEY_DOWN:
-        com_id = EC_DOWN;
+        com_id = EditorCommandId::DOWN;
         break;
     case SKEY_LEFT:
-        com_id = EC_LEFT;
+        com_id = EditorCommandId::LEFT;
         break;
     case SKEY_RIGHT:
-        com_id = EC_RIGHT;
+        com_id = EditorCommandId::RIGHT;
         break;
     case SKEY_UP:
-        com_id = EC_UP;
+        com_id = EditorCommandId::UP;
         break;
     case SKEY_PGUP:
-        com_id = EC_PGUP;
+        com_id = EditorCommandId::PGUP;
         break;
     case SKEY_PGDOWN:
-        com_id = EC_PGDOWN;
+        com_id = EditorCommandId::PGDOWN;
         break;
     case SKEY_HOME:
-        com_id = any_bits(skey, SKEY_MOD_CONTROL) ? EC_TOP : EC_BOL;
+        com_id = any_bits(skey, SKEY_MOD_CONTROL) ? EditorCommandId::TOP : EditorCommandId::BOL;
         break;
     case SKEY_END:
-        com_id = any_bits(skey, SKEY_MOD_CONTROL) ? EC_BOTTOM : EC_EOL;
+        com_id = any_bits(skey, SKEY_MOD_CONTROL) ? EditorCommandId::BOTTOM : EditorCommandId::EOL;
         break;
     default:
-        return 0;
+        return EditorCommandId::NONE;
     }
 
     if (!(skey & SKEY_MOD_SHIFT)) {
@@ -73,27 +78,28 @@ static int analyze_move_key(text_body_type *tb, uint32_t skey)
          * Un-shifted cursor keys cancells
          * selection created by shift+cursor.
          */
-        if (tb->mark & MARK_BY_SHIFT) {
-            tb->mark = 0;
+        if (tb->marks.has(AutopickMark::BY_SHIFT)) {
+            tb->marks.clear();
             tb->dirty_flags |= DIRTY_ALL;
         }
 
         return com_id;
     }
 
-    if (tb->mark) {
+    if (tb->marks.any()) {
         return com_id;
     }
 
-    const int len = tb->lines_list[tb->cy]->length();
-    tb->mark = MARK_MARK | MARK_BY_SHIFT;
+    const int len = tb->lines[tb->cy].line.length();
+    tb->marks.set(AutopickMark::MARK);
+    tb->marks.set(AutopickMark::BY_SHIFT);
     tb->my = tb->cy;
     tb->mx = tb->cx;
     if (tb->cx > len) {
         tb->mx = len;
     }
 
-    if (com_id == EC_UP || com_id == EC_DOWN) {
+    if (com_id == EditorCommandId::UP || com_id == EditorCommandId::DOWN) {
         tb->dirty_flags |= DIRTY_ALL;
     } else {
         tb->dirty_line = tb->cy;
@@ -102,18 +108,72 @@ static int analyze_move_key(text_body_type *tb, uint32_t skey)
     return com_id;
 }
 
-void text_body_type::adjust_cursor_column()
+/*!
+ * @brief コマンドを処理する前にカーソル列とマーク列を行の範囲内に収める
+ * @details キーワードの切り替え等はマークを残したまま行を短くするため、マーク中はマーク列も補正する。
+ * マークを外した後の my / mx は存在しない行を指していることがあるため触らない。
+ */
+void AutopickTextBody::adjust_cursor_column()
 {
     this->cx = std::max(this->cx, this->rec_cx);
-    this->cx = std::min<int>(this->lines_list[this->cy]->length(), this->cx);
+    this->cx = std::min<int>(this->lines[this->cy].line.length(), this->cx);
+    if (this->marks.any()) {
+        this->mx = std::min<int>(this->lines[this->my].line.length(), this->mx);
+    }
 }
 
-void text_body_type::update_cursor_column_record(int com_id)
+void AutopickTextBody::update_cursor_column_record(EditorCommandId com_id)
 {
-    static const std::set record_cursor_column_commands = { EC_UP, EC_DOWN, EC_PGUP, EC_PGDOWN, EC_TOP, EC_BOTTOM };
-
+    static const std::set<EditorCommandId> record_cursor_column_commands = { EditorCommandId::UP, EditorCommandId::DOWN, EditorCommandId::PGUP, EditorCommandId::PGDOWN, EditorCommandId::TOP, EditorCommandId::BOTTOM };
     const auto should_record = record_cursor_column_commands.contains(com_id);
     this->rec_cx = should_record ? std::max(this->cx, this->rec_cx) : 0;
+}
+
+/*!
+ * @brief カーソルが2バイト文字の2バイト目にあるかどうかを判定する
+ * @return カーソルのある行で、カーソルの位置が2バイト文字の2バイト目であれば true
+ */
+bool AutopickTextBody::is_cursor_on_second_byte_of_kanji() const
+{
+    return is_second_byte_of_kanji(this->lines[this->cy].line, this->cx);
+}
+
+/*!
+ * @brief 指定の行があるかどうかを判定する
+ * @param y 行番号
+ * @return 指定の行があれば true
+ */
+bool AutopickTextBody::has_line(int y) const
+{
+    return (0 <= y) && (y < std::ssize(this->lines));
+}
+
+/*!
+ * @brief 指定の行が最終行かどうかを判定する
+ * @param y 行番号
+ * @return 指定の行より後ろに行が無ければ true
+ */
+bool AutopickTextBody::is_last_line(int y) const
+{
+    return !this->has_line(y + 1);
+}
+
+/*!
+ * @brief 行をすべて差し替える
+ * @param new_lines 新しい行
+ * @details 行が無ければ空行を 1 行だけ持つ。各行の状態は初期化するので、描き直しの前に DIRTY_EXPRESSION で求め直すこと。
+ */
+void AutopickTextBody::set_lines(std::vector<std::string> new_lines)
+{
+    this->lines.clear();
+    this->lines.reserve(new_lines.size());
+    for (auto &line : new_lines) {
+        this->lines.emplace_back().line = std::move(line);
+    }
+
+    if (this->lines.empty()) {
+        this->lines.emplace_back();
+    }
 }
 
 /*
@@ -125,15 +185,14 @@ void do_cmd_edit_autopick(PlayerType *player_ptr)
     static int cx_save = 0;
     static int cy_save = 0;
     autopick_type an_entry, *entry = &an_entry;
-    int i;
     int key = -1;
     static int32_t old_autosave_turn = 0L;
     ape_quittance quit = APE_QUIT;
 
-    text_body_type text_body(cx_save, cy_save);
-    text_body_type *tb = &text_body;
+    AutopickTextBody text_body(cx_save, cy_save);
+    AutopickTextBody *tb = &text_body;
     tb->dirty_flags = DIRTY_ALL | DIRTY_MODE | DIRTY_EXPRESSION;
-    tb->filename_mode = PT_DEFAULT;
+    tb->filename_mode = PickType::DEFAULT;
     auto &world = AngbandWorld::get_instance();
     world.play_time.pause();
     const auto unpauser = util::make_finalizer([&world]() { world.play_time.unpause(); });
@@ -154,28 +213,28 @@ void do_cmd_edit_autopick(PlayerType *player_ptr)
         tb->last_destroyed = autopick_line_from_entry(*entry);
     }
 
-    tb->lines_list = read_pickpref_text_lines(player_ptr->base_name, &tb->filename_mode);
-    for (i = 0; i < tb->cy; i++) {
-        if (!tb->lines_list[i]) {
-            tb->cy = tb->cx = 0;
-            break;
-        }
+    auto [filename_mode, lines] = read_pickpref_text_lines(player_ptr->base_name);
+    tb->filename_mode = filename_mode;
+    tb->set_lines(std::move(lines));
+
+    // 前回閉じたときのカーソルの行が、読み込み直したファイルに無ければ先頭に戻す
+    if (!tb->has_line(tb->cy)) {
+        tb->cy = tb->cx = 0;
     }
 
     TermCenteredOffsetSetter tcos(tl::nullopt, tl::nullopt);
 
     screen_save();
     while (quit == APE_QUIT) {
-        int com_id = 0;
+        auto com_id = EditorCommandId::NONE;
         tb->adjust_cursor_column();
         draw_text_editor(player_ptr, tb);
-        prt(_("(^Q:終了 ^W:セーブして終了, ESC:メニュー, その他:入力)",
-                "(^Q:Quit, ^W:Save&Quit, ESC:Menu, Other:Input text)"),
-            0, 0);
-        if (!tb->mark) {
-            prt(format("(%d,%d)", tb->cx, tb->cy), 0, 60);
+        constexpr auto key_guide = _("(^Q:終了 ^W:セーブして終了, ESC:メニュー, その他:入力)", "(^Q:Quit, ^W:Save&Quit, ESC:Menu, Other:Input text)");
+        prt(key_guide, 0, 0);
+        if (tb->marks.none()) {
+            prt(fmt::format("({},{})", tb->cx, tb->cy), 0, 60);
         } else {
-            prt(format("(%d,%d)-(%d,%d)", tb->mx, tb->my, tb->cx, tb->cy), 0, 60);
+            prt(fmt::format("({},{})-({},{})", tb->mx, tb->my, tb->cx, tb->cy), 0, 60);
         }
 
         term_gotoxy(tb->cx - tb->left, tb->cy - tb->upper + 1);
@@ -187,7 +246,7 @@ void do_cmd_edit_autopick(PlayerType *player_ptr)
         tb->old_wid = tb->wid;
         tb->old_hgt = tb->hgt;
 
-        key = inkey_special(true);
+        key = input_special_key_with_context(InputKind::AUTOPICK_EDITOR, key_guide);
 
         if (key & SKEY_MASK) {
             com_id = analyze_move_key(tb, static_cast<uint32_t>(key));
@@ -195,17 +254,17 @@ void do_cmd_edit_autopick(PlayerType *player_ptr)
             com_id = do_command_menu(0, 0);
             tb->dirty_flags |= DIRTY_SCREEN;
         } else if (!iscntrl((unsigned char)key)) {
-            if (tb->mark) {
-                tb->mark = 0;
+            if (tb->marks.any()) {
+                tb->marks.clear();
                 tb->dirty_flags |= DIRTY_ALL;
             }
 
             insert_single_letter(tb, key);
         } else {
-            com_id = get_com_id((char)key);
+            com_id = CommandMenuData::get_instance().get_com_id((char)key);
         }
 
-        if (com_id) {
+        if (com_id > EditorCommandId::NONE) {
             quit = do_editor_command(player_ptr, tb, com_id);
         }
 
@@ -216,7 +275,7 @@ void do_cmd_edit_autopick(PlayerType *player_ptr)
     const auto filename = pickpref_filename(player_ptr->base_name, tb->filename_mode);
 
     if (quit == APE_QUIT_AND_SAVE) {
-        write_text_lines(filename, tb->lines_list);
+        write_text_lines(filename, tb->get_entry_lines());
     }
 
     process_autopick_file(player_ptr, filename);

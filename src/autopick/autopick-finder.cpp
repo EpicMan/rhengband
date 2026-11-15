@@ -13,15 +13,17 @@
 #include "flavor/flavor-describer.h"
 #include "flavor/object-flavor-types.h"
 #include "floor/floor-object.h"
+#include "io/input-context.h"
 #include "io/input-key-acceptor.h"
 #include "main/sound-of-music.h"
 #include "object/item-use-flags.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
 #include "util/int-char-converter.h"
 #include "util/string-processor.h"
+#include <fmt/format.h>
 
 /*!
  * @brief 与えられたアイテムが自動拾いのリストに登録されているかどうかを検索する
@@ -56,15 +58,14 @@ bool get_object_for_search(PlayerType *player_ptr, AutopickSearch &as)
 {
     constexpr auto q = _("どのアイテムを検索しますか? ", "Enter which item? ");
     constexpr auto s = _("アイテムを持っていない。", "You have nothing to enter.");
-    ItemEntity *o_ptr;
-    o_ptr = choose_object(player_ptr, nullptr, q, s, USE_INVEN | USE_FLOOR | USE_EQUIP);
-    if (!o_ptr) {
+    const auto &[item, _] = choose_item(player_ptr, q, s, USE_INVEN | USE_FLOOR | USE_EQUIP);
+    if (!item) {
         return false;
     }
 
-    as.item_ptr = o_ptr;
-    const auto item_name = describe_flavor(player_ptr, *as.item_ptr, (OD_NO_FLAVOR | OD_OMIT_PREFIX | OD_NO_PLURAL));
-    as.search_str = format("<%s>", item_name.data());
+    as.item = item;
+    const auto item_name = describe_flavor(player_ptr, *as.item, (OD_NO_FLAVOR | OD_OMIT_PREFIX | OD_NO_PLURAL));
+    as.search_str = fmt::format("<{}>", item_name);
     return true;
 }
 
@@ -77,9 +78,9 @@ bool get_destroyed_object_for_search(PlayerType *player_ptr, AutopickSearch &as)
         return false;
     }
 
-    as.item_ptr = &autopick_last_destroyed_object;
-    const auto item_name = describe_flavor(player_ptr, *as.item_ptr, (OD_NO_FLAVOR | OD_OMIT_PREFIX | OD_NO_PLURAL));
-    as.search_str = format("<%s>", item_name.data());
+    as.item = std::shared_ptr<ItemEntity>(&autopick_last_destroyed_object, [](ItemEntity *) {});
+    const auto item_name = describe_flavor(player_ptr, *as.item, (OD_NO_FLAVOR | OD_OMIT_PREFIX | OD_NO_PLURAL));
+    as.search_str = fmt::format("<{}>", item_name);
     return true;
 }
 
@@ -96,13 +97,14 @@ AutopickSearch get_string_for_search(PlayerType *player_ptr, const AutopickSearc
     std::string buf = as.search_str;
     constexpr auto max_len = 80;
     uint8_t color = TERM_YELLOW;
-    if (as.item_ptr != nullptr) {
+    if (as.item) {
         color = TERM_L_GREEN;
     }
 
     const std::string prompt(_("検索(^I:持ち物 ^L:破壊された物): ", "Search key(^I:inven ^L:destroyed): "));
     const auto col = prompt.length();
     prt(prompt, 0, 0);
+    const InputContextScope context_scope({ InputKind::STRING, prompt, StringInputDetails{ max_len, buf } });
     int pos = 0;
     while (true) {
         bool back = false;
@@ -143,12 +145,11 @@ AutopickSearch get_string_for_search(PlayerType *player_ptr, const AutopickSearc
         case '\r':
         case KTRL('s'): {
             as.result = back ? AutopickSearchResult::BACK : AutopickSearchResult::FORWARD;
-            if (as.item_ptr != nullptr) {
+            if (as.item) {
                 return as;
             }
 
             as.search_str = buf;
-            as.item_ptr = nullptr;
             return as;
         }
         case KTRL('i'):
@@ -194,7 +195,7 @@ AutopickSearch get_string_for_search(PlayerType *player_ptr, const AutopickSearc
             const auto c = static_cast<char>(skey);
             if (color != TERM_WHITE) {
                 if (color == TERM_L_GREEN) {
-                    as.item_ptr = nullptr;
+                    as.item.reset();
                     as.search_str = "";
                 }
 
@@ -227,11 +228,11 @@ AutopickSearch get_string_for_search(PlayerType *player_ptr, const AutopickSearc
         }
         }
 
-        if (as.item_ptr == nullptr || color == TERM_L_GREEN) {
+        if (!as.item || color == TERM_L_GREEN) {
             continue;
         }
 
-        as.item_ptr = nullptr;
+        as.item.reset();
         as.search_str = "";
         pos = 0;
         buf = "";
@@ -241,7 +242,7 @@ AutopickSearch get_string_for_search(PlayerType *player_ptr, const AutopickSearc
 /*!
  * @brief Search next line matches for o_ptr
  */
-void search_for_object(PlayerType *player_ptr, text_body_type *tb, const ItemEntity *o_ptr, bool forward)
+void search_for_object(PlayerType *player_ptr, AutopickTextBody *tb, const ItemEntity *o_ptr, bool forward)
 {
     autopick_type an_entry, *entry = &an_entry;
     int bypassed_cy = -1;
@@ -250,17 +251,11 @@ void search_for_object(PlayerType *player_ptr, text_body_type *tb, const ItemEnt
 
     while (true) {
         bool match;
-        if (forward) {
-            if (!tb->lines_list[++i]) {
-                break;
-            }
-        } else {
-            if (--i < 0) {
-                break;
-            }
+        if (!tb->has_line(forward ? ++i : --i)) {
+            break;
         }
 
-        if (!autopick_new_entry(entry, *tb->lines_list[i], false)) {
+        if (!autopick_new_entry(entry, tb->lines[i].line, false)) {
             continue;
         }
 
@@ -269,7 +264,7 @@ void search_for_object(PlayerType *player_ptr, text_body_type *tb, const ItemEnt
             continue;
         }
 
-        if (tb->states[i] & LSTAT_BYPASS) {
+        if (tb->lines[i].state.has(AutopickEntryStatus::BYPASS)) {
             if (bypassed_cy == -1) {
                 bypassed_cy = i;
             }
@@ -298,30 +293,24 @@ void search_for_object(PlayerType *player_ptr, text_body_type *tb, const ItemEnt
 /*!
  * @brief Search next line matches to the string
  */
-void search_for_string(text_body_type *tb, std::string_view search_str, bool forward)
+void search_for_string(AutopickTextBody *tb, std::string_view search_str, bool forward)
 {
     int bypassed_cy = -1;
     int bypassed_cx = 0;
 
     int i = tb->cy;
     while (true) {
-        if (forward) {
-            if (!tb->lines_list[++i]) {
-                break;
-            }
-        } else {
-            if (--i < 0) {
-                break;
-            }
+        if (!tb->has_line(forward ? ++i : --i)) {
+            break;
         }
 
-        const auto line_data = tb->lines_list[i]->data();
+        const auto line_data = tb->lines[i].line.data();
         const auto *pos = angband_strstr(line_data, search_str);
         if (!pos) {
             continue;
         }
 
-        if ((tb->states[i] & LSTAT_BYPASS) && !(tb->states[i] & LSTAT_EXPRESSION)) {
+        if ((tb->lines[i].state.has(AutopickEntryStatus::BYPASS)) && tb->lines[i].state.has_not(AutopickEntryStatus::EXPRESSION)) {
             if (bypassed_cy == -1) {
                 bypassed_cy = i;
                 bypassed_cx = (int)(pos - line_data);

@@ -1,0 +1,50 @@
+#pragma once
+
+#include "system/h-type.h"
+#include <limits>
+
+/*!
+ * @file item-reader-limits.h
+ * @brief ベースアイテム・アーティファクト・エゴ定義の共通の範囲 (重量・ダイス・ベースAC・修正値・種別・副種別・価格)
+ * @details ベースACは 0〜255、命中・ダメージ・ACの修正値は絶対値が255以下の小さな数に限る。同梱のデータ (ベースAC 50 まで、
+ * 修正値 -60〜77) には十分に足りる。装備の値は16ビットの変数で合計されるが、範囲の端が約 1,000 までなら合計はあふれないと見積もれる。
+ * 見積もりの前提: 装備の12か所すべてに範囲の端のアイテムを着け、生成時の上乗せを ACの修正値 70、命中・ダメージ 481
+ * (ランダムアーティファクトの能力の付与を30回とした値) とし、エゴは同梱の値、修理は1回とする。能力の付与の回数には固定の上限が無く、
+ * 修理も繰り返せるため、これを超える生成や修理では修正値が定義の範囲を超えて増え、見積もりの外になる。
+ */
+
+//! 重量の上限 (下限は 0)
+constexpr int ITEM_WEIGHT_MAX = 9999;
+
+//! ベースダイスの個数・面数の上限 (下限は 0)。セーブではダイスの個数・面数をそれぞれ1バイトで書くため、0〜255に限る。
+constexpr int ITEM_DICE_MAX = 255;
+
+/*!
+ * @brief ベースACの上限 (下限は 0)
+ * @details 端を 1,000 とした、ベースAC + ACの修正値の合計 (calc_base_ac()・calc_to_ac() と monster-attack-player.cpp など):
+ * 12 × (1,000 + XTRA_AC の 1,000 / 4) + 盾の技能 12 + 修理した武器2か所 × 2 × (1,000 + 70) + ほかの10か所 × (1,000 + 70)
+ * + そのほかの補正 800 = 30,792 (ベースACと修正値を同じ値にするなら 1,068 まで)。
+ */
+constexpr int ITEM_BASE_AC_MAX = 255;
+
+/*!
+ * @brief 命中・ダメージ・ACの修正値の絶対値の上限
+ * @details 端を 1,000 とした合計:
+ * - 命中 (calc_to_hit_bow() の合計と射撃の表示): 12 × (1,000 + 481) + 316 = 18,088。
+ *   負の側は重い弓と騎乗の補正を含めて 12 × (1,000 + 485) + 2,620 = 20,440。
+ * - ダメージ (calc_to_damage() は弓を含まない11か所を short で返す): 11 × (1,000 + 481) + 652 = 16,943。
+ * - ACの修正値の負の側: 12 × (1,000 + 100) + 238 = 13,438。
+ */
+constexpr int ITEM_BONUS_MAX = 255;
+
+class BaseitemKey;
+
+// 種別を添え字にする色の表は128要素。
+constexpr int ITEM_TYPE_MAX = 127;
+constexpr int ITEM_SUBTYPE_DEFAULT_MAX = 128;
+
+// 定義は baseitem-reader.cpp にある (武器熟練度・呪文・魔道具の表の要素数に依存するため)。
+int item_subtype_max(const BaseitemKey &key);
+
+// エゴと装備の価格は、数量や割引を計算する際の余裕を確保する。
+constexpr auto ITEM_COST_MAX = std::numeric_limits<PRICE>::max() / 32;

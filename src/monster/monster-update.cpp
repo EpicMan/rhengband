@@ -28,15 +28,16 @@
 #include "player/special-defense-types.h"
 #include "status/element-resistance.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
+#include "system/monrace/monrace-records.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/projection-path-calculator.h"
 #include "timed-effect/timed-effects.h"
 #include "tracking/health-bar-tracker.h"
@@ -98,22 +99,18 @@ bool update_riding_monster(PlayerType *player_ptr, turn_flags *turn_flags_ptr, M
 }
 
 /*!
- * @brief マップ及びミニマップの更新フラグをセットする
+ * @brief モンスターが地形を変えたときに、モンスターの経路の計算し直しを要求する
  * @param turn_flags_ptr ターン経過処理フラグへの参照ポインタ
+ * @details 地図のサブウィンドウ (ダンジョン全体図・自分の周囲) は、地形を変えたグリッドで呼ぶ lite_spot() を通じて、
+ * 表示が変わったときに描き直される。
  */
-void update_map_flags(turn_flags *turn_flags_ptr)
+void update_flow_flags(turn_flags *turn_flags_ptr)
 {
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
     if (!turn_flags_ptr->do_view) {
         return;
     }
 
-    rfu.set_flag(StatusRecalculatingFlag::FLOW);
-    static constexpr auto flags = {
-        SubWindowRedrawingFlag::OVERHEAD,
-        SubWindowRedrawingFlag::DUNGEON,
-    };
-    rfu.set_flags(flags);
+    DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
 }
 
 /*!
@@ -127,7 +124,7 @@ void update_lite_flags(turn_flags *turn_flags_ptr, const MonraceDefinition &monr
     const auto has_lite = monrace.brightness_flags.has_any_of({ Mbt::HAS_LITE_1, Mbt::HAS_LITE_2 });
     const auto except_has_lite = EnumClassFlagGroup<Mbt>(self_ld_mask).set({ Mbt::HAS_DARK_1, Mbt::HAS_DARK_2 });
     if (turn_flags_ptr->do_move && (monrace.brightness_flags.has_any_of(except_has_lite) || (has_lite && !AngbandSystem::get_instance().is_phase_out()))) {
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_LITE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::MONSTER_LITE);
     }
 }
 
@@ -240,7 +237,7 @@ static bool update_weird_telepathy(PlayerType *player_ptr, um_type *um_ptr, MONS
 
     um_ptr->flag = true;
     monster.mflag.set(MonsterTemporaryFlagType::ESP);
-    if (monster.is_original_ap() && !player_ptr->effects()->hallucination().is_hallucinated()) {
+    if (monster.is_original_ap() && !player_ptr->effects()->hallucination().is_active()) {
         monrace.r_misc_flags.set(MonsterMiscType::WEIRD_MIND);
         update_smart_stupid_flags(monrace);
     }
@@ -252,7 +249,7 @@ static void update_telepathy_sight(PlayerType *player_ptr, um_type *um_ptr, MONS
 {
     auto &monster = *um_ptr->m_ptr;
     auto &monrace = monster.get_monrace();
-    const auto is_hallucinated = player_ptr->effects()->hallucination().is_hallucinated();
+    const auto is_hallucinated = player_ptr->effects()->hallucination().is_active();
     if (PlayerClass(player_ptr).samurai_stance_is(SamuraiStanceType::MUSOU)) {
         um_ptr->flag = true;
         um_ptr->m_ptr->mflag.set(MonsterTemporaryFlagType::ESP);
@@ -290,7 +287,7 @@ static void update_specific_race_telepathy(PlayerType *player_ptr, um_type *um_p
 {
     auto &monster = *um_ptr->m_ptr;
     auto &monrace = monster.get_monrace();
-    const auto is_hallucinated = player_ptr->effects()->hallucination().is_hallucinated();
+    const auto is_hallucinated = player_ptr->effects()->hallucination().is_active();
     if ((player_ptr->esp_animal) && monrace.kind_flags.has(MonsterKindType::ANIMAL)) {
         um_ptr->flag = true;
         monster.mflag.set(MonsterTemporaryFlagType::ESP);
@@ -446,7 +443,7 @@ static void decide_sight_invisible_monster(PlayerType *player_ptr, um_type *um_p
         update_specific_race_telepathy(player_ptr, um_ptr);
     }
 
-    if (!player_ptr->current_floor_ptr->has_los_at({ um_ptr->fy, um_ptr->fx }) || player_ptr->effects()->blindness().is_blind()) {
+    if (!player_ptr->current_floor_ptr->has_los_at({ um_ptr->fy, um_ptr->fx }) || player_ptr->effects()->blindness().is_active()) {
         return;
     }
 
@@ -458,7 +455,7 @@ static void decide_sight_invisible_monster(PlayerType *player_ptr, um_type *um_p
 
     bool do_cold_blood = check_cold_blood(player_ptr, um_ptr, distance);
     bool do_invisible = check_invisible(player_ptr, um_ptr);
-    if (!um_ptr->flag || !monster.is_original_ap() || player_ptr->effects()->hallucination().is_hallucinated()) {
+    if (!um_ptr->flag || !monster.is_original_ap() || player_ptr->effects()->hallucination().is_active()) {
         return;
     }
 
@@ -491,21 +488,19 @@ static void update_invisible_monster(PlayerType *player_ptr, um_type *um_ptr, MO
 
     HealthBarTracker::get_instance().set_flag_if_tracking(m_idx);
     if (monster.is_riding()) {
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
     }
 
-    if (!player_ptr->effects()->hallucination().is_hallucinated()) {
-        auto &monrace = monster.get_monrace();
-        auto &shadower = MonraceList::get_instance().get_monrace(MonraceId::KAGE);
-        if ((monster.ap_r_idx == MonraceId::KAGE) && (shadower.r_sights < MAX_SHORT)) {
-            shadower.r_sights++;
-        } else if (monster.is_original_ap() && (monrace.r_sights < MAX_SHORT)) {
-            monrace.r_sights++;
+    if (!player_ptr->effects()->hallucination().is_active()) {
+        if (monster.ap_r_idx == MonraceId::KAGE) {
+            MonraceRecords::get_instance().increment_seen_count(MonraceId::KAGE);
+        } else if (monster.is_original_ap()) {
+            monster.increment_seen_count();
         }
     }
 
     const auto &world = AngbandWorld::get_instance();
-    if (world.is_loading_now && world.character_dungeon && !AngbandSystem::get_instance().is_phase_out() && monster.get_appearance_monrace().misc_flags.has(MonsterMiscType::ELDRITCH_HORROR)) {
+    if (world.is_loading_now && world.character_dungeon && !AngbandSystem::get_instance().is_phase_out() && monster.get_apparent_monrace().misc_flags.has(MonsterMiscType::ELDRITCH_HORROR)) {
         monster.mflag.set(MonsterTemporaryFlagType::SANITY_BLAST);
     }
 
@@ -532,7 +527,7 @@ static void update_visible_monster(PlayerType *player_ptr, um_type *um_ptr, MONS
 
     HealthBarTracker::get_instance().set_flag_if_tracking(m_idx);
     if (um_ptr->m_ptr->is_riding()) {
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::UHEALTH);
     }
 
     if (um_ptr->do_disturb && (disturb_pets || um_ptr->m_ptr->is_hostile())) {
@@ -566,8 +561,8 @@ void update_monster(PlayerType *player_ptr, MONSTER_IDX m_idx, bool full)
     um_type tmp_um;
     um_type *um_ptr = initialize_um_type(player_ptr, &tmp_um, m_idx, full);
     if (disturb_high) {
-        auto *ap_r_ptr = &um_ptr->m_ptr->get_appearance_monrace();
-        if (ap_r_ptr->r_tkills && ap_r_ptr->level >= player_ptr->lev) {
+        const auto &apparent_monrace = um_ptr->m_ptr->get_apparent_monrace();
+        if (apparent_monrace.r_tkills && apparent_monrace.level >= player_ptr->lev) {
             um_ptr->do_disturb = true;
         }
     }

@@ -11,12 +11,13 @@
 
 #include "load/load.h"
 #include "core/asking-player.h"
-#include "dungeon/quest.h"
 #include "game-option/birth-options.h"
+#include "inventory/inventory-slot-types.h"
 #include "io/files-util.h"
 #include "io/report.h"
 #include "io/uid-checker.h"
 #include "load/angband-version-comparer.h"
+#include "load/artifact-record-loader.h"
 #include "load/dummy-loader.h"
 #include "load/dungeon-loader.h"
 #include "load/extra-loader.h"
@@ -43,15 +44,84 @@
 #include "system/angband-exceptions.h"
 #include "system/angband-system.h"
 #include "system/angband-version.h"
+#include "system/artifact/artifact-definition.h"
+#include "system/artifact/artifact-list.h"
+#include "system/artifact/artifact-record.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
+#include "system/floor/floor-info.h"
+#include "system/grid-type-definition.h"
+#include "system/inner-game-data.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "system/system-variables.h"
+#include "term/z-util.h"
 #include "util/angband-files.h"
 #include "util/enum-converter.h"
 #include "view/display-messages.h"
 #include "world/world.h"
+#include <fmt/format.h>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
+
+namespace {
+constexpr auto MSG_CANNOT_OPEN = _("セーブファイルを開けません", "Cannot open savefile");
+constexpr auto MSG_CANNOT_READ = _("セーブファイルを読めません", "Cannot read savefile");
+constexpr auto MSG_INVALID_VERSION = _("異常なバージョンが検出されました", "Invalid version is detected");
+
+/*!
+ * @brief 既知の固定アーティファクトIDを収集する（V26未満のセーブデータ用）
+ */
+auto collect_known_fixed_artifacts_old(PlayerType *player_ptr)
+{
+    const auto &artifacts = ArtifactList::get_instance();
+    const auto comparer = [&artifacts](auto id1, auto id2) { return artifacts.order(id1, id2); };
+    std::set<FixedArtifactId, decltype(comparer)> fa_ids(comparer);
+    for (const auto &[fa_id, record] : ArtifactRecords::get_instance()) {
+        if (!record.get_generated()) {
+            continue;
+        }
+
+        fa_ids.insert(fa_id);
+    }
+
+    if (!player_ptr->is_dead) {
+        const auto &floor = *player_ptr->current_floor_ptr;
+        for (const auto &pos : floor.get_area()) {
+            const auto &grid = floor.get_grid(pos);
+            for (const auto this_o_idx : grid.o_idx_list) {
+                const auto &item = *floor.o_list[this_o_idx];
+                if (!item.is_fixed_artifact() || item.is_known()) {
+                    continue;
+                }
+
+                fa_ids.erase(item.fa_id);
+            }
+        }
+    }
+
+    for (const auto i_idx : INVEN_ALL_SLOTS) {
+        const auto &item = *player_ptr->inventory[i_idx];
+        if (!item.is_valid()) {
+            continue;
+        }
+
+        if (!item.is_fixed_artifact()) {
+            continue;
+        }
+
+        if (item.is_known()) {
+            continue;
+        }
+
+        fa_ids.erase(item.fa_id);
+    }
+
+    return fa_ids;
+}
+}
 
 /*!
  * @brief 変愚蛮怒 v2.1.3で追加された街とクエストについて読み込む
@@ -91,7 +161,7 @@ static void rd_total_play_time()
         return;
     }
 
-    AngbandWorld::get_instance().sf_play_time = rd_u32b();
+    InnerGameData::get_instance().set_total_play_time(rd_u32b());
 }
 
 /*!
@@ -103,8 +173,13 @@ static void rd_winner_class()
         return;
     }
 
-    rd_FlagGroup(AngbandWorld::get_instance().sf_winner, rd_byte);
-    rd_FlagGroup(AngbandWorld::get_instance().sf_retired, rd_byte);
+    auto &igd = InnerGameData::get_instance();
+    EnumClassFlagGroup<PlayerClassType> winner_classes{};
+    rd_FlagGroup(winner_classes, rd_byte);
+    igd.set_won_classes(winner_classes);
+    EnumClassFlagGroup<PlayerClassType> retired_classes{};
+    rd_FlagGroup(retired_classes, rd_byte);
+    igd.set_retired_classes(retired_classes);
 }
 
 static void load_player_world(PlayerType *player_ptr)
@@ -130,7 +205,7 @@ static errr load_hp(PlayerType *player_ptr)
 {
     auto tmp16u = rd_u16b();
     if (tmp16u > PY_MAX_LEVEL) {
-        load_note(format(_("ヒットポイント配列が大きすぎる(%u)！", "Too many (%u) hitpoint entries!"), tmp16u));
+        load_note(fmt::format(_("ヒットポイント配列が大きすぎる({})！", "Too many ({}) hitpoint entries!"), tmp16u));
         return 25;
     }
 
@@ -184,16 +259,28 @@ static errr verify_encoded_checksum()
     return 11;
 }
 
+static errr verify_savedata()
+{
+    const auto checksum_result = verify_checksum();
+    if (checksum_result != 0) {
+        return checksum_result;
+    }
+
+    return verify_encoded_checksum();
+}
+
 /*!
  * @brief セーブファイル読み込み処理の実体 / Actually read the savefile
- * @return エラーコード
+ * @return 解析できればエラーコード (0なら成功、それ以外なら続きをプレイできないデータ)、解析できなければその理由
  */
-static errr exe_reading_savefile(PlayerType *player_ptr)
+static tl::expected<errr, std::string> exe_reading_savefile(PlayerType *player_ptr)
 {
-    rd_version_info();
+    if (!rd_version_info()) {
+        return tl::unexpected(MSG_INVALID_VERSION);
+    }
+
     if (!loading_savefile_version_is_older_than(SAVEFILE_VERSION + 1)) {
-        load_note(_("セーブデータのバージョンが新しすぎる", "Savefile version is too new"));
-        return -1;
+        return tl::unexpected(_("セーブデータのバージョンが新しすぎます", "Savefile version is too new"));
     }
 
     rd_dummy3();
@@ -207,7 +294,10 @@ static errr exe_reading_savefile(PlayerType *player_ptr)
     }
 
     load_note(_("クエスト情報をロードしました", "Loaded Quests"));
-    item_loader->load_artifact();
+    if (loading_savefile_version_is_older_than(26)) {
+        item_loader->load_artifact_older_than_26();
+    }
+
     load_player_world(player_ptr);
     auto load_hp_result = load_hp(player_ptr);
     if (load_hp_result != 0) {
@@ -254,36 +344,44 @@ static errr exe_reading_savefile(PlayerType *player_ptr)
         remove_water_cave(player_ptr);
     }
 
-    auto checksum_result = verify_checksum();
-    if (checksum_result != 0) {
-        return checksum_result;
+    if (loading_savefile_version_is_older_than(26)) {
+        auto &artifact_records = ArtifactRecords::get_instance();
+        const auto known_fixed_artifacts = collect_known_fixed_artifacts_old(player_ptr);
+        for (const auto fa_id : known_fixed_artifacts) {
+            artifact_records.set_generated(fa_id, true);
+            artifact_records.set_known(fa_id);
+            artifact_records.set_identified(fa_id);
+        }
+
+        return verify_savedata();
     }
 
-    return verify_encoded_checksum();
+    rd_artifact_records();
+    return verify_savedata();
 }
 
 /*!
  * @brief セーブファイル読み込み処理 (UIDチェック等含む) / Reading the savefile (including UID check)
  * @param player_ptr プレイヤーへの参照ポインタ
- * @return エラーコード
+ * @return 解析できればエラーコード (0なら成功、それ以外なら続きをプレイできないデータ)、解析できなければその理由
  */
-static errr rd_savefile(PlayerType *player_ptr)
+static tl::expected<errr, std::string> rd_savefile(PlayerType *player_ptr)
 {
     safe_setuid_grab();
     loading_savefile = angband_fopen(savefile, FileOpenMode::READ, true);
     safe_setuid_drop();
     if (!loading_savefile) {
-        return -1;
+        return tl::unexpected(MSG_CANNOT_OPEN);
     }
 
     try {
-        auto err = exe_reading_savefile(player_ptr);
+        auto result = exe_reading_savefile(player_ptr);
         if (ferror(loading_savefile)) {
-            err = -1;
+            result = tl::unexpected<std::string>(MSG_CANNOT_READ);
         }
 
         angband_fclose(loading_savefile);
-        return err;
+        return result;
     } catch (SaveDataNotSupportedException const &e) {
         msg_print(e.what());
         angband_fclose(loading_savefile);
@@ -295,17 +393,20 @@ static errr rd_savefile(PlayerType *player_ptr)
  * @brief 死亡した、または互換性のないセーブデータを読み込んだ時にやりなおさせる
  * @param plyaer_ptr プレイヤーへの参照ポインタ
  * @param new_game 新しくゲームを始めさせるフラグ
- * @return 常にtrue (前後の処理上都合が良いため)
  */
-static bool reset_save_data(PlayerType *player_ptr, bool *new_game)
+static void reset_save_data(PlayerType *player_ptr, bool *new_game)
 {
     *new_game = true;
     player_ptr->is_dead = false;
-    AngbandWorld::get_instance().sf_lives++;
-    return true;
 }
 
-static bool on_read_save_data_not_supported(PlayerType *player_ptr, bool *new_game)
+/*!
+ * @brief 続きをプレイできないセーブデータを読み込んだ時に、最初からやり直すかを尋ねる
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param new_game 新しくゲームを始めさせるフラグ
+ * @details やり直さない場合はゲームを終了する
+ */
+static void on_read_save_data_not_supported(PlayerType *player_ptr, bool *new_game)
 {
     auto mes_not_play = _("このセーブデータの続きをプレイすることはできません。", "You can't play the rest of the game from this save data.");
     auto mes_check_restart = _("最初からプレイを始めますか？(モンスターの思い出は引き継がれます)", "Play from the beginning? (Monster recalls will be inherited.) ");
@@ -314,11 +415,13 @@ static bool on_read_save_data_not_supported(PlayerType *player_ptr, bool *new_ga
     if (!input_check(mes_check_restart)) {
         msg_print(_("ゲームを終了します。", "Exit the game."));
         msg_erase();
-        return false;
+
+        // 利用者が終了を選んだのでエラーではない
+        quit("");
     }
 
     AngbandSystem::get_instance().set_awaiting_report_score(false);
-    return reset_save_data(player_ptr, new_game);
+    reset_save_data(player_ptr, new_game);
 }
 
 /**
@@ -337,127 +440,115 @@ static bool can_takeover_savefile(PlayerType *player_ptr)
 }
 
 /*!
- * @brief セーブデータ読み込みのメインルーチン /
- * Attempt to Load a "savefile"
- * @param player_ptr プレイヤーへの参照ポインタ
- * @param new_game セーブデータの新規作成が必要か否か
- * @return セーブデータが読み込めればtrue
+ * @brief セーブファイルの先頭を読み、変愚蛮怒のセーブファイルであるかを調べる
+ * @return 変愚蛮怒のセーブファイルであれば成功、そうでなければ失敗の理由
+ * @details 変愚蛮怒のセーブファイルであれば、セーブファイルのエンコードキーを設定する
  */
-bool load_savedata(PlayerType *player_ptr, bool *new_game)
+static tl::expected<void, std::string> verify_savefile_header()
 {
-    auto what = "generic";
-    AngbandWorld::get_instance().game_turn = 0;
-    player_ptr->is_dead = false;
-    if (savefile.empty()) {
-        return true;
+    const auto fd = fd_open(savefile, O_RDONLY);
+    if (fd < 0) {
+        return tl::unexpected(MSG_CANNOT_OPEN);
     }
-
-    const auto &savefile_str = savefile.string();
-#ifndef WINDOWS
-    if (access(savefile_str.data(), 0) < 0) {
-        msg_print(_("セーブファイルがありません。", "Savefile does not exist."));
-        msg_erase();
-        *new_game = true;
-        return true;
-    }
-#endif
-
-    auto err = false;
-    auto fd = -1;
 
     // バリアント名長1バイト+バージョン番号4バイト+セーブファイルエンコードキー1バイト == 6バイト.
     constexpr auto variant_length = static_cast<char>(VARIANT_NAME.length());
     constexpr auto version_length = variant_length + 6;
     char tmp_ver[version_length]{};
-    if (!err) {
-        fd = fd_open(savefile, O_RDONLY);
-        if (fd < 0) {
-            err = true;
-        }
-
-        if (err) {
-            what = _("セーブファイルを開けません", "Cannot open savefile");
-        }
+    const auto read_result = fd_read(fd, tmp_ver, version_length);
+    (void)fd_close(fd);
+    if (read_result) {
+        return tl::unexpected(MSG_CANNOT_READ);
     }
 
-    if (!err) {
-        if (fd_read(fd, tmp_ver, version_length)) {
-            err = true;
+    // v0.0.X～v3.0.0 Alpha51までは、セーブデータの第1バイトがFAKE_MAJOR_VERというZangbandと互換性を取ったバージョン番号フィールドだった.
+    // v3.0.0 Alpha52以降は、バリアント名の長さフィールドとして再定義した.
+    // 10～13はその名残。変愚蛮怒から更にバリアントを切ったらこの評価は不要.
+    auto &system = AngbandSystem::get_instance();
+    const auto tmp_major = tmp_ver[0];
+    if (tmp_major == variant_length) {
+        if (std::string_view(&tmp_ver[1], variant_length) != VARIANT_NAME) {
+            return tl::unexpected(_("セーブデータのバリアントは変愚蛮怒以外です", "The variant of save data is other than Hengband"));
         }
 
-        if (err) {
-            what = _("セーブファイルを読めません", "Cannot read savefile");
-        }
+        system.savefile_key = tmp_ver[version_length - 1];
+        return {};
     }
 
-    if (!err) {
-        // v0.0.X～v3.0.0 Alpha51までは、セーブデータの第1バイトがFAKE_MAJOR_VERというZangbandと互換性を取ったバージョン番号フィールドだった.
-        // v3.0.0 Alpha52以降は、バリアント名の長さフィールドとして再定義した.
-        // 10～13はその名残。変愚蛮怒から更にバリアントを切ったらこの評価は不要.
-        auto &system = AngbandSystem::get_instance();
-        auto tmp_major = tmp_ver[0];
-        auto is_old_ver = (10 <= tmp_major) && (tmp_major <= 13);
-        if (tmp_major == variant_length) {
-            if (std::string_view(&tmp_ver[1], variant_length) != VARIANT_NAME) {
-                THROW_EXCEPTION(std::runtime_error, _("セーブデータのバリアントは変愚蛮怒以外です", "The variant of save data is other than Hengband!"));
-            }
-
-            system.savefile_key = tmp_ver[version_length - 1];
-            (void)fd_close(fd);
-        } else if (is_old_ver) {
-            system.savefile_key = tmp_ver[3];
-            (void)fd_close(fd);
-        } else {
-            (void)fd_close(fd);
-            THROW_EXCEPTION(std::runtime_error, _("異常なバージョンが検出されました！", "Invalid version is detected!"));
-        }
+    if ((10 <= tmp_major) && (tmp_major <= 13)) {
+        system.savefile_key = tmp_ver[3];
+        return {};
     }
 
-    if (err) {
-        msg_format("%s: %s", what, savefile_str.data());
+    return tl::unexpected(MSG_INVALID_VERSION);
+}
+
+/*!
+ * @brief セーブファイルの読み込み中に発生したエラーのメッセージを作る
+ * @param what エラーの内容
+ * @return エラーメッセージ
+ */
+static std::string make_reading_error_message(const std::string &what)
+{
+    const auto &system = AngbandSystem::get_instance();
+    constexpr auto fmt = _("エラー({})がバージョン {} 用セーブファイル読み込み中に発生。", "Error ({}) reading {} savefile.");
+    return fmt::format(fmt, what, system.build_version_expression(VersionExpression::WITH_EXTRA));
+}
+
+/*!
+ * @brief セーブデータ読み込みのメインルーチン /
+ * Attempt to Load a "savefile"
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @param new_game セーブデータの新規作成が必要か否か
+ * @return セーブデータが読み込めれば成功、読み込めなければ失敗の理由
+ * @details 失敗の理由は呼び出し元が表示する
+ */
+tl::expected<void, std::string> load_savedata(PlayerType *player_ptr, bool *new_game)
+{
+    AngbandWorld::get_instance().game_turn = 0;
+    player_ptr->is_dead = false;
+    if (savefile.empty()) {
+        return {};
+    }
+
+    const auto &savefile_str = savefile.string();
+#ifndef _WIN32
+    if (access(savefile_str.data(), 0) < 0) {
+        msg_print(_("セーブファイルがありません。", "Savefile does not exist."));
         msg_erase();
-        return false;
+        *new_game = true;
+        return {};
+    }
+#endif
+
+    if (const auto result = verify_savefile_header(); !result) {
+        return tl::unexpected(fmt::format("{}: {}", result.error(), savefile_str));
     }
 
-    if (!err) {
-        term_clear();
-        auto ret_rd_savefile = rd_savefile(player_ptr);
-        if (ret_rd_savefile != 0) {
-            err = true;
-        }
+    term_clear();
+    const auto read_result = rd_savefile(player_ptr);
+    if (!read_result) {
+        return tl::unexpected(make_reading_error_message(read_result.error()));
+    }
 
-        if (ret_rd_savefile < 0) {
-            what = _("セーブファイルを解析出来ません。", "Cannot parse savefile");
-        } else if (ret_rd_savefile > 0) {
-            return on_read_save_data_not_supported(player_ptr, new_game);
-        }
+    if (*read_result != 0) {
+        on_read_save_data_not_supported(player_ptr, new_game);
+        return {};
     }
 
     auto &world = AngbandWorld::get_instance();
-    if (!err) {
-        if (!world.game_turn) {
-            err = true;
-        }
-
-        if (err) {
-            what = _("セーブファイルが壊れています", "Broken savefile");
-        }
-    }
-
-    if (err) {
-        auto &system = AngbandSystem::get_instance();
-        constexpr auto fmt = _("エラー(%s)がバージョン %s 用セーブファイル読み込み中に発生。", "Error (%s) reading %s savefile.");
-        msg_format(fmt, what, system.build_version_expression(VersionExpression::WITH_EXTRA).data());
-        msg_erase();
-        return false;
+    if (!world.game_turn) {
+        return tl::unexpected(make_reading_error_message(_("セーブファイルが壊れています", "Broken savefile")));
     }
 
     if (!can_takeover_savefile(player_ptr)) {
-        return on_read_save_data_not_supported(player_ptr, new_game);
+        on_read_save_data_not_supported(player_ptr, new_game);
+        return {};
     }
 
     if (player_ptr->is_dead) {
-        return reset_save_data(player_ptr, new_game);
+        reset_save_data(player_ptr, new_game);
+        return {};
     }
 
     world.character_loaded = true;
@@ -472,5 +563,5 @@ bool load_savedata(PlayerType *player_ptr, bool *new_game)
     }
 
     counts_write(player_ptr, 1, play_time);
-    return true;
+    return {};
 }

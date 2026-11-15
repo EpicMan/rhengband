@@ -20,7 +20,6 @@
 #include "core/window-redrawer.h"
 #include "flavor/object-flavor.h"
 #include "game-option/cheat-types.h"
-#include "object-enchant/special-object-flags.h"
 #include "object-enchant/tr-types.h"
 #include "object-hook/hook-armor.h"
 #include "object-hook/hook-weapon.h"
@@ -30,9 +29,9 @@
 #include "perception/object-perception.h"
 #include "sv-definition/sv-weapon-types.h"
 #include "system/baseitem/baseitem-definition.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
 #include "wizard/artifact-bias-table.h"
@@ -200,7 +199,7 @@ static int decide_random_art_power(const bool a_cursed)
     return powers;
 }
 
-static void invest_powers(PlayerType *player_ptr, ItemEntity *o_ptr, int *powers, bool *has_pval, const bool a_cursed)
+static void invest_powers(ItemEntity *o_ptr, int *powers, bool *has_pval, const bool a_cursed)
 {
     const auto &world = AngbandWorld::get_instance();
     const auto max_type = o_ptr->is_weapon_ammo() ? 7 : 5;
@@ -233,7 +232,7 @@ static void invest_powers(PlayerType *player_ptr, ItemEntity *o_ptr, int *powers
 
             break;
         case 5:
-            random_misc(player_ptr, o_ptr);
+            random_misc(o_ptr);
             break;
         case 6:
         case 7:
@@ -390,7 +389,7 @@ static std::string name_unnatural_random_artifact(PlayerType *player_ptr, ItemEn
     constexpr auto prompt = _("このアーティファクトを何と名付けますか？", "What do you want to call the artifact? ");
     object_aware(player_ptr, *o_ptr);
     o_ptr->mark_as_known();
-    o_ptr->ident |= IDENT_FULL_KNOWN;
+    o_ptr->set_identification_flag(IdentificationFlag::FULL_KNOWN);
     o_ptr->randart_name.reset();
     (void)screen_object(player_ptr, *o_ptr, 0L);
 
@@ -415,16 +414,10 @@ static void generate_unnatural_random_artifact(
     PlayerType *player_ptr, ItemEntity *o_ptr, const bool a_scroll, const int power_level, const int max_powers, const int total_flags)
 {
     o_ptr->randart_name = name_unnatural_random_artifact(player_ptr, o_ptr, a_scroll, power_level);
-    msg_format_wizard(player_ptr, CHEAT_OBJECT,
-        _("パワー %d で 価値 %d のランダムアーティファクト生成 バイアスは「%s」", "Random artifact generated - Power:%d Value:%d Bias:%s."), max_powers,
-        total_flags, ARTIFACT_BIAS_NAMES.at(o_ptr->artifact_bias).data());
-    static constexpr auto flags = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::FLOOR_ITEMS,
-        SubWindowRedrawingFlag::FOUND_ITEMS,
-    };
-    RedrawingFlagsUpdater::get_instance().set_flags(flags);
+    msg_print_wizard(player_ptr, CHEAT_OBJECT, _("パワー {} で 価値 {} のランダムアーティファクト生成 バイアスは「{}」", "Random artifact generated - Power:{} Value:{} Bias:{}."), max_powers, total_flags, ARTIFACT_BIAS_NAMES.at(o_ptr->artifact_bias));
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_carried_item_lists_redrawing();
+    dur.request_floor_item_lists_redrawing();
 }
 
 /*!
@@ -448,7 +441,7 @@ bool become_random_artifact(PlayerType *player_ptr, ItemEntity *o_ptr, bool a_sc
     bool a_cursed = decide_random_art_cursed(a_scroll, o_ptr);
     int powers = decide_random_art_power(a_cursed);
     int max_powers = powers;
-    invest_powers(player_ptr, o_ptr, &powers, &has_pval, a_cursed);
+    invest_powers(o_ptr, &powers, &has_pval, a_cursed);
     if (has_pval) {
         strengthen_pval(o_ptr);
     }

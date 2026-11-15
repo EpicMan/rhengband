@@ -12,11 +12,11 @@
 #include "player-base/player-class.h"
 #include "player-info/mane-data-type.h"
 #include "spell-realm/spells-hex.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "timed-effect/timed-effects.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
@@ -26,10 +26,6 @@
 #include "monster/monster-description-types.h"
 #endif
 
-#define RF4_SPELL_SIZE 32
-#define RF5_SPELL_SIZE 32
-#define RF6_SPELL_SIZE 32
-
 static bool try_melee_spell(PlayerType *player_ptr, melee_spell_type *ms_ptr)
 {
     if (spell_is_inate(ms_ptr->thrown_spell) || (!ms_ptr->in_no_magic_dungeon && (!ms_ptr->m_ptr->get_remaining_stun() || one_in_(2)))) {
@@ -38,7 +34,7 @@ static bool try_melee_spell(PlayerType *player_ptr, melee_spell_type *ms_ptr)
 
     disturb(player_ptr, true, true);
     if (ms_ptr->see_m) {
-        msg_format(_("%s^は呪文を唱えようとしたが失敗した。", "%s^ tries to cast a spell, but fails."), ms_ptr->m_name.data());
+        msg_print(_("{}は呪文を唱えようとしたが失敗した。", "{} tries to cast a spell, but fails."), str_upcase_first(ms_ptr->m_name));
     }
 
     return true;
@@ -51,7 +47,7 @@ static bool disturb_melee_spell(PlayerType *player_ptr, melee_spell_type *ms_ptr
     }
 
     if (ms_ptr->see_m) {
-        msg_format(_("反魔法バリアが%s^の呪文をかき消した。", "Anti magic barrier cancels the spell which %s^ casts."), ms_ptr->m_name.data());
+        msg_print(_("反魔法バリアが{}の呪文をかき消した。", "Anti-magic barrier cancels the spell which {} casts."), ms_ptr->m_name);
     }
 
     return true;
@@ -63,7 +59,7 @@ static void process_special_melee_spell(PlayerType *player_ptr, melee_spell_type
     bool is_special_magic = ms_ptr->m_ptr->ml;
     is_special_magic &= ms_ptr->maneable;
     is_special_magic &= AngbandWorld::get_instance().timewalk_m_idx == 0;
-    is_special_magic &= !player_ptr->effects()->blindness().is_blind();
+    is_special_magic &= !player_ptr->effects()->blindness().is_active();
     is_special_magic &= pc.equals(PlayerClassType::IMITATOR);
     is_special_magic &= ms_ptr->thrown_spell != MonsterAbilityType::SPECIAL;
     if (!is_special_magic) {
@@ -78,7 +74,7 @@ static void process_special_melee_spell(PlayerType *player_ptr, melee_spell_type
 
     mane_data->mane_list.push_back({ ms_ptr->thrown_spell, ms_ptr->dam });
     mane_data->new_mane = true;
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::IMITATION);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::IMITATION);
 }
 
 static void process_rememberance(melee_spell_type *ms_ptr)
@@ -87,10 +83,10 @@ static void process_rememberance(melee_spell_type *ms_ptr)
         return;
     }
 
-    ms_ptr->r_ptr->r_ability_flags.set(ms_ptr->thrown_spell);
+    ms_ptr->monrace->r_ability_flags.set(ms_ptr->thrown_spell);
 
-    if (ms_ptr->r_ptr->r_cast_spell < MAX_UCHAR) {
-        ms_ptr->r_ptr->r_cast_spell++;
+    if (ms_ptr->monrace->r_cast_spell < MAX_UCHAR) {
+        ms_ptr->monrace->r_cast_spell++;
     }
 }
 
@@ -130,8 +126,8 @@ bool monst_spell_monst(PlayerType *player_ptr, MONSTER_IDX m_idx)
     ms_ptr->dam = res.dam;
     process_special_melee_spell(player_ptr, ms_ptr);
     process_rememberance(ms_ptr);
-    if (player_ptr->is_dead && (ms_ptr->r_ptr->r_deaths < MAX_SHORT) && !player_ptr->current_floor_ptr->inside_arena) {
-        ms_ptr->r_ptr->r_deaths++;
+    if (player_ptr->is_dead && (ms_ptr->monrace->r_deaths < MAX_SHORT) && !player_ptr->current_floor_ptr->inside_arena) {
+        ms_ptr->monrace->r_deaths++;
     }
 
     return true;

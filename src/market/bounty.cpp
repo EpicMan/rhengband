@@ -2,12 +2,11 @@
 #include "autopick/autopick.h"
 #include "avatar/avatar.h"
 #include "core/asking-player.h"
-#include "core/stuff-handler.h"
 #include "flavor/flavor-describer.h"
 #include "game-option/cheat-options.h"
 #include "inventory/inventory-object.h"
 #include "inventory/inventory-slot-types.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "market/bounty-prize-table.h"
 #include "market/building-util.h"
 #include "monster-floor/place-monster-types.h"
@@ -18,18 +17,20 @@
 #include "object/object-info.h"
 #include "perception/object-perception.h"
 #include "sv-definition/sv-other-types.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/services/dungeon-service.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 #include <algorithm>
+#include <fmt/format.h>
+#include <range/v3/view.hpp>
 
 /*!
  * @brief 賞金首の引き換え処理 / Get prize
@@ -39,9 +40,12 @@
 bool exchange_cash(PlayerType *player_ptr)
 {
     auto change = false;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    constexpr auto fmt_convert = _("%s を換金しますか？", "Convert %s into money? ");
-    constexpr auto fmt_reward = _("賞金 %d＄を手に入れた。", "You get %dgp.");
+    constexpr auto fmt_convert = _("{} を換金しますか？", "Convert {} into money? ");
+    const auto receive_reward = [player_ptr](int reward_money) {
+        player_ptr->au += reward_money;
+        DeferredUpdateRequests::get_instance().request_gold_redrawing();
+        msg_print(_("賞金 {}＄を手に入れた。", "You get {}gp."), reward_money);
+    };
     for (INVENTORY_IDX i = 0; i <= INVEN_SUB_HAND; i++) {
         const auto &item = *player_ptr->inventory[i];
         if (item.bi_key.tval() != ItemKindType::CAPTURE) {
@@ -54,19 +58,16 @@ bool exchange_cash(PlayerType *player_ptr)
 
         change = true;
         const auto item_name = describe_flavor(player_ptr, item, 0);
-        if (!input_check(format(fmt_convert, item_name.data()))) {
+        if (!input_check(fmt::format(fmt_convert, item_name))) {
             continue;
         }
 
-        const auto reward_money = 1000000 * item.number;
-        msg_format(fmt_reward, reward_money);
-        player_ptr->au += reward_money;
-        rfu.set_flag(MainWindowRedrawingFlag::GOLD);
+        receive_reward(1000000 * item.number);
         vary_item(player_ptr, i, -item.number);
     }
 
-    for (INVENTORY_IDX i = 0; i < INVEN_PACK; i++) {
-        const auto &item = *player_ptr->inventory[i];
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        const auto &item = *player_ptr->inventory[i_idx];
         if (!item.is_corpse()) {
             continue;
         }
@@ -77,19 +78,16 @@ bool exchange_cash(PlayerType *player_ptr)
 
         change = true;
         const auto item_name = describe_flavor(player_ptr, item, 0);
-        if (!input_check(format(fmt_convert, item_name.data()))) {
+        if (!input_check(fmt::format(fmt_convert, item_name))) {
             continue;
         }
 
-        const auto reward_money = 200000 * item.number;
-        msg_format(fmt_reward, reward_money);
-        player_ptr->au += reward_money;
-        rfu.set_flag(MainWindowRedrawingFlag::GOLD);
-        vary_item(player_ptr, i, -item.number);
+        receive_reward(200000 * item.number);
+        vary_item(player_ptr, i_idx, -item.number);
     }
 
-    for (INVENTORY_IDX i = 0; i < INVEN_PACK; i++) {
-        const auto &item = *player_ptr->inventory[i];
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        const auto &item = *player_ptr->inventory[i_idx];
         if (item.bi_key != BaseitemKey(ItemKindType::MONSTER_REMAINS, SV_SKELETON)) {
             continue;
         }
@@ -100,20 +98,17 @@ bool exchange_cash(PlayerType *player_ptr)
 
         change = true;
         const auto item_name = describe_flavor(player_ptr, item, 0);
-        if (!input_check(format(fmt_convert, item_name.data()))) {
+        if (!input_check(fmt::format(fmt_convert, item_name))) {
             continue;
         }
 
-        const auto reward_money = 100000 * item.number;
-        msg_format(fmt_reward, reward_money);
-        player_ptr->au += reward_money;
-        rfu.set_flag(MainWindowRedrawingFlag::GOLD);
-        vary_item(player_ptr, i, -item.number);
+        receive_reward(100000 * item.number);
+        vary_item(player_ptr, i_idx, -item.number);
     }
 
     auto &world = AngbandWorld::get_instance();
-    for (INVENTORY_IDX i = 0; i < INVEN_PACK; i++) {
-        const auto &item = *player_ptr->inventory[i];
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        const auto &item = *player_ptr->inventory[i_idx];
         const auto &monrace = world.get_today_bounty();
         if (!item.is_corpse() || (item.get_monrace().name != monrace.name)) {
             continue;
@@ -121,19 +116,16 @@ bool exchange_cash(PlayerType *player_ptr)
 
         change = true;
         const auto item_name = describe_flavor(player_ptr, item, 0);
-        if (!input_check(format(fmt_convert, item_name.data()))) {
+        if (!input_check(fmt::format(fmt_convert, item_name))) {
             continue;
         }
 
-        const auto reward_money = (monrace.level * 50 + 100) * item.number;
-        msg_format(fmt_reward, reward_money);
-        player_ptr->au += reward_money;
-        rfu.set_flag(MainWindowRedrawingFlag::GOLD);
-        vary_item(player_ptr, i, -item.number);
+        receive_reward((monrace.level * 50 + 100) * item.number);
+        vary_item(player_ptr, i_idx, -item.number);
     }
 
-    for (INVENTORY_IDX i = 0; i < INVEN_PACK; i++) {
-        const auto &item = *player_ptr->inventory[i];
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        const auto &item = *player_ptr->inventory[i_idx];
         const auto &monrace = world.get_today_bounty();
         if ((item.bi_key != BaseitemKey(ItemKindType::MONSTER_REMAINS, SV_SKELETON)) || (item.get_monrace().name != monrace.name)) {
             continue;
@@ -141,15 +133,12 @@ bool exchange_cash(PlayerType *player_ptr)
 
         change = true;
         const auto item_name = describe_flavor(player_ptr, item, 0);
-        if (!input_check(format(fmt_convert, item_name.data()))) {
+        if (!input_check(fmt::format(fmt_convert, item_name))) {
             continue;
         }
 
-        const auto reward_money = (monrace.level * 30 + 60) * item.number;
-        msg_format(fmt_reward, reward_money);
-        player_ptr->au += reward_money;
-        rfu.set_flag(MainWindowRedrawingFlag::GOLD);
-        vary_item(player_ptr, i, -item.number);
+        receive_reward((monrace.level * 30 + 60) * item.number);
+        vary_item(player_ptr, i_idx, -item.number);
     }
 
     for (auto &[monrace_id, is_achieved] : world.bounties) {
@@ -157,26 +146,26 @@ bool exchange_cash(PlayerType *player_ptr)
             continue;
         }
 
-        for (INVENTORY_IDX i = INVEN_PACK - 1; i >= 0; i--) {
-            auto &item = *player_ptr->inventory[i];
+        for (const auto i_idx : INVEN_PACK_SLOTS | ranges::views::reverse) {
+            auto &item = *player_ptr->inventory[i_idx];
             if ((item.bi_key.tval() != ItemKindType::MONSTER_REMAINS) || (item.get_monrace().idx != monrace_id)) {
                 continue;
             }
 
             INVENTORY_IDX inventory_new;
             const auto item_name = describe_flavor(player_ptr, item, 0);
-            if (!input_check(format(_("%sを渡しますか？", "Hand %s over? "), item_name.data()))) {
+            if (!input_check(fmt::format(_("{}を渡しますか？", "Hand {} over? "), item_name))) {
                 continue;
             }
 
-            vary_item(player_ptr, i, -item.number);
+            vary_item(player_ptr, i_idx, -item.number);
             chg_virtue(player_ptr, Virtue::JUSTICE, 5);
             is_achieved = true;
 
             const auto num = static_cast<int>(std::count_if(std::begin(world.bounties), std::end(world.bounties),
                 [](const auto &bounty) { return bounty.is_achieved; }));
 
-            msg_print(_(format("これで合計 %d ポイント獲得しました。", num), format("You earned %d point%s total.", num, (num > 1 ? "s" : ""))));
+            msg_print(_("これで合計 {} ポイント獲得しました。", "You earned {} point{} total."), num, (num > 1 ? "s" : ""));
 
             ItemEntity prize_item(prize_list[num - 1]);
             ItemMagicApplier(player_ptr, &prize_item, player_ptr->current_floor_ptr->object_level, AM_NO_FIXED_ART).execute();
@@ -190,10 +179,9 @@ bool exchange_cash(PlayerType *player_ptr)
              */
             inventory_new = store_item_to_inventory(player_ptr, &prize_item);
             const auto got_item_name = describe_flavor(player_ptr, prize_item, 0);
-            msg_format(_("%s(%c)を貰った。", "You get %s (%c). "), got_item_name.data(), index_to_label(inventory_new));
+            msg_print(_("{}({:c})を貰った。", "You get {} ({:c}). "), got_item_name, index_to_label(inventory_new));
 
             autopick_alter_item(player_ptr, inventory_new, false);
-            handle_stuff(player_ptr);
             change = true;
         }
     }
@@ -217,9 +205,9 @@ void today_target()
     const auto &monrace = world.get_today_bounty();
     clear_bldg(4, 18);
     c_put_str(TERM_YELLOW, _("本日の賞金首", "Wanted monster that changes from day to day"), 5, 10);
-    c_put_str(TERM_YELLOW, format(_("ターゲット： %s", "target: %s"), monrace.name.data()), 6, 10);
-    prt(format(_("死体 ---- $%d", "corpse   ---- $%d"), monrace.level * 50 + 100), 8, 10);
-    prt(format(_("骨   ---- $%d", "skeleton ---- $%d"), monrace.level * 30 + 60), 9, 10);
+    c_put_str(TERM_YELLOW, fmt::format(_("ターゲット： {}", "target: {}"), monrace.name), 6, 10);
+    prt(fmt::format(_("死体 ---- ${}", "corpse   ---- ${}"), monrace.level * 50 + 100), 8, 10);
+    prt(fmt::format(_("骨   ---- ${}", "skeleton ---- ${}"), monrace.level * 30 + 60), 9, 10);
     world.knows_daily_bounty = true;
 }
 
@@ -253,11 +241,12 @@ void show_bounty(void)
         const auto &monrace = monraces.get_monrace(monrace_id);
         const auto color = is_achieved ? TERM_RED : TERM_WHITE;
         const auto done_mark = is_achieved ? _("(済)", "(done)") : "";
-        c_prt(color, format("%s %s", monrace.name.data(), done_mark), y + 7, 10);
+        c_prt(color, fmt::format("{} {}", monrace.name, done_mark), y + 7, 10);
         y = (y + 1) % 10;
         if (!y && (i < size_bounties - 1)) {
-            prt(_("何かキーを押してください", "Hit any key."), 0, 0);
-            (void)inkey();
+            constexpr auto prompt = _("何かキーを押してください", "Hit any key.");
+            prt(prompt, 0, 0);
+            (void)input_key_with_context(InputKind::ANY_KEY, prompt);
             prt("", 0, 0);
             clear_bldg(7, 18);
         }
@@ -277,7 +266,7 @@ void determine_daily_bounty(PlayerType *player_ptr)
         world.today_mon = get_mon_num(player_ptr, std::min(max_dungeon_level / 2, 40), max_dungeon_level, PM_ARENA);
         const auto &monrace = world.get_today_bounty();
         if (cheat_hear) {
-            msg_format(_("日替わり候補: %s ", "Today's candidate: %s "), monrace.name.data());
+            msg_print(_("日替わり候補: {} ", "Today's candidate: {} "), monrace.name);
         }
 
         if (monrace.kind_flags.has(MonsterKindType::UNIQUE)) {

@@ -1,7 +1,9 @@
 #include "cmd-visual/cmd-map.h"
 #include "autopick/autopick-methods-table.h"
 #include "autopick/autopick-util.h"
-#include "io/input-key-acceptor.h"
+#include "core/asking-player.h"
+#include "io/input-context.h"
+#include "system/deferred-update-requests.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
 #include "view/display-map.h"
@@ -20,7 +22,7 @@ void do_cmd_view_map(PlayerType *player_ptr)
     prt(_("お待ち下さい...", "Please wait..."), 0, 0);
     term_fresh();
     term_clear();
-    display_autopick = 0;
+    display_autopick.clear();
 
     int cy, cx;
     display_map(player_ptr, &cy, &cx);
@@ -30,43 +32,47 @@ void do_cmd_view_map(PlayerType *player_ptr)
         const auto center_x = (wid - std::string_view(msg).length()) / 2;
         put_str(msg, hgt - 1, center_x);
         move_cursor(cy, cx);
-        inkey(true);
+        (void)input_key_with_context(InputKind::ANY_KEY, msg, true);
         screen_load();
         return;
     }
 
-    display_autopick = ITEM_DISPLAY;
+    display_autopick.set(AutopickMethod::ITEM_DISPLAY);
+    constexpr auto prompt = _("何かキーを押してください('M':拾う 'N':放置 'D':M+N 'K':壊すアイテムを表示)",
+        " Hit M, N(for ~), K(for !), or D(same as M+N) to display auto-picker items.");
     while (true) {
         const auto &[wid, hgt] = term_get_size();
         int row_message = hgt - 1;
-        put_str(_("何かキーを押してください('M':拾う 'N':放置 'D':M+N 'K':壊すアイテムを表示)",
-                    " Hit M, N(for ~), K(for !), or D(same as M+N) to display auto-picker items."),
-            row_message, 1);
+        put_str(prompt, row_message, 1);
         move_cursor(cy, cx);
-        int i = inkey(true);
-        byte flag;
+        const auto i = input_key_with_context(InputKind::COMMAND_CHAR, prompt, true);
+        EnumClassFlagGroup<AutopickMethod> flags;
         if ('M' == i) {
-            flag = (DO_AUTOPICK | DO_QUERY_AUTOPICK);
+            flags.set({ AutopickMethod::AUTOPICK, AutopickMethod::QUERY_AUTOPICK });
         } else if ('N' == i) {
-            flag = DONT_AUTOPICK;
+            flags.set(AutopickMethod::NOT_AUTOPICK);
         } else if ('K' == i) {
-            flag = DO_AUTODESTROY;
+            flags.set(AutopickMethod::AUTODESTROY);
         } else if ('D' == i) {
-            flag = (DO_AUTOPICK | DO_QUERY_AUTOPICK | DONT_AUTOPICK);
+            flags.set({ AutopickMethod::AUTOPICK, AutopickMethod::QUERY_AUTOPICK, AutopickMethod::NOT_AUTOPICK });
         } else {
             break;
         }
 
         term_fresh();
-        if (~display_autopick & flag) {
-            display_autopick |= flag;
+        if (display_autopick.has_all_of(flags)) {
+            display_autopick.reset(flags);
         } else {
-            display_autopick &= ~flag;
+            display_autopick.set(flags);
         }
 
         display_map(player_ptr, &cy, &cx);
     }
 
-    display_autopick = 0;
+    display_autopick.clear();
+
+    // 表示中に自分の周囲のサブウィンドウが描き直されていたら、自動拾いの対象だけを強調した表示のまま残るので描き直す。
+    // ダンジョン全体図は、表示中に求め直した結果を使わず全グリッドを求め直すので、変わったものとして描き直される
+    DeferredUpdateRequests::get_instance().set_flag(SubWindowRedrawingFlag::DUNGEON);
     screen_load();
 }

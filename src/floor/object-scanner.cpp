@@ -7,11 +7,12 @@
 #include "object/item-tester-hooker.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
 #include <array>
+#include <fmt/format.h>
 
 /*!
  * @brief 床に落ちているオブジェクトのインデックス群を返す
@@ -85,10 +86,10 @@ static std::string prepare_label_string_floor(const FloorType &floor, const std:
 COMMAND_CODE show_floor_items(PlayerType *player_ptr, int target_item, POSITION y, POSITION x, TERM_LEN *min_width, const ItemTester &item_tester)
 {
     const Pos2D pos(y, x);
-    constexpr auto max_items = 23; //!< @todo 1マスに落ちているアイテムの最大数. ヘッダに移したい.
+    constexpr size_t max_items = 23; //!< @todo 1マスに落ちているアイテムの最大数. ヘッダに移したい.
     COMMAND_CODE m;
     int j, l;
-    COMMAND_CODE out_index[max_items]{};
+    short out_index[max_items]{};
     TERM_COLOR out_color[max_items]{};
     std::array<std::string, max_items> descriptions{};
     COMMAND_CODE target_item_label = 0;
@@ -101,7 +102,7 @@ COMMAND_CODE show_floor_items(PlayerType *player_ptr, int target_item, POSITION 
     for (size_t i = 0; (i < floor_item_index.size()) && (i < max_items); i++) {
         const auto &item = *floor.o_list[floor_item_index[i]];
         const auto item_name = describe_flavor(player_ptr, item, 0);
-        out_index[k] = i;
+        out_index[k] = static_cast<short>(i);
         const auto tval = item.bi_key.tval();
         out_color[k] = tval_to_attr[enum2i(tval) & 0x7F];
         descriptions[k] = item_name;
@@ -148,7 +149,7 @@ COMMAND_CODE show_floor_items(PlayerType *player_ptr, int target_item, POSITION 
         c_put_str(out_color[j], descriptions[j], j + 1, col + 3);
         if (show_weights && (item.bi_key.tval() != ItemKindType::GOLD)) {
             int wgt = item.weight * item.number;
-            const auto weight = format(_("%3d.%1d kg", "%3d.%1d lb"), _(lb_to_kg_integer(wgt), wgt / 10), _(lb_to_kg_fraction(wgt), wgt % 10));
+            const auto weight = fmt::format(_("{:3}.{} kg", "{:3}.{} lb"), _(lb_to_kg_integer(wgt), wgt / 10), _(lb_to_kg_fraction(wgt), wgt % 10));
             prt(weight, j + 1, wid - 9);
         }
     }

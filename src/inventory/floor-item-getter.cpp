@@ -16,6 +16,7 @@
 #include "inventory/inventory-util.h"
 #include "inventory/item-selection-util.h"
 #include "io/command-repeater.h"
+#include "io/input-context.h"
 #include "io/input-key-acceptor.h"
 #include "io/input-key-requester.h"
 #include "main/sound-of-music.h"
@@ -23,14 +24,13 @@
 #include "object/item-use-flags.h"
 #include "object/object-info.h"
 #include "player/player-status-flags.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
-#include "term/z-form.h"
 #include "util/int-char-converter.h"
 #include "util/string-processor.h"
 #include "view/display-inventory.h"
@@ -114,7 +114,8 @@ static std::pair<tl::optional<short>, char> get_floor_item_tag_inventory(PlayerT
  */
 static std::pair<tl::optional<short>, char> check_floor_item_tag_inventory(PlayerType *player_ptr, FloorItemSelection &fis, short i_idx, char prev_tag, const ItemTester &item_tester)
 {
-    if ((!fis.inven || (i_idx < 0) || (i_idx >= INVEN_PACK)) && (!fis.equip || (i_idx < INVEN_MAIN_HAND) || (i_idx >= INVEN_TOTAL))) {
+    const auto slot = i2enum<inventory_slot_type>(i_idx);
+    if ((!fis.inven || !INVEN_PACK_SLOTS.contains(slot)) && (!fis.equip || !INVEN_WIELDING_SLOTS.contains(slot))) {
         return { tl::nullopt, prev_tag };
     }
 
@@ -175,8 +176,8 @@ static void test_inventory_floor(PlayerType *player_ptr, FloorItemSelection *fis
         return;
     }
 
-    for (int i = 0; i < INVEN_PACK; i++) {
-        if (item_tester.okay(player_ptr->inventory[i].get()) || (fis_ptr->mode & USE_FULL)) {
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        if (item_tester.okay(player_ptr->inventory[i_idx].get()) || (fis_ptr->mode & USE_FULL)) {
             fis_ptr->max_inven++;
         }
     }
@@ -198,12 +199,40 @@ static void test_equipment_floor(PlayerType *player_ptr, FloorItemSelection *fis
         return;
     }
 
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-        if (player_ptr->select_ring_slot ? is_ring_slot(i)
-                                         : item_tester.okay(player_ptr->inventory[i].get()) || (fis_ptr->mode & USE_FULL)) {
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        if (player_ptr->select_ring_slot ? is_ring_slot(i_idx)
+                                         : item_tester.okay(player_ptr->inventory[i_idx].get()) || (fis_ptr->mode & USE_FULL)) {
             fis_ptr->max_equip++;
         }
     }
+}
+
+/*!
+ * @brief アイテムの選択の入力待ちの文脈を作る
+ * @param fis アイテムの選択の状態 (選べる区分・ラベルの範囲など)
+ * @param pmt 選択目的のメッセージ
+ * @return 入力待ちの文脈
+ */
+static InputContext make_item_input_context(const FloorItemSelection &fis, std::string_view pmt)
+{
+    auto area = ItemSelectionArea::INVENTORY;
+    if (command_wrk == USE_EQUIP) {
+        area = ItemSelectionArea::EQUIPMENT;
+    } else if (command_wrk == USE_FLOOR) {
+        area = ItemSelectionArea::FLOOR;
+    }
+
+    const ItemInputDetails details{
+        .area = area,
+        .inventory = fis.allow_inven,
+        .equipment = fis.allow_equip,
+        .floor = fis.allow_floor,
+        .first_label = fis.n1,
+        .last_label = fis.n2,
+        .force = fis.force,
+        .menu = use_menu,
+    };
+    return { InputKind::ITEM, std::string(pmt), details };
 }
 
 /*!
@@ -312,11 +341,7 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
         screen_save();
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-    };
+    auto &dur = DeferredUpdateRequests::get_instance();
     while (!fis.done) {
         int ni = 0;
         int ne = 0;
@@ -339,8 +364,8 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
             fis.toggle = !fis.toggle;
         }
 
-        rfu.set_flags(flags);
-        handle_stuff(player_ptr);
+        dur.request_carried_item_lists_redrawing();
+        window_stuff(player_ptr);
         COMMAND_CODE get_item_label = 0;
         if (command_wrk == USE_INVEN) {
             fis.n1 = I2A(fis.i1);
@@ -458,7 +483,11 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
 
         ss << " ESC";
         prt(fmt::format("({}) {}", ss.str(), pmt), 0, 0);
-        fis.which = inkey();
+        {
+            const InputContextScope input_context(make_item_input_context(fis, pmt));
+            fis.which = inkey();
+        }
+
         if (use_menu) {
             int max_line = 1;
             if (command_wrk == USE_INVEN) {
@@ -663,7 +692,7 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
                 break;
             }
 
-            if (grid.o_idx_list.size() < 2) {
+            if (fis.floor_item_index.size() < 2) {
                 break;
             }
 
@@ -672,7 +701,7 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
                 grid.o_idx_list.rotate(*player_ptr->current_floor_ptr);
             }
 
-            rfu.set_flag(SubWindowRedrawingFlag::FLOOR_ITEMS);
+            dur.set_flag(SubWindowRedrawingFlag::FLOOR_ITEMS);
             window_stuff(player_ptr);
             const auto &floor = *player_ptr->current_floor_ptr;
             fis.floor_item_index = scan_floor_items(floor, player_ptr->get_position(), { ScanFloorMode::ITEM_TESTER, ScanFloorMode::ONLY_MARKED }, item_tester);
@@ -754,13 +783,13 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
         case '8':
         case '9': {
             if (command_wrk != USE_FLOOR) {
-                const auto i_idx = get_tag(player_ptr, fis.which, command_wrk, item_tester);
-                if (!i_idx) {
+                const auto tag_opt = get_tag(player_ptr, fis.which, command_wrk, item_tester);
+                if (!tag_opt) {
                     bell();
                     break;
                 }
 
-                fis.k = *i_idx;
+                fis.k = *tag_opt;
                 if ((fis.k < INVEN_MAIN_HAND) ? !fis.inven : !fis.equip) {
                     bell();
                     break;
@@ -804,11 +833,11 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
             bool tag_not_found = false;
 
             if (command_wrk != USE_FLOOR) {
-                const auto i_idx = get_tag(player_ptr, fis.which, command_wrk, item_tester);
-                if (!i_idx) {
+                const auto tag_opt = get_tag(player_ptr, fis.which, command_wrk, item_tester);
+                if (!tag_opt) {
                     tag_not_found = true;
                 } else {
-                    fis.k = *i_idx;
+                    fis.k = *tag_opt;
                     if ((fis.k < INVEN_MAIN_HAND) ? !fis.inven : !fis.equip) {
                         tag_not_found = true;
                     }
@@ -847,14 +876,15 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
                         fis.k = label_to_equipment(player_ptr, which);
                     }
                 } else if (command_wrk == USE_FLOOR) {
+                    const auto floor_item_index_size = static_cast<short>(fis.floor_item_index.size());
                     if (which == '(') {
                         fis.k = 0;
                     } else if (which == ')') {
-                        fis.k = fis.floor_item_index.size() - 1;
+                        fis.k = floor_item_index_size - 1;
                     } else {
                         fis.k = islower(which) ? A2I(which) : -1;
                     }
-                    if (fis.k < 0 || fis.k >= static_cast<short>(fis.floor_item_index.size()) || fis.k >= 23) {
+                    if (fis.k < 0 || fis.k >= floor_item_index_size || fis.k >= 23) {
                         bell();
                         break;
                     }
@@ -896,8 +926,8 @@ tl::optional<short> get_item_floor(PlayerType *player_ptr, std::string_view pmt,
         toggle_inventory_equipment();
     }
 
-    rfu.set_flags(flags);
-    handle_stuff(player_ptr);
+    dur.request_carried_item_lists_redrawing();
+    window_stuff(player_ptr);
     prt("", 0, 0);
     if (fis.oops && !str.empty()) {
         msg_print(str);

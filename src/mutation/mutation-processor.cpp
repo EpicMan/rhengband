@@ -39,14 +39,14 @@
 #include "store/store-util.h"
 #include "store/store.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/target-checker.h"
 #include "target/target-getter.h"
 #include "target/target-setter.h"
@@ -95,7 +95,7 @@ void process_world_aux_mutation(PlayerType *player_ptr)
     if (player_ptr->muta.has(PlayerMutationType::ALCOHOL) && (randint1(6400) == 321)) {
         if (!has_resist_conf(player_ptr) && !has_resist_chaos(player_ptr)) {
             disturb(player_ptr, false, true);
-            RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::EXTRA);
+            DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::EXTRA);
             msg_print(_("いひきがもーろーとひてきたきがふる...ヒック！", "You feel a SSSCHtupor cOmINg over yOu... *HIC*!"));
         }
 
@@ -127,7 +127,7 @@ void process_world_aux_mutation(PlayerType *player_ptr)
     if (player_ptr->muta.has(PlayerMutationType::HALLU) && (randint1(6400) == 42)) {
         if (!has_resist_chaos(player_ptr)) {
             disturb(player_ptr, false, true);
-            RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::EXTRA);
+            DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::EXTRA);
             (void)bss.mod_hallucination(randint0(50) + 20);
         }
     }
@@ -170,14 +170,14 @@ void process_world_aux_mutation(PlayerType *player_ptr)
         disturb(player_ptr, false, true);
         if (one_in_(2)) {
             msg_print(_("精力的でなくなった気がする。", "You feel less energetic."));
-            if (player_ptr->effects()->acceleration().is_fast()) {
+            if (player_ptr->effects()->acceleration().is_active()) {
                 set_acceleration(player_ptr, 0, true);
             } else {
                 (void)bss.set_deceleration(randint1(30) + 10, false);
             }
         } else {
             msg_print(_("精力的になった気がする。", "You feel more energetic."));
-            if (player_ptr->effects()->deceleration().is_slow()) {
+            if (player_ptr->effects()->deceleration().is_active()) {
                 (void)bss.set_deceleration(0, true);
             } else {
                 set_acceleration(player_ptr, randint1(30) + 10, false);
@@ -192,14 +192,14 @@ void process_world_aux_mutation(PlayerType *player_ptr)
         msg_print(_("突然ほとんど孤独になった気がする。", "You suddenly feel almost lonely."));
 
         banish_monsters(player_ptr, 100);
-        if (!player_ptr->current_floor_ptr->is_underground() && player_ptr->town_num) {
+        if (!player_ptr->current_floor_ptr->is_underground() && AngbandWorld::get_instance().is_in_any_town()) {
             StoreSaleType sst;
             do {
                 sst = randnum0<StoreSaleType>(MAX_STORES);
             } while ((sst == StoreSaleType::HOME) || (sst == StoreSaleType::MUSEUM));
 
             msg_print(_("店の主人が丘に向かって走っている！", "You see one of the shopkeepers running for the hills!"));
-            store_shuffle(player_ptr, sst);
+            store_shuffle(AngbandWorld::get_instance().get_town_index(), sst);
         }
         msg_erase();
     }
@@ -319,7 +319,9 @@ void process_world_aux_mutation(PlayerType *player_ptr)
             disturb(player_ptr, false, true);
             msg_print(_("自分が衰弱していくのが分かる！", "You can feel yourself wasting away!"));
             msg_erase();
-            (void)dec_stat(player_ptr, which_stat, randint1(6) + 6, one_in_(3));
+            const auto amount = randint1(6) + 6;
+            const auto is_permanent = one_in_(3);
+            (void)dec_stat(player_ptr, which_stat, amount, is_permanent);
         }
     }
 
@@ -403,10 +405,6 @@ void process_world_aux_mutation(PlayerType *player_ptr)
         (void)set_invuln(player_ptr, randint1(8) + 8, false);
     }
 
-    static constexpr auto flags = {
-        MainWindowRedrawingFlag::HP,
-        MainWindowRedrawingFlag::MP,
-    };
     if (player_ptr->muta.has(PlayerMutationType::SP_TO_HP) && one_in_(2000)) {
         MANA_POINT wounds = (MANA_POINT)(player_ptr->mhp - player_ptr->chp);
         if (wounds > 0) {
@@ -417,7 +415,7 @@ void process_world_aux_mutation(PlayerType *player_ptr)
 
             hp_player(player_ptr, healing);
             player_ptr->csp -= healing;
-            RedrawingFlagsUpdater::get_instance().set_flags(flags);
+            DeferredUpdateRequests::get_instance().request_hp_mp_redrawing();
         }
     }
 
@@ -430,7 +428,7 @@ void process_world_aux_mutation(PlayerType *player_ptr)
             }
 
             player_ptr->csp += healing;
-            RedrawingFlagsUpdater::get_instance().set_flags(flags);
+            DeferredUpdateRequests::get_instance().request_hp_mp_redrawing();
             take_hit(player_ptr, DAMAGE_LOSELIFE, healing, _("頭に昇った血", "blood rushing to the head"));
         }
     }

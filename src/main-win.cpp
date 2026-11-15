@@ -1,86 +1,71 @@
 /*!
  * @file main-win.cpp
- * @brief Windows版固有実装(メインエントリポイント含む)
- * @date 2018/03/16
+ * @brief Windows版の固有実装。メインエントリポイントを含む。
+ * @date 2026/10/02
  * @author Hengband Team
+ *
  * @details
  *
- * <h3>概要</h3>
- * Windows98かその前後の頃を起点としたAPI実装。
- * 各種のゲームエンジンは無論、
- * DirectXといった昨今描画に標準的となったライブラリも用いていない。
- * タイルの描画処理などについては、現在動作の詳細を検証中。
+ * 【全体の概要】
+ * このファイルは、変愚蛮怒およびそのフォークを Windows 環境で動作させるための Windows 固有部分を実装する。
+ * 32ビット Windows API を基盤とする。
+ * ゲームエンジンや DirectX のような、現在では一般的となっている描画ライブラリは使用していない。
+ * タイルの描画処理など、一部の実装については現在も動作の詳細を調査中である。
  *
- * <h3>フォーク元の概要</h3>
- * <p>
+ * 【ライセンス条項】
+ * Moria/Angband使用許諾
  * Copyright (c) 1997 Ben Harrison, Skirmantas Kligys, and others
  *
  * This software may be copied and distributed for educational, research,
  * and not for profit purposes provided that this copyright and statement
- * are included in all such copies.
- * </p>
- * <p>
- * This file helps Angband work with Windows computers.
+ * are included in all such copies.  Other copyrights may also apply.
  *
- * To use this file, use an appropriate "Makefile" or "Project File",
- * make sure that "WINDOWS" and/or "WIN32" are defined somewhere, and
- * make sure to obtain various extra files as described below.
+ * このソフトウェアは教育や研究のためならば、そして利益を目的としないのならば複写および配布してよい。
+ * ただし、配布する全てのコピーにこの著作権表記と使用許諾文章が記載されていなければならない。
+ * この表記に加えて別の著作権も適用する事ができる。
  *
- * The official compilation uses the CodeWarrior Pro compiler, which
- * includes a special project file and precompilable header file.
- * </p>
+ * 【コンパイル】
+ * このファイルで変愚蛮怒およびそのフォークをコンパイルするには、MSVCを利用する必要がある。
+ * GCC・Clang・Borland 系コンパイラなどでは、Windows API の一部が正しく解釈されない可能性がある (未検証)。
+ * 公式のコンパイル環境は、本記事執筆時点で GitHub Runners の仮想環境 Windows Server 2025 / Visual Studio 2026 (18.10) である。
+ * この環境には専用のプロジェクトファイル (Hengband.sln) と、プリコンパイル済ヘッダ (stdafx.h) を含む。
+ * GitHub Runners は時間と共にバージョンアップされ、また仮想環境定義 (GitHub Actions) もソースコードとは別に保守される。
+ * このため、最新のビルド環境は最新の Pull Request マージ記録を確認すること。
+ * GitHub リポジトリ：https://github.com/hengband/hengband/
  *
- * <p>
- * The "lib/user/pref-win.prf" file contains keymaps, macro definitions,
- * and/or color redefinitions.
- * </p>
+ * 【設定ファイル】
+ * "lib/pref/pref-win.prf" には、マクロトリガー (特殊キー) の表記定義 (T:)、マクロの動作 (A:)、そのマクロを呼び出すキー入力パターン (P:) が含まれる。
+ * "lib/pref/font-win.prf" には、wall.bmp を使用する際の色と文字の対応関係が定義されている。
+ * "lib/pref/graf-win.prf" には、"lib/xtra/graf" で定義されるタイルグラフィックを使用する際の属性値と文字の対応関係が定義されている。
  *
- * <p>
- * The "lib/user/font-win.prf" contains attr/char mappings for wall.bmp.
- * </p>
+ * 【既知の実装上の注意】
+ * term_xtra_win_clear() は、現在のウィンドウを低レベルで直接クリアし、必要に応じて境界線なども再描画するようにした方が、処理効率を改善できる可能性がある。
+ * ウィンドウの「タイルサイズ」を選択する方法についても、より単純な実装が必要と考えられる。
  *
- * <p>
- * The "lib/user/graf-win.prf" contains attr/char mappings for use with the
- * special bitmap files in "lib/xtra/graf", which are activated by a menu
- * item.
- * </p>
+ * 各種の警告メッセージは、メインウィンドウ data[0].w が存在することを前提としている。
+ * 初期化後の plog / quit は MessageBoxW() のオーナーに data[0].w を渡している。
+ * ウィンドウ生成前は、plog_aux / quit_aux がオーナー NULL の MessageBoxW() を使う。
+ * 既に起動している場合のエラーも MessageBoxW(NULL, ...) である。
+ * NULL は所有ウィンドウを指定しないことを意味し、すべてのウィンドウより前面に表示されることは保証しない。
+ * data[0].w の存在確認と、警告を前面に出すこととは、別の条件として扱う必要がある。
  *
- * <p>
- * Compiling this file, and using the resulting executable, requires
- * several extra files not distributed with the standard Angband code.
- * All of these extra files can be found in the "ext-win" archive.
- * </p>
+ * メインウィンドウをユーザーが非表示にできるようにしてはいけない。
+ * メインウィンドウを隠すと、メニューバーも表示されなくなるためである。
  *
- * <p>
- * The "term_xtra_win_clear()" function should probably do a low-level
- * clear of the current window, and redraw the borders and other things,
- * if only for efficiency.
- * </p>
- *
- * <p>
- * A simpler method is needed for selecting the "tile size" for windows.
- * </p>
- *
- * <p>
- * The various "warning" messages assume the existance of the "screen.w"
- * window, I think, and only a few calls actually check for its existance,
- * this may be okay since "nullptr" means "on top of all windows". (?)  The
- * user must never be allowed to "hide" the main window, or the "menubar"
- * will disappear.
- * </p>
- *
- * <p>
- * Initial framework (and most code) by Ben Harrison (benh@phial.com).
- *
- * Original code by Skirmantas Kligys (kligys@scf.usc.edu).
- *
- * Additional code by Ross E Becker (beckerr@cis.ohio-state.edu),
- * and Chris R. Martin (crm7479@tam2000.tamu.edu).
- * </p>
+ * 【フォーク元の開発者】
+ * 原著作者 (Moria; written in VMS Pascal)：(The late) Robert Alan Koeneke, 1983
+ * Unix版への移植 (UMoria; written in C)：James E. Wilson, 1987
+ * Angband：Alex Cutler, Andy Astrand, 1990
+ * PC Angband：Charles Teague, 1993
+ * Zangband：Topi Ylinen, Robert Ruehlmann, Paul Sexton, Heino Vander Sanden, and others, 1994
+ * Angband Windows版：
+ * Ben Harrison (benh@phial.com),
+ * Skirmantas Kligys (kligys@scf.usc.edu),
+ * Ross E. Becker (beckerr@cis.ohio-state.edu),
+ * Chris R. Martin (crm7479@tam2000.tamu.edu), and others, 1997
  */
 
-#ifdef WINDOWS
-
+#include "bot/bot-control-server.h"
 #include "cmd-io/cmd-save.h"
 #include "cmd-visual/cmd-draw.h"
 #include "core/game-play.h"
@@ -92,11 +77,14 @@
 #include "core/visuals-reseter.h"
 #include "game-option/runtime-arguments.h"
 #include "game-option/special-options.h"
+#include "headless-term/headless-term.h"
 #include "io/files-util.h"
 #include "io/input-key-acceptor.h"
 #include "io/record-play-movie.h"
+#include "io/screen-util.h"
 #include "io/signal-handlers.h"
 #include "io/write-diary.h"
+#include "locale/character-encoding.h"
 #include "main-win/commandline-win.h"
 #include "main-win/graphics-win.h"
 #include "main-win/main-win-bg.h"
@@ -110,33 +98,48 @@
 #include "main/angband-initializer.h"
 #include "main/sound-of-music.h"
 #include "save/save.h"
+#include "system/angband-version.h"
 #include "system/angband.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
 #include "term/term-color-types.h"
+#include "term/tile-layout.h"
+#include "term/z-util.h"
 #include "util/angband-files.h"
+#include "util/bit-flags-calculator.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "view/display-scores.h"
+#include "view/map-tile-layout.h"
+#include "view/original-item-catalog.h"
+#include "view/original-monster-catalog.h"
+#include "view/original-player-tiles.h"
+#include "view/original-symbol-tiles.h"
+#include "view/original-tiles.h"
 #include "wizard/spoiler-util.h"
 #include "wizard/wizard-spoiler.h"
 #include "world/world.h"
 #include <algorithm>
 #include <commdlg.h>
+#include <cstdio>
 #include <cstdlib>
 #include <direct.h>
+#include <fmt/format.h>
 #include <locale>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#pragma comment(lib, "Msimg32.lib")
+
 /*
  * Window names
  */
-LPCWSTR win_term_name[] = { L"Rhengband", L"Term-1", L"Term-2", L"Term-3", L"Term-4", L"Term-5", L"Term-6", L"Term-7" };
+LPCWSTR win_term_name[] = { L"Hengband", L"Term-1", L"Term-2", L"Term-3", L"Term-4", L"Term-5", L"Term-6", L"Term-7" };
 
 static term_data data[MAX_TERM_DATA]; //!< An array of term_data's
 static bool is_main_term(term_data *td)
@@ -257,7 +260,7 @@ static void validate_file(const std::filesystem::path &s)
     }
 
     const auto &file = s.string();
-    quit_fmt(_("必要なファイル[%s]が見あたりません。", "Cannot find required file:\n%s"), file.data());
+    quit(fmt::format(_("必要なファイル[{}]が見あたりません。", "Cannot find required file:\n{}"), file));
 }
 
 /*!
@@ -271,9 +274,9 @@ static void validate_dir(const std::filesystem::path &s, bool vital)
 
     const auto &dir = s.string();
     if (vital) {
-        quit_fmt(_("必要なディレクトリ[%s]が見あたりません。", "Cannot find required directory:\n%s"), dir.data());
+        quit(fmt::format(_("必要なディレクトリ[{}]が見あたりません。", "Cannot find required directory:\n{}"), dir));
     } else if (mkdir(dir.data())) {
-        quit_fmt("Unable to create directory:\n%s", dir.data());
+        quit(fmt::format("Unable to create directory:\n{}", dir));
     }
 }
 
@@ -402,6 +405,7 @@ static void save_prefs()
 
     strcpy(buf, arg_bigtile ? "1" : "0");
     WritePrivateProfileStringA("Angband", "Bigtile", buf, ini_file);
+    WritePrivateProfileStringA("Angband", "Original32MapZoom", original_tiles::double_map_size ? "1" : "0", ini_file);
 
     strcpy(buf, arg_sound ? "1" : "0");
     WritePrivateProfileStringA("Angband", "Sound", buf, ini_file);
@@ -424,7 +428,7 @@ static void save_prefs()
     const auto savefile_str = savefile.string();
     const auto savefile_dir_str = savefile_str.substr(0, path_length);
     if (angband_dir_str == savefile_dir_str) {
-        const auto relative_path = format(".\\%s", (savefile_str.data() + path_length));
+        const auto relative_path = fmt::format(".\\{}", std::string_view(savefile_str).substr(path_length));
         WritePrivateProfileStringA("Angband", "SaveFile", relative_path.data(), ini_file);
     } else {
         WritePrivateProfileStringA("Angband", "SaveFile", savefile_str.data(), ini_file);
@@ -510,6 +514,7 @@ static void load_prefs()
     const auto *ini_file = str_ini_file.data();
     arg_graphics = (byte)GetPrivateProfileIntA("Angband", "Graphics", enum2i(graphics_mode::GRAPHICS_NONE), ini_file);
     arg_bigtile = (GetPrivateProfileIntA("Angband", "Bigtile", false, ini_file) != 0);
+    original_tiles::double_map_size = GetPrivateProfileIntA("Angband", "Original32MapZoom", false, ini_file) != 0;
     use_bigtile = arg_bigtile;
     arg_sound = (GetPrivateProfileIntA("Angband", "Sound", 0, ini_file) != 0);
     arg_sound_volume_table_index = std::clamp<int>(GetPrivateProfileIntA("Angband", "SoundVolumeTableIndex", 0, ini_file), 0, SOUND_VOLUME_TABLE.size() - 1);
@@ -608,7 +613,7 @@ static bool change_bg_mode(bg_mode new_mode, bool show_error = false, bool force
             current_bg_mode = bg_mode::BG_NONE;
             if (show_error) {
                 const auto &wallaper_filename = wallpaper_path.string();
-                plog_fmt(_("壁紙用ファイル '%s' を読み込めません。", "Can't load the image file '%s'."), wallaper_filename.data());
+                plog(fmt::format(_("壁紙用ファイル '{}' を読み込めません。", "Can't load the image file '{}'."), wallaper_filename));
             }
         }
     } else {
@@ -786,6 +791,9 @@ static void change_graphics_mode(graphics_mode mode)
     }
     arg_graphics = static_cast<byte>(ret);
     use_graphics = (arg_graphics > 0);
+    if (ret == graphics_mode::GRAPHICS_ORIGINAL_TERRAIN && original_tiles::double_map_size) {
+        arg_bigtile = use_bigtile = true;
+    }
 }
 
 /*!
@@ -817,9 +825,17 @@ static errr term_xtra_win_react(PlayerType *player_ptr)
     refresh_color_table();
 
     const byte current_mode = static_cast<byte>(graphic.get_mode());
+    const auto was_zoomed = current_mode == enum2i(graphics_mode::GRAPHICS_ORIGINAL_TERRAIN) && original_tiles::double_map_size && use_bigtile;
     if (current_mode != arg_graphics) {
         change_graphics_mode(static_cast<graphics_mode>(arg_graphics));
         reset_visuals(player_ptr);
+    }
+    const auto now_zoomed = graphic.get_mode() == graphics_mode::GRAPHICS_ORIGINAL_TERRAIN && original_tiles::double_map_size && use_bigtile;
+    if (was_zoomed != now_zoomed && AngbandWorld::get_instance().character_dungeon) {
+        auto *previous = game_term;
+        term_activate(&data[0].t);
+        resize_map();
+        term_activate(previous);
     }
 
     for (int i = 0; i < MAX_TERM_DATA; i++) {
@@ -834,6 +850,10 @@ static errr term_xtra_win_react(PlayerType *player_ptr)
 
 /*!
  * @brief Process at least one event
+ * @details
+ * 待たない場合、保留中のメッセージが無ければ非0を返す。
+ * 呼び出し側がメッセージを取り切ったことを判定できるようにするためのもので、
+ * main-gcu.cpp・main-x11.cpp・main-cap.cppのTERM_XTRA_EVENTと同じ約束である。
  */
 static errr term_xtra_win_event(int v)
 {
@@ -843,13 +863,16 @@ static errr term_xtra_win_event(int v)
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-    } else {
-        if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
+
+        return 0;
     }
 
+    if (!PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+        return 1;
+    }
+
+    TranslateMessage(&msg);
+    DispatchMessage(&msg);
     return 0;
 }
 
@@ -1040,12 +1063,19 @@ static errr term_bigcurs_win(int x, int y)
     int tile_wid, tile_hgt;
     tile_wid = td->tile_wid;
     tile_hgt = td->tile_hgt;
+    const auto block = term_tile_block_at(*game_term->scr, x, y);
+    const auto columns = block.zoomed() ? 4 : 2;
+    const auto rows = block.zoomed() ? 2 : 1;
+    if (block.zoomed()) {
+        x = block.x;
+        y = block.y;
+    }
 
     RECT rc{};
     rc.left = x * tile_wid + td->size_ow1;
-    rc.right = rc.left + 2 * tile_wid;
+    rc.right = rc.left + columns * tile_wid;
     rc.top = y * tile_hgt + td->size_oh1;
-    rc.bottom = rc.top + tile_hgt;
+    rc.bottom = rc.top + rows * tile_hgt;
 
     HDC hdc = td->get_hdc();
     FrameRect(hdc, &rc, hbrYellow);
@@ -1191,6 +1221,48 @@ static errr term_text_win(int x, int y, int n, TERM_COLOR a, concptr s)
     return 0;
 }
 
+// Original32の字形フォントは、端末とセル寸法から求めた高さごとに再利用する。
+class OriginalTileFonts {
+public:
+    OriginalTileFonts() = default;
+    OriginalTileFonts(const OriginalTileFonts &) = delete;
+    OriginalTileFonts(OriginalTileFonts &&) = delete;
+    OriginalTileFonts &operator=(const OriginalTileFonts &) = delete;
+    OriginalTileFonts &operator=(OriginalTileFonts &&) = delete;
+    ~OriginalTileFonts()
+    {
+        for (auto &font : fonts) {
+            if (font.handle) {
+                DeleteObject(font.handle);
+            }
+        }
+    }
+
+    HFONT get(int height, bool zoomed)
+    {
+        auto &font = fonts[zoomed ? 1 : 0];
+        if (!font.handle || font.height != height) {
+            const auto replacement = CreateFontW(-height, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY, FIXED_PITCH, L"Consolas");
+            if (replacement) {
+                if (font.handle) {
+                    DeleteObject(font.handle);
+                }
+                font.handle = replacement;
+                font.height = height;
+            }
+        }
+        return font.handle;
+    }
+
+private:
+    struct CachedFont {
+        HFONT handle = nullptr;
+        int height = 0;
+    };
+    CachedFont fonts[2];
+};
+
 /*!
  * @brief Low level graphics.  Assumes valid input.
  * @details
@@ -1236,6 +1308,113 @@ static errr term_pict_win(TERM_LEN x, TERM_LEN y, int n, const TERM_COLOR *ap, c
     if (has_mask) {
         hdcMask = CreateCompatibleDC(hdc);
         SelectObject(hdcMask, infGraph.hBitmapMask);
+    }
+
+    if (graphic.get_mode() == graphics_mode::GRAPHICS_ORIGINAL_TERRAIN) {
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        const auto base_height = h2;
+        static std::map<term_data *, OriginalTileFonts> font_cache;
+        auto &fonts = font_cache[td];
+        const auto font = fonts.get(std::max(8, std::min<int>(h2 - 4, tw2)), false);
+        const auto previous_font = SelectObject(hdc, font);
+        const auto zoom_font = fonts.get(std::max(8, std::min<int>(base_height * 2 - 4, w2 * 4)), true);
+        const auto previous_bg_mode = SetBkMode(hdc, TRANSPARENT);
+        for (i = 0; i < n; ++i, x2 += w2) {
+            // 一括描画には、左側のタイルで描画済みの右半分が含まれることがある。
+            if (original_tiles::is_bigtile_continuation({ ap[i], cp[i] })) {
+                continue;
+            }
+            const auto block = term_tile_block_at(term_pict_buffer(), x + i, y);
+            tw2 = w2 * block.width;
+            h2 = base_height * block.height;
+            SelectObject(hdc, block.zoomed() ? zoom_font : font);
+            RECT cell = { x2, y2, x2 + tw2, y2 + h2 };
+            FillRect(hdc, &cell, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            const auto draw_tile = [&](TERM_COLOR color, char character) {
+                const auto monster_catalog = original_tiles::decode_monster_catalog_tile({ color, character });
+                if (monster_catalog && original_tiles::monster_catalog_available) {
+                    TransparentBlt(hdc, x2, y2, tw2, h2, hdcSrc, (*monster_catalog % original_tiles::COLUMNS) * w1,
+                        (original_tiles::MONSTER_CATALOG_BASE_ROW + *monster_catalog / original_tiles::COLUMNS) * h1, w1, h1, RGB(255, 0, 255));
+                    return;
+                }
+                const auto catalog = original_tiles::decode_catalog_tile({ color, character });
+                if (catalog && original_tiles::catalog_available) {
+                    TransparentBlt(hdc, x2, y2, tw2, h2, hdcSrc, (*catalog % original_tiles::COLUMNS) * w1,
+                        (original_tiles::CATALOG_BASE_ROW + *catalog / original_tiles::COLUMNS) * h1, w1, h1, RGB(255, 0, 255));
+                    return;
+                }
+                const auto player_index = original_tiles::decode_player_tile({ color, character });
+                if (player_index) {
+                    const auto source_x = (*player_index % original_tiles::COLUMNS) * w1;
+                    const auto source_y = (original_tiles::PLAYER_BASE_ROW + *player_index / original_tiles::COLUMNS) * h1;
+                    TransparentBlt(hdc, x2, y2, tw2, h2, hdcSrc, source_x, source_y, w1, h1, RGB(255, 0, 255));
+                    return;
+                }
+                const auto monster_index = original_tiles::decode_monster_tile({ color, character });
+                if (monster_index) {
+                    const auto source_x = (*monster_index % original_tiles::COLUMNS) * w1;
+                    const auto source_y = (original_tiles::MONSTER_BASE_ROW + *monster_index / original_tiles::COLUMNS) * h1;
+                    TransparentBlt(hdc, x2, y2, tw2, h2, hdcSrc, source_x, source_y, w1, h1, RGB(255, 0, 255));
+                    return;
+                }
+                const auto item_index = original_tiles::decode_item_tile({ color, character });
+                if (item_index) {
+                    const auto source_x = (*item_index % original_tiles::COLUMNS) * w1;
+                    const auto source_y = (original_tiles::ITEM_BASE_ROW + *item_index / original_tiles::COLUMNS) * h1;
+                    TransparentBlt(hdc, x2, y2, tw2, h2, hdcSrc, source_x, source_y, w1, h1, RGB(255, 0, 255));
+                    return;
+                }
+                if ((color & 0x80) && (character & 0x80) && (color & 0x7f) >= original_tiles::SUPPLEMENT_ROW && (color & 0x7f) <= original_tiles::SUPPLEMENT_ROW + (original_tiles::SUPPLEMENT_TILES * 3 - 1) / 128) {
+                    const auto index = ((color & 0x7f) - original_tiles::SUPPLEMENT_ROW) * 128 + (character & 0x7f);
+                    if (index < original_tiles::SUPPLEMENT_TILES * 3) {
+                        StretchBlt(hdc, x2, y2, tw2, h2, hdcSrc, (index % original_tiles::COLUMNS) * w1, (original_tiles::SUPPLEMENT_BASE_ROW + index / original_tiles::COLUMNS) * h1, w1, h1, SRCCOPY);
+                    }
+                    return;
+                }
+                if ((color & 0x80) && (character & 0x80) && (color & 0x7f) >= original_tiles::EXPANDED_FLOOR_ROW && (color & 0x7f) <= original_tiles::EXPANDED_FLOOR_ROW + (original_tiles::EXPANDED_FLOOR_TILES * 3 - 1) / 128) {
+                    const auto index = ((color & 0x7f) - original_tiles::EXPANDED_FLOOR_ROW) * 128 + (character & 0x7f);
+                    if (index < original_tiles::EXPANDED_FLOOR_TILES * 3) {
+                        StretchBlt(hdc, x2, y2, tw2, h2, hdcSrc, (index % original_tiles::COLUMNS) * w1, (original_tiles::EXPANDED_FLOOR_BASE_ROW + index / original_tiles::COLUMNS) * h1, w1, h1, SRCCOPY);
+                    }
+                    return;
+                }
+                const auto connected = original_tiles::decode_connected_floor({ color, character });
+                if (connected) {
+                    const auto index = original_tiles::connected_floor_tile_index(*connected);
+                    const auto source_x = (index % original_tiles::COLUMNS) * w1;
+                    const auto source_y = (original_tiles::CRACK_TILE_BASE_ROW + index / original_tiles::COLUMNS) * h1;
+                    StretchBlt(hdc, x2, y2, tw2, h2, hdcSrc, source_x, source_y, w1, h1, SRCCOPY);
+                    return;
+                }
+                const auto row = color & 0x7f;
+                if ((color & 0x80) && (character & 0x80) && row < original_tiles::LIGHTING_ROWS * 3 && (character & 0x7f) < original_tiles::COLUMNS) {
+                    StretchBlt(hdc, x2, y2, tw2, h2, hdcSrc, (character & 0x7f) * w1, row * h1, w1, h1, SRCCOPY);
+                }
+            };
+            draw_tile(tap[i], tcp[i]);
+            const auto row = ap[i] & 0x7f;
+            if (original_tiles::monster_catalog_available && original_tiles::decode_monster_catalog_tile({ ap[i], cp[i] })) {
+                draw_tile(ap[i], cp[i]);
+            } else if ((ap[i] & 0x80) && row >= original_tiles::GLYPH_ROW && row < original_tiles::GLYPH_ROW + 16) {
+                char character = cp[i] & 0x7f;
+                SetTextColor(hdc, RGB(0, 0, 0));
+                for (const auto &offset : { POINT{ -1, 0 }, POINT{ 1, 0 }, POINT{ 0, -1 }, POINT{ 0, 1 } }) {
+                    auto shadow = cell;
+                    OffsetRect(&shadow, offset.x, offset.y);
+                    DrawTextA(hdc, &character, 1, &shadow, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+                SetTextColor(hdc, win_clr[row - original_tiles::GLYPH_ROW]);
+                DrawTextA(hdc, &character, 1, &cell, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            } else if (ap[i] != tap[i] || cp[i] != tcp[i]) {
+                draw_tile(ap[i], cp[i]);
+            }
+        }
+        SetBkMode(hdc, previous_bg_mode);
+        SelectObject(hdc, previous_font);
+        SelectObject(hdcSrc, hbmSrcOld);
+        DeleteDC(hdcSrc);
+        td->refresh();
+        return 0;
     }
 
     for (i = 0; i < n; i++, x2 += w2) {
@@ -1531,6 +1710,11 @@ static void setup_menus()
     CheckMenuItem(hm, IDM_OPTIONS_OLD_GRAPHICS, (arg_graphics == enum2i(graphics_mode::GRAPHICS_ORIGINAL) ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hm, IDM_OPTIONS_NEW_GRAPHICS, (arg_graphics == enum2i(graphics_mode::GRAPHICS_ADAM_BOLT) ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hm, IDM_OPTIONS_NEW2_GRAPHICS, (arg_graphics == enum2i(graphics_mode::GRAPHICS_HENGBAND) ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(hm, IDM_OPTIONS_ORIGINAL_TERRAIN, (arg_graphics == enum2i(graphics_mode::GRAPHICS_ORIGINAL_TERRAIN) ? MF_CHECKED : MF_UNCHECKED));
+    const auto original_mode = arg_graphics == enum2i(graphics_mode::GRAPHICS_ORIGINAL_TERRAIN);
+    CheckMenuItem(hm, IDM_OPTIONS_DOUBLE_MAP, (original_mode && original_tiles::double_map_size ? MF_CHECKED : MF_UNCHECKED));
+    EnableMenuItem(hm, IDM_OPTIONS_DOUBLE_MAP, MF_BYCOMMAND | (original_mode ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(hm, IDM_OPTIONS_BIGTILE, MF_BYCOMMAND | (original_mode && original_tiles::double_map_size ? MF_GRAYED : MF_ENABLED));
     CheckMenuItem(hm, IDM_OPTIONS_BIGTILE, (arg_bigtile ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuItem(hm, IDM_OPTIONS_MUSIC, (arg_music ? MF_CHECKED : MF_UNCHECKED));
     CheckMenuRadioItem(hm, IDM_OPTIONS_MUSIC_VOLUME_100, IDM_OPTIONS_MUSIC_VOLUME_010,
@@ -1866,10 +2050,39 @@ static void process_menus(PlayerType *player_ptr, WORD wCmd)
 
         break;
     }
+    case IDM_OPTIONS_ORIGINAL_TERRAIN: {
+        if (arg_graphics != enum2i(graphics_mode::GRAPHICS_ORIGINAL_TERRAIN)) {
+            arg_graphics = enum2i(graphics_mode::GRAPHICS_ORIGINAL_TERRAIN);
+            if (game_in_progress) {
+                do_cmd_redraw(player_ptr);
+            }
+        }
+        break;
+    }
     case IDM_OPTIONS_BIGTILE: {
+        if (arg_graphics == enum2i(graphics_mode::GRAPHICS_ORIGINAL_TERRAIN) && original_tiles::double_map_size) {
+            break;
+        }
         td = &data[0];
         arg_bigtile = !arg_bigtile;
         rebuild_term(td);
+        break;
+    }
+    case IDM_OPTIONS_DOUBLE_MAP: {
+        if (arg_graphics != enum2i(graphics_mode::GRAPHICS_ORIGINAL_TERRAIN)) {
+            break;
+        }
+        original_tiles::double_map_size = !original_tiles::double_map_size;
+        if (original_tiles::double_map_size && graphic.get_mode() == graphics_mode::GRAPHICS_ORIGINAL_TERRAIN) {
+            arg_bigtile = use_bigtile = true;
+        }
+        auto *previous = game_term;
+        term_activate(&data[0].t);
+        if (game_in_progress) {
+            resize_map();
+            do_cmd_redraw(player_ptr);
+        }
+        term_activate(previous);
         break;
     }
     case IDM_OPTIONS_MUSIC: {
@@ -2143,8 +2356,8 @@ static void fit_term_size_to_window(term_data *td, bool recalc_window_size = fal
 
         rebuild_term(td, recalc_window_size);
 
-        if (!is_main_term(td)) {
-            RedrawingFlagsUpdater::get_instance().fill_up_sub_flags();
+        if (!is_main_term(td) && AngbandWorld::get_instance().character_dungeon) {
+            DeferredUpdateRequests::get_instance().fill_up_sub_flags();
             handle_stuff(p_ptr);
         }
     }
@@ -2330,18 +2543,20 @@ static LRESULT PASCAL angband_window_procedure(HWND hWnd, UINT uMsg, WPARAM wPar
         for (auto i = 0; (i < dy) && (global_lock != NULL); i++) {
 #ifdef JP
             const auto &scr = data[0].t.scr->c;
+            const auto *row = scr[oy + i].data();
 
             std::vector<char> s(dx + 1);
-            strncpy(s.data(), &scr[oy + i][ox], dx);
+            strncpy(s.data(), &row[ox], dx);
 
+            // 全角文字の後半バイトは前半バイトと同じ値を取り得るため、行頭から文字の区切りをたどって判定する
             if (ox > 0) {
-                if (iskanji(scr[oy + i][ox - 1])) {
+                if (iskanji2(row, ox - 1)) {
                     s[0] = ' ';
                 }
             }
 
             if (ox + dx < data[0].cols) {
-                if (iskanji(scr[oy + i][ox + dx - 1])) {
+                if (iskanji2(row, ox + dx - 1)) {
                     s[dx - 1] = ' ';
                 }
             }
@@ -2447,7 +2662,7 @@ static LRESULT PASCAL angband_window_procedure(HWND hWnd, UINT uMsg, WPARAM wPar
         AngbandSystem::get_instance().set_panic_save(true);
         signals_ignore_tstp();
         p_ptr->died_from = _("(緊急セーブ)", "(panic save)");
-        (void)save_player(p_ptr, SaveType::CLOSE_GAME);
+        (void)save_player(p_ptr);
         quit("");
         return 0;
     }
@@ -2594,6 +2809,7 @@ static void hook_quit(std::string_view str)
         MessageBoxW(data[0].w, to_wchar(str).wc_str(), _(L"エラー！", L"Error"), MB_ICONEXCLAMATION | MB_OK | MB_ICONSTOP);
     }
 
+    shutdown_bot_control_server();
     save_prefs();
     for (int i = MAX_TERM_DATA - 1; i >= 0; --i) {
         term_force_font(&data[i]);
@@ -2704,15 +2920,16 @@ void create_debug_spoiler()
     init_stuff();
     init_angband(p_ptr, true);
 
+    // GUI アプリはコンソールを持たないことがあり、fmt::print() は書き込みに失敗すると例外を投げるので、std::fputs() で出力する
     switch (output_all_spoilers()) {
     case SpoilerOutputResultType::SUCCESSFUL:
-        fprintf(stdout, "Successfully created a spoiler file.");
+        std::fputs("Successfully created a spoiler file.", stdout);
         break;
     case SpoilerOutputResultType::FILE_OPEN_FAILED:
-        fprintf(stderr, "Cannot create spoiler file.");
+        std::fputs("Cannot create spoiler file.", stderr);
         break;
     case SpoilerOutputResultType::FILE_CLOSE_FAILED:
-        fprintf(stderr, "Cannot close spoiler file.");
+        std::fputs("Cannot close spoiler file.", stderr);
         break;
     default:
         break;
@@ -2752,20 +2969,110 @@ static void register_wndclass()
 }
 
 /*!
+ * @brief 端末の準備が済んだ後に共通して行うゲームの初期化
+ * @param shows_file_menu_prompt [ファイル]メニューの操作を促すメッセージを表示するか否か
+ * @details
+ * ウィンドウ版とヘッドレス版で共通の手順。TermCenteredOffsetSetterの寿命に
+ * 依存するため、メッセージ表示までを1つの関数にまとめている。
+ */
+static void prepare_game_start(bool shows_file_menu_prompt)
+{
+    signals_init();
+    term_activate(term_screen);
+    TermCenteredOffsetSetter tcos(MAIN_TERM_MIN_COLS, MAIN_TERM_MIN_ROWS);
+
+    init_angband(p_ptr, false);
+    initialized = true;
+
+    check_for_save_file(command_line.get_savefile_option());
+    if (shows_file_menu_prompt) {
+        prt(_("[ファイル] メニューの [新規] または [開く] を選択してください。", "[Choose 'New' or 'Open' from the 'File' menu]"), 23, _(8, 17));
+        term_fresh();
+    }
+}
+
+/*!
+ * @brief コマンドライン全体を軽く走査し、--headless の指定があるかどうかだけを調べる
+ * @details
+ * is_already_running()のチェックはcommand_line.handle()（ひいてはarg_headlessの確定）より
+ * 前にあるため、多重起動時の応答（ダイアログを出すかどうか）を分岐するには、フルの
+ * オプション解釈を待たずに--headlessの有無だけを知る必要がある。値の妥当性検証は行わず、
+ * 通常どおりcommand_line.handle()内のparse_runtime_option()に委ねる。
+ */
+static bool is_headless_launch_requested()
+{
+    int argc = 0;
+    LPWSTR *argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
+    if (argv == nullptr) {
+        return false;
+    }
+
+    const auto found = std::any_of(argv + 1, argv + argc, [](LPWSTR arg) {
+        return std::wstring_view(arg) == L"--headless";
+    });
+    ::LocalFree(argv);
+    return found;
+}
+
+/*!
+ * @brief ヘッドレス端末でゲームを実行する
+ * @return 正常に開始した場合0、端末の初期化に失敗した場合1
+ * @details
+ * ウィンドウもメッセージループも作らず、直ちにゲームを開始する。
+ * plog/quit/coreの出力先はinit_headless_term()が標準エラー出力へ差し替えるため、
+ * ここでは設定しない。
+ *
+ * ウィンドウ版と異なり[ファイル]メニューを経由しないため、開始するゲームは
+ * コマンドラインで渡されたセーブファイルの有無で決まる。
+ */
+static int run_headless_game()
+{
+    // init_headless_term()が差し替えるplog()の出力先を確保する
+    attach_console();
+    init_stuff();
+
+    // init_stuff()が設定したANGBAND_SYSはinit_headless_term()が上書きする
+    if (init_headless_term() != 0) {
+        return 1;
+    }
+
+    init_bot_control_server();
+    prepare_game_start(false);
+    play_game(p_ptr, savefile.empty(), false);
+    quit("");
+    return 0;
+}
+
+/*!
  * @brief ゲームのメインルーチン
  */
 static int WINAPI game_main(_In_ HINSTANCE hInst)
 {
     setlocale(LC_ALL, "ja_JP");
     hInstance = hInst;
+    // コマンドライン引数の解釈中に出力し得る診断メッセージに名前を付けるため、
+    // plog()/quit()を呼び得る処理より先に設定する
+    program_name = VARIANT_NAME;
     if (is_already_running()) {
+        if (is_headless_launch_requested()) {
+            // モーダルダイアログは非対話環境で応答不能のままハングするため、
+            // ヘッドレス起動時は標準エラー出力への通知と非ゼロ終了で応答する
+            attach_console();
+            quit("Hengband is already running.");
+        }
+
         constexpr auto mes = _(L"変愚蛮怒はすでに起動しています。", L"Hengband is already running.");
         constexpr auto caption = _(L"エラー！", L"Error");
         MessageBoxW(NULL, mes, caption, MB_ICONEXCLAMATION | MB_OK | MB_ICONSTOP);
         return 0;
     }
 
+    // handle()は--output-spoilersの処理でinit_angband()まで走らせ得るため、多重起動チェックの後に呼ぶ
     command_line.handle();
+    if (arg_headless) {
+        return run_headless_game();
+    }
+
     register_wndclass();
 
     // before term_data initialize
@@ -2799,24 +3106,18 @@ static int WINAPI game_main(_In_ HINSTANCE hInst)
     quit_aux = hook_quit;
     core_aux = hook_quit;
 
-    signals_init();
-    term_activate(term_screen);
-    {
-        TermCenteredOffsetSetter tcos(MAIN_TERM_MIN_COLS, MAIN_TERM_MIN_ROWS);
-
-        init_angband(p_ptr, false);
-        initialized = true;
-
-        check_for_save_file(command_line.get_savefile_option());
-        prt(_("[ファイル] メニューの [新規] または [開く] を選択してください。", "[Choose 'New' or 'Open' from the 'File' menu]"), 23, _(8, 17));
-        term_fresh();
-    }
+    prepare_game_start(true);
 
     change_sound_mode(arg_sound);
     use_music = arg_music;
     if (use_music) {
         init_music();
     }
+
+    // 端末が揃った後、最初のキー入力待ちより前に待ち受けを始める。
+    // 次のループは自前のメッセージループでキー入力待ちではないため、
+    // クライアントへの応答が始まるのはゲームが開始した後になる
+    init_bot_control_server();
 
     // ユーザーがゲーム開始を選択するまで待つループ
     MSG msg;
@@ -2863,5 +3164,3 @@ int WINAPI WinMain(
     }
 #endif
 }
-
-#endif /* WINDOWS */

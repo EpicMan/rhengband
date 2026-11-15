@@ -4,36 +4,38 @@
  */
 
 #include "main/info-initializer.h"
-#include "external-lib/include-json.h"
 #include "floor/wild.h"
 #include "info-reader/artifact-reader.h"
 #include "info-reader/baseitem-reader.h"
+#include "info-reader/definition-hash-data.h"
 #include "info-reader/dungeon-reader.h"
 #include "info-reader/ego-reader.h"
-#include "info-reader/feature-reader.h"
-#include "info-reader/fixed-map-parser.h"
-#include "info-reader/general-parser.h"
 #include "info-reader/info-reader-util.h"
+#include "info-reader/json-reader-util.h"
+#include "info-reader/jsonc-document-loader.h"
 #include "info-reader/magic-reader.h"
 #include "info-reader/message-reader.h"
+#include "info-reader/parse-error-messages.h"
 #include "info-reader/race-reader.h"
 #include "info-reader/skill-reader.h"
+#include "info-reader/spell-reader.h"
+#include "info-reader/terrain-reader.h"
 #include "info-reader/vault-reader.h"
+#include "info-reader/wilderness-reader.h"
 #include "io/files-util.h"
 #include "io/uid-checker.h"
-#include "main/angband-headers.h"
-#include "main/init-error-messages-table.h"
 #include "object-enchant/object-ego.h"
 #include "player-info/class-info.h"
 #include "player/player-skill.h"
 #include "room/rooms-vault.h"
 #include "system/angband-version.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-definition.h"
+#include "system/artifact/artifact-list.h"
+#include "system/artifact/artifact-record.h"
 #include "system/baseitem/baseitem-definition.h"
 #include "system/baseitem/baseitem-list.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/dungeon/dungeon-list.h"
-#include "system/floor/wilderness-grid.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/player-type-definition.h"
@@ -41,76 +43,87 @@
 #include "system/terrain/terrain-definition.h"
 #include "system/terrain/terrain-list.h"
 #include "util/angband-files.h"
-#include "util/string-processor.h"
 #include "view/display-messages.h"
-#include <fstream>
+#include <concepts>
+#include <fmt/format.h>
 #include <functional>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
-#ifndef WINDOWS
+#include <tl/expected.hpp>
+#ifndef _WIN32
 #include <sys/types.h>
 #endif
 
 namespace {
 
-/// @note clang-formatによるconceptの整形が安定していないので抑制しておく
-// clang-format off
+template <typename Reader>
+concept HasReadSession = requires(typename Reader::Session &session) {
+    { Reader::create_session() } -> std::same_as<typename Reader::Session>;
+    session.commit();
+};
+
 template <typename T>
 concept HasShrinkToFit = requires(T t) {
     t.shrink_to_fit();
 };
-// clang-format on
-}
 
 /*!
- * @brief ヘッダ構造体の更新
- * Initialize the header of an *_info.raw file.
- * @param head ヘッダ構造体
- * @return エラーコード
+ * @brief 各種設定データをlib/edit/.jsoncから読み込み
+ * Load data from lib/edit/.jsonc
+ * @param filename ファイル名(拡張子jsonc)
+ * @param keyname 定義配列を格納するルートオブジェクトのキー
+ * @param dhdt 定義データのハッシュ保存先を識別する種別
+ * @param definition_list 読み込み後に容量を調整する定義コンテナ
+ * @param json_parser 各定義要素を解析して格納する関数
+ * @param retouch 読み込み後に実行する追加処理 (省略可)
+ * @param allow_empty 定義配列が空であることを許可するか
+ * @param validate_root 追加のルート検証（指定した定義形式だけに適用）
  */
-static void init_header(angband_header *head)
-{
-    head->digest = {};
-}
-
-/*!
- * @brief 各種設定データをlib/edit/のテキストから読み込み
- * Initialize the "*_info" array
- * @param filename ファイル名(拡張子txt)
- * @param head 処理に用いるヘッダ構造体
- * @param info データ保管先の構造体ポインタ
- * @note
- * Note that we let each entry have a unique "name" and "text" string,
- * even if the string happens to be empty (everyone has a unique '\0').
- */
-template <typename InfoType>
-static void init_info(std::string_view filename, angband_header &head, InfoType &info, Parser parser, std::function<void()> retouch = nullptr)
+template <typename DefinitionList>
+void init_json(std::string_view filename, std::string_view keyname, DefinitionHashDataType dhdt, DefinitionList &definition_list, std::function<tl::expected<void, ParseErrorType>(nlohmann::json &)> json_parser, std::function<void()> retouch = nullptr, bool allow_empty = true, std::function<tl::expected<void, ParseErrorType>(const nlohmann::json &)> validate_root = nullptr)
 {
     const auto path = path_build(ANGBAND_DIR_EDIT, filename);
-    auto *fp = angband_fopen(path, FileOpenMode::READ);
-    if (!fp) {
-        quit_fmt(_("'%s'ファイルをオープンできません。", "Cannot open '%s' file."), filename.data());
+    auto loaded = JsoncDocumentLoader::load(path);
+    if (!loaded) {
+        if (loaded.error().kind == JsoncLoadErrorKind::CANNOT_OPEN) {
+            quit(fmt::format(_("'{}'ファイルをオープンできません。", "Cannot open '{}' file."), filename));
+        }
+        quit(format_json_syntax_error(filename, loaded.error().message));
     }
 
-    char buf[1024]{};
-    const auto &[error_code, error_line] = init_info_txt(fp, buf, &head, parser);
-    angband_fclose(fp);
-    if (error_code != PARSE_ERROR_NONE) {
-        const auto oops = (((error_code > 0) && (error_code < PARSE_ERROR_MAX)) ? err_str[error_code] : _("未知の", "unknown"));
-#ifdef JP
-        msg_format("'%s'ファイルの %d 行目にエラー。", filename.data(), error_line);
-#else
-        msg_format("Error %d at line %d of '%s'.", error_code, error_line, filename.data());
-#endif
-        msg_format(_("レコード %d は '%s' エラーがあります。", "Record %d contains a '%s' error."), error_idx, oops);
-        msg_format(_("構文 '%s'。", "Parsing '%s'."), buf);
-        msg_erase();
-        quit_fmt(_("'%s'ファイルにエラー", "Error in '%s' file."), filename.data());
+    auto &json_object = *loaded;
+
+    if (const auto result = info_validate_json_array(json_object, keyname, allow_empty); !result) {
+        if (result.error() == ParseErrorType::INVALID_VALUE) {
+            quit(fmt::format(_("{}: $.{}: 空配列は許可されません", "{}: $.{}: empty array is not allowed"), filename, keyname));
+        }
+        quit(fmt::format(_("{}: ルートオブジェクトに配列 '{}' が必要です", "{}: expected a root object containing array '{}'"), filename, keyname));
     }
 
-    if constexpr (HasShrinkToFit<InfoType>) {
-        info.shrink_to_fit();
+    if (validate_root && !validate_root(json_object)) {
+        quit(fmt::format(_("{}: 定義形式のversionが不正です", "{}: invalid definition version"), filename));
+    }
+
+    auto &elements = json_object[keyname];
+    for (size_t index = 0; index < elements.size(); ++index) {
+        // 起動中は履歴に残らず、msg_print自体も入力を待つため、レコード単位で診断を捕捉する。
+        // 解析器が operator[] で無い項目を null として足すことがあるので、識別子の項目は解析の前に探しておく。
+        // 表記を作るのは失敗したときだけにする。
+        const auto identifier = find_record_identifier(elements[index]);
+        ScopedMessageCapture diagnostics;
+        if (const auto result = json_parser(elements[index]); !result) {
+            quit(format_definition_load_error(diagnostics.messages(), format_record_parse_error(filename, keyname, index, describe_record_identifier(identifier), result.error())));
+        }
+    }
+
+    util::SHA256 sha256;
+    sha256.update(json_object.dump());
+    DefinitionHashData::get_instance().set_digest(dhdt, sha256.digest());
+
+    if constexpr (HasShrinkToFit<DefinitionList>) {
+        definition_list.shrink_to_fit();
     }
 
     if (retouch) {
@@ -119,46 +132,49 @@ static void init_info(std::string_view filename, angband_header &head, InfoType 
 }
 
 /*!
- * @brief 各種設定データをlib/edit/.jsoncから読み込み
- * Load data from lib/edit/.jsonc
- * @param filename ファイル名(拡張子jsonc)
- * @param head 処理に用いるヘッダ構造体
- * @param info データ保管先の構造体ポインタ
- * @note
- * Note that we let each entry have a unique "name" and "text" string,
- * even if the string happens to be empty (everyone has a unique '\0').
+ * @brief Readerクラスを用いてlib/edit/.jsoncを読み込む
+ * @details init_jsonのjson_parserに「JSON要素からReaderを構築してread()する」定型ラムダを与える処理を共通化したもの。
  */
-template <typename InfoType>
-static void init_json(std::string_view filename, std::string_view keyname, angband_header &head, InfoType &info, JSONParser parser)
+template <typename Reader, typename DefinitionList>
+void init_json_reader(std::string_view filename, std::string_view keyname, DefinitionHashDataType dhdt, DefinitionList &definition_list, std::function<void()> retouch = nullptr, bool allow_empty = true, std::function<tl::expected<void, ParseErrorType>(const nlohmann::json &)> validate_root = nullptr)
 {
-    const auto path = path_build(ANGBAND_DIR_EDIT, filename);
-    std::ifstream ifs(path);
-
-    if (!ifs) {
-        quit_fmt(_("'%s'ファイルをオープンできません。", "Cannot open '%s' file."), filename.data());
+    if constexpr (HasReadSession<Reader>) {
+        auto session = Reader::create_session();
+        auto parser = [&session](nlohmann::json &element) {
+            auto result = Reader(element, session).read();
+            if (result) {
+                session.commit();
+            }
+            return result;
+        };
+        init_json(filename, keyname, dhdt, definition_list, parser, retouch, allow_empty, validate_root);
+    } else {
+        auto parser = [](nlohmann::json &element) { return Reader(element).read(); };
+        init_json(filename, keyname, dhdt, definition_list, parser, retouch, allow_empty, validate_root);
     }
+}
 
-    std::istreambuf_iterator<char> ifs_iter(ifs);
-    std::istreambuf_iterator<char> ifs_end;
-    auto json_object = nlohmann::json::parse(ifs_iter, ifs_end, nullptr, true, true, true);
-
-    error_idx = -1;
-
-    for (auto &element : json_object[keyname]) {
-        const auto error_code = parser(element, &head);
-        if (error_code != PARSE_ERROR_NONE) {
-            msg_erase();
-            quit_fmt(_("'%s'ファイルにエラー", "Error in '%s' file."), filename.data());
+/*!
+ * @brief 構造化診断を返す Reader の解析、診断表示と成功時の確定を共通化する。
+ */
+template <typename Reader, typename DefinitionList>
+void init_diagnostic_reader(std::string_view filename, std::string_view keyname, DefinitionHashDataType dhdt, DefinitionList &definition_list, typename Reader::Session &session, fmt::format_string<const std::string &, const std::string &, const std::string &> label_format, std::function<void()> retouch = nullptr, bool allow_empty = true)
+{
+    auto parser = [&session, filename, label_format](nlohmann::json &element) {
+        Reader reader(element, session);
+        const auto result = reader.read();
+        if (!result) {
+            const auto &diagnostic = reader.error().value();
+            msg_print("{}: {}", filename, fmt::format(label_format, diagnostic.id, diagnostic.path, diagnostic.reason));
         }
-    }
+        if (result) {
+            session.commit();
+        }
+        return result;
+    };
+    init_json(filename, keyname, dhdt, definition_list, parser, retouch, allow_empty);
+}
 
-    util::SHA256 sha256;
-    sha256.update(json_object.dump());
-    head.digest = sha256.digest();
-
-    if constexpr (HasShrinkToFit<InfoType>) {
-        info.shrink_to_fit();
-    }
 }
 
 /*!
@@ -166,8 +182,9 @@ static void init_json(std::string_view filename, std::string_view keyname, angba
  */
 void init_artifacts_info()
 {
-    init_header(&artifacts_header);
-    init_json("ArtifactDefinitions.jsonc", "artifacts", artifacts_header, ArtifactList::get_instance(), parse_artifacts_info);
+    auto &artifacts = ArtifactList::get_instance();
+    init_json_reader<ArtifactReader>("ArtifactDefinitions.jsonc", "artifacts", DefinitionHashDataType::ARTIFACTS, artifacts);
+    ArtifactRecords::get_instance().initialize(artifacts.size());
 }
 
 /*!
@@ -175,8 +192,7 @@ void init_artifacts_info()
  */
 void init_baseitems_info()
 {
-    init_header(&baseitems_header);
-    init_json("BaseitemDefinitions.jsonc", "baseitems", baseitems_header, BaseitemList::get_instance(), parse_baseitems_info);
+    init_json_reader<BaseitemReader>("BaseitemDefinitions.jsonc", "baseitems", DefinitionHashDataType::BASEITEMS, BaseitemList::get_instance());
 }
 
 /*!
@@ -184,9 +200,8 @@ void init_baseitems_info()
  */
 void init_class_magics_info()
 {
-    init_header(&class_magics_header);
     class_magics_info.assign(PLAYER_CLASS_TYPE_MAX, {});
-    init_json("ClassMagicDefinitions.jsonc", "classes", class_magics_header, class_magics_info, parse_class_magics_info);
+    init_json_reader<MagicReader>("ClassMagicDefinitions.jsonc", "classes", DefinitionHashDataType::CLASS_MAGICS, class_magics_info);
 }
 
 /*!
@@ -194,18 +209,22 @@ void init_class_magics_info()
  */
 void init_class_skills_info()
 {
-    init_header(&class_skills_header);
     class_skills_info.assign(PLAYER_CLASS_TYPE_MAX, {});
-    init_info("ClassSkillDefinitions.txt", class_skills_header, class_skills_info, parse_class_skills_info);
+    auto session = SkillReader::create_session();
+    init_diagnostic_reader<SkillReader>("ClassSkillDefinitions.jsonc", "classes", DefinitionHashDataType::CLASS_SKILLS, class_skills_info, session, _("職業{}の{}: {}", "class {} at {}: {}"), [&session] {
+        if (session.last_id() != PLAYER_CLASS_TYPE_MAX - 1) {
+            quit(fmt::format(_("ClassSkillDefinitions.jsonc: 職業{}の$.classes: 職業レコードが不足しています", "ClassSkillDefinitions.jsonc: class {} at $.classes: missing class records"), session.last_id().value_or(-1) + 1));
+        }
+    });
 }
+
 /*!
  * @brief ダンジョン情報読み込みのメインルーチン
  */
 void init_dungeons_info()
 {
-    init_header(&dungeons_header);
     auto &dungeons = DungeonList::get_instance();
-    init_info("DungeonDefinitions.txt", dungeons_header, dungeons, parse_dungeons_info, [&dungeons] { dungeons.retouch(); });
+    init_json_reader<DungeonReader>("DungeonDefinitions.jsonc", "dungeons", DefinitionHashDataType::DUNGEONS, dungeons, [&dungeons] { dungeons.retouch(); });
 }
 
 /*!
@@ -213,8 +232,7 @@ void init_dungeons_info()
  */
 void init_egos_info()
 {
-    init_header(&egos_header);
-    init_info("EgoDefinitions.txt", egos_header, egos_info, parse_egos_info);
+    init_json_reader<EgoReader>("EgoDefinitions.jsonc", "egos", DefinitionHashDataType::EGOS, egos_info, nullptr, false, EgoReader::validate_root);
 }
 
 /*!
@@ -222,10 +240,17 @@ void init_egos_info()
  */
 void init_terrains_info()
 {
-    init_header(&terrains_header);
-    auto *parser = parse_terrains_info;
     auto &terrains = TerrainList::get_instance();
-    init_info("TerrainDefinitions.txt", terrains_header, terrains, parser, [&terrains] { terrains.retouch(); });
+    init_json_reader<TerrainReader>("TerrainDefinitions.jsonc", "terrains", DefinitionHashDataType::TERRAINS, terrains, [&terrains] { terrains.retouch(); });
+}
+
+/*!
+ * @brief 地形の派生情報を初期化する
+ */
+void init_feat_variables()
+{
+    TerrainList::get_instance().emplace_tags();
+    init_wilderness_terrains();
 }
 
 /*!
@@ -233,8 +258,11 @@ void init_terrains_info()
  */
 void init_monrace_definitions()
 {
-    init_header(&monraces_header);
-    init_json("MonraceDefinitions.jsonc", "monsters", monraces_header, MonraceList::get_instance(), parse_monraces_info);
+    init_json_reader<RaceReader>("MonraceDefinitions.jsonc", "monsters", DefinitionHashDataType::MONRACES, MonraceList::get_instance(), [] {
+        if (const auto error = RaceReader::validate_references()) {
+            quit(fmt::format("MonraceDefinitions.jsonc: {}", *error));
+        }
+    });
 }
 
 /*!
@@ -242,8 +270,7 @@ void init_monrace_definitions()
  */
 void init_monster_message_definitions()
 {
-    init_header(&monster_messages_header);
-    init_json("MonsterMessages.jsonc", "groups", monster_messages_header, MonraceMessageList::get_instance(), parse_monster_messages_info);
+    init_json_reader<MessageReader>("MonsterMessages.jsonc", "groups", DefinitionHashDataType::MONSTER_MESSAGES, MonraceMessageList::get_instance());
 }
 
 /*!
@@ -251,13 +278,13 @@ void init_monster_message_definitions()
  */
 void init_spell_info()
 {
-    init_header(&spells_header);
     auto &spell_info_list = SpellInfoList::get_instance();
     spell_info_list.initialize();
-    auto parser = [&spell_info_list](nlohmann::json &spell_data, angband_header *) {
-        return spell_info_list.parse(spell_data);
+    SpellReader::Session session;
+    auto parser = [&spell_info_list, &session](nlohmann::json &spell_data) {
+        return SpellReader(spell_data, spell_info_list, session).read();
     };
-    init_json("SpellDefinitions.jsonc", "realms", spells_header, spell_info_list, parser);
+    init_json("SpellDefinitions.jsonc", "realms", DefinitionHashDataType::SPELLS, spell_info_list, parser);
 }
 
 /*!
@@ -268,44 +295,8 @@ void init_spell_info()
  */
 void init_vaults_info()
 {
-    init_header(&vaults_header);
-    init_info("VaultDefinitions.txt", vaults_header, vaults_info, parse_vaults_info);
-}
-
-static bool read_wilderness_definition(std::ifstream &ifs)
-{
-    auto &wilderness = WildernessGrids::get_instance();
-    std::string line;
-    while (!ifs.eof()) {
-        if (!std::getline(ifs, line)) {
-            return false;
-        }
-
-        if (line.empty() || line.starts_with('#')) {
-            continue;
-        }
-
-        const auto &splits = str_split(line, ':');
-        if ((splits.size() != 3) || (splits[0] != "M")) {
-            continue;
-        }
-
-        if (splits[1] == "WX") {
-            wilderness.initialize_width(std::stoi(splits[2]));
-        } else if (splits[1] == "WY") {
-            wilderness.initialize_height(std::stoi(splits[2]));
-        } else {
-            return false;
-        }
-
-        if (wilderness.is_height_initialized() && wilderness.is_width_initialized()) {
-            wilderness.initialize_grids();
-            wilderness.set_ambushes(false);
-            return true;
-        }
-    }
-
-    return false;
+    auto session = VaultReader::create_session();
+    init_diagnostic_reader<VaultReader>("VaultDefinitions.jsonc", "vaults", DefinitionHashDataType::VAULTS, vaults_info, session, _("Vault{}の{}: {}", "vault {} at {}: {}"), nullptr, false);
 }
 
 /*!
@@ -313,13 +304,8 @@ static bool read_wilderness_definition(std::ifstream &ifs)
  */
 void init_wilderness()
 {
-    const auto path = path_build(ANGBAND_DIR_EDIT, WILDERNESS_DEFINITION);
-    std::ifstream ifs(path);
-    if (!ifs) {
-        quit_fmt(_("'%s'ファイルをオープンできません。", "Cannot open '%s' file."), WILDERNESS_DEFINITION);
-    }
-
-    if (!read_wilderness_definition(ifs)) {
-        quit(_("荒野を初期化できません", "Cannot initialize wilderness"));
+    ScopedMessageCapture diagnostics;
+    if (const auto result = initialize_wilderness_definition(); !result) {
+        quit(format_definition_load_error(diagnostics.messages(), result.error()));
     }
 }

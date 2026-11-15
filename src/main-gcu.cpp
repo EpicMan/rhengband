@@ -157,11 +157,12 @@
  * XXX XXX XXX Consider the use of "savetty()" and "resetty()".
  */
 
+#include "bot/bot-control-server.h"
 #include "game-option/runtime-arguments.h"
 #include "game-option/special-options.h"
 #include "io/exit-panic.h"
 #include "io/files-util.h"
-#include "locale/japanese.h"
+#include "locale/character-encoding.h"
 #include "main/sound-definitions-table.h"
 #include "main/sound-of-music.h"
 #include "system/angband-version.h"
@@ -169,12 +170,12 @@
 #include "system/player-type-definition.h"
 #include "term/gameterm.h"
 #include "term/term-color-types.h"
-#include "term/z-form.h"
 #include "util/angband-files.h"
 #include "util/enum-converter.h"
 #include "util/enum-range.h"
 #include "view/display-map.h"
 #include <filesystem>
+#include <fmt/format.h>
 #include <map>
 #include <string>
 #include <string_view>
@@ -720,13 +721,14 @@ static errr game_term_xtra_gcu_event(int v)
 
         *bp = '\0';
 #ifdef JP
-        char eucbuf[sizeof(buf)];
-        /* strlen + 1 を渡して文字列終端('\0')を含めて変換する */
-        if (utf8_to_euc(buf, strlen(buf) + 1, eucbuf, sizeof(eucbuf)) < 0) {
+        auto euc = utf8_to_euc(buf);
+        if (!euc) {
             return -1;
         }
+        term_string_push(euc->data());
+#else
+        term_string_push(buf);
 #endif
-        term_string_push(_(eucbuf, buf));
     }
 
     /* Do not wait */
@@ -801,13 +803,14 @@ static errr game_term_xtra_gcu_event(int v)
 
         bp[0] = '\0';
 #ifdef JP
-        char eucbuf[sizeof(buf)];
-        /* strlen + 1 を渡して文字列終端('\0')を含めて変換する */
-        if (utf8_to_euc(buf, strlen(buf) + 1, eucbuf, sizeof(eucbuf)) < 0) {
+        auto euc = utf8_to_euc(buf);
+        if (!euc) {
             return -1;
         }
+        term_string_push(euc->data());
+#else
+        term_string_push(buf);
 #endif
-        term_string_push(_(eucbuf, buf));
     }
 
     /* Do not wait */
@@ -1099,9 +1102,48 @@ static errr game_term_text_gcu(int x, int y, int n, byte a, concptr s)
     if (text_len < 0) {
         return -1;
     }
-#endif
+
+#ifdef MACOS_TERMINAL_UTF8
+    char corrected_text[2048];
+    int j = 0;
+
+    for (int i = 0; i < text_len;) {
+        // Safety break before writing
+        if (j >= (int)sizeof(corrected_text) - 4) {
+            break;
+        }
+
+        // Standard C-style UTF-8 3-byte sequence check for macOS terminal display correction
+        // Target characters: ★ (0xE2 0x98 0x85), ☆ (0xE2 0x98 0x86), … (0xE2 0x80 0xA6)
+        bool is_target = false;
+        if (i + 2 < text_len && (unsigned char)text[i] == 0xe2) {
+            unsigned char c2 = (unsigned char)text[i + 1];
+            unsigned char c3 = (unsigned char)text[i + 2];
+            if ((c2 == 0x98 && (c3 == 0x85 || c3 == 0x86)) || (c2 == 0x80 && c3 == 0xa6)) {
+                is_target = true;
+            }
+        }
+
+        if (is_target) {
+            corrected_text[j++] = text[i++];
+            corrected_text[j++] = text[i++];
+            corrected_text[j++] = text[i++];
+            corrected_text[j++] = ' ';
+        } else {
+            corrected_text[j++] = text[i++];
+        }
+    }
     /* Add the text */
-    curses::waddnstr(td->win, _(text, s), _(text_len, n));
+    curses::waddnstr(td->win, corrected_text, j);
+#else
+    /* Add the text normally */
+    curses::waddnstr(td->win, text, text_len);
+#endif
+
+#else /* JP */
+    /* Add the text (Non-JP build) */
+    curses::waddnstr(td->win, s, n);
+#endif
 
     /* Success */
     return 0;
@@ -1207,6 +1249,12 @@ static void hook_quit(std::string_view str)
     /* Unused */
     (void)str;
 
+    /*
+     * init_gcu()がquit_auxを上書きするためmain.cppのquit_hook()は呼ばれない。
+     * 制御サーバの停止はこちらで行う必要がある
+     */
+    shutdown_bot_control_server();
+
     /* Exit curses */
     curses::endwin();
 }
@@ -1245,7 +1293,7 @@ errr init_gcu(int argc, char *argv[])
     quit_aux = hook_quit;
     core_aux = hook_quit;
     if ((curses::LINES < MAIN_TERM_MIN_ROWS) || (curses::COLS < MAIN_TERM_MIN_COLS)) {
-        quit_fmt("%s needs an %dx%d 'curses' screen", std::string(VARIANT_NAME).data(), MAIN_TERM_MIN_COLS, MAIN_TERM_MIN_ROWS);
+        quit(fmt::format("{} needs an {}x{} 'curses' screen", VARIANT_NAME, MAIN_TERM_MIN_COLS, MAIN_TERM_MIN_ROWS));
     }
 
 #ifdef A_COLOR
@@ -1455,13 +1503,13 @@ errr init_gcu(int argc, char *argv[])
 
                 i++;
                 if (i >= argc) {
-                    quit_fmt("Missing size specifier for -%s", left ? "left" : "right");
+                    quit(fmt::format("Missing size specifier for -{}", left ? "left" : "right"));
                 }
 
                 arg = argv[i];
                 tmp = strchr(arg, 'x');
                 if (!tmp) {
-                    quit_fmt("Expected something like -%s 60x27,* for two %s hand terminals of 60 columns, the first 27 lines and the second whatever is left.", left ? "left" : "right", left ? "left" : "right");
+                    quit(fmt::format("Expected something like -{0} 60x27,* for two {0} hand terminals of 60 columns, the first 27 lines and the second whatever is left.", left ? "left" : "right"));
                 }
                 cx = atoi(arg);
                 remaining.cx -= cx;
@@ -1486,11 +1534,10 @@ errr init_gcu(int argc, char *argv[])
                         cy = remaining.y + remaining.cy - y;
                     }
                     if (next_term >= MAX_TERM_DATA) {
-                        quit_fmt("Too many terminals. Only %d are allowed.", MAX_TERM_DATA);
+                        quit(fmt::format("Too many terminals. Only {} are allowed.", MAX_TERM_DATA));
                     }
                     if (cy <= 0) {
-                        quit_fmt("Out of bounds in -%s: %d is too large (%d rows max for this strip)",
-                            left ? "left" : "right", cys[j], remaining.cy);
+                        quit(fmt::format("Out of bounds in -{}: {} is too large ({} rows max for this strip)", left ? "left" : "right", cys[j], remaining.cy));
                     }
                     data[next_term++].r = rect(x, y, cx, cy);
                     y += cy + spacer_cy;
@@ -1503,13 +1550,13 @@ errr init_gcu(int argc, char *argv[])
 
                 i++;
                 if (i >= argc) {
-                    quit_fmt("Missing size specifier for -%s", top ? "top" : "bottom");
+                    quit(fmt::format("Missing size specifier for -{}", top ? "top" : "bottom"));
                 }
 
                 arg = argv[i];
                 tmp = strchr(arg, 'x');
                 if (!tmp) {
-                    quit_fmt("Expected something like -%s *x7 for a single %s terminal of 7 lines using as many columns as are available.", top ? "top" : "bottom", top ? "top" : "bottom");
+                    quit(fmt::format("Expected something like -{0} *x7 for a single {0} terminal of 7 lines using as many columns as are available.", top ? "top" : "bottom"));
                 }
                 tmp++;
                 cy = atoi(tmp);
@@ -1536,11 +1583,10 @@ errr init_gcu(int argc, char *argv[])
                         cx = remaining.x + remaining.cx - x;
                     }
                     if (next_term >= MAX_TERM_DATA) {
-                        quit_fmt("Too many terminals. Only %d are allowed.", MAX_TERM_DATA);
+                        quit(fmt::format("Too many terminals. Only {} are allowed.", MAX_TERM_DATA));
                     }
                     if (cx <= 0) {
-                        quit_fmt("Out of bounds in -%s: %d is too large (%d cols max for this strip)",
-                            top ? "top" : "bottom", cxs[j], remaining.cx);
+                        quit(fmt::format("Out of bounds in -{}: {} is too large ({} cols max for this strip)", top ? "top" : "bottom", cxs[j], remaining.cx));
                     }
                     data[next_term++].r = rect(x, y, cx, cy);
                     x += cx + spacer_cx;
@@ -1551,7 +1597,7 @@ errr init_gcu(int argc, char *argv[])
 
         /* Map Terminal */
         if (remaining.cx < MAIN_TERM_MIN_COLS || remaining.cy < MAIN_TERM_MIN_ROWS) {
-            quit_fmt("Failed: %s needs an %dx%d map screen, not %dx%d", std::string(VARIANT_NAME).data(), MAIN_TERM_MIN_COLS, MAIN_TERM_MIN_ROWS, remaining.cx, remaining.cy);
+            quit(fmt::format("Failed: {} needs an {}x{} map screen, not {}x{}", VARIANT_NAME, MAIN_TERM_MIN_COLS, MAIN_TERM_MIN_ROWS, remaining.cx, remaining.cy));
         }
         data[0].r = remaining;
         term_data_init(&data[0]);

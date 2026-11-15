@@ -1,12 +1,10 @@
 #include "spell-kind/spells-curse-removal.h"
 #include "core/window-redrawer.h"
 #include "inventory/inventory-slot-types.h"
-#include "object-enchant/item-feeling.h"
-#include "object-enchant/special-object-flags.h"
 #include "object-enchant/trc-types.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "view/display-messages.h"
 
 /*!
@@ -19,9 +17,9 @@
 static int exe_curse_removal(PlayerType *player_ptr, int all)
 {
     auto count = 0;
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-        auto *o_ptr = player_ptr->inventory[i].get();
+    auto &dur = DeferredUpdateRequests::get_instance();
+    for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+        auto *o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid() || !o_ptr->is_cursed()) {
             continue;
         }
@@ -30,16 +28,14 @@ static int exe_curse_removal(PlayerType *player_ptr, int all)
             continue;
         }
 
+        // 永遠の呪いそのものは解けないが、ほかの呪いの性質 (反感・AC 低下など) は消えるので、どちらでも能力が変わる
+        dur.set_flag(StatusRecalculatingFlag::BONUS);
         if (o_ptr->curse_flags.has(CurseTraitType::PERMA_CURSE)) {
             o_ptr->curse_flags &= { CurseTraitType::CURSED, CurseTraitType::HEAVY_CURSE, CurseTraitType::PERMA_CURSE };
             continue;
         }
 
-        o_ptr->curse_flags.clear();
-        o_ptr->ident |= IDENT_SENSE;
-        o_ptr->feeling = FEEL_NONE;
-        rfu.set_flag(StatusRecalculatingFlag::BONUS);
-        rfu.set_flag(SubWindowRedrawingFlag::EQUIPMENT);
+        o_ptr->remove_curses();
         count++;
     }
 

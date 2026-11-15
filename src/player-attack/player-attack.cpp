@@ -12,7 +12,6 @@
 #include "combat/attack-criticality.h"
 #include "combat/slaying.h"
 #include "floor/geometry.h"
-#include "game-option/cheat-types.h"
 #include "main/sound-of-music.h"
 #include "mind/mind-ninja.h"
 #include "mind/mind-samurai.h"
@@ -37,10 +36,11 @@
 #include "system/enums/terrain/terrain-characteristics.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "timed-effect/timed-effects.h"
+#include "util/bit-flags-calculator.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "wizard/wizard-messages.h"
@@ -64,7 +64,7 @@ player_attack_type::player_attack_type(FloorType &floor, POSITION y, POSITION x,
     this->m_idx = this->g_ptr->m_idx;
     this->m_ptr = &floor.m_list[this->g_ptr->m_idx];
     this->r_idx = this->m_ptr->r_idx;
-    this->r_ptr = &this->m_ptr->get_monrace();
+    this->monrace = this->m_ptr->get_monrace_shared();
     this->ma_ptr = &ma_blows[0];
 }
 
@@ -375,7 +375,7 @@ static void apply_damage_bonus(PlayerType *player_ptr, player_attack_type *pa_pt
         pa_ptr->attack_damage = 0;
     }
 
-    auto is_cut = player_ptr->effects()->cut().is_cut();
+    auto is_cut = player_ptr->effects()->cut().is_active();
     if ((pa_ptr->mode == HISSATSU_SEKIRYUKA) && !is_cut) {
         pa_ptr->attack_damage /= 2;
     }
@@ -487,8 +487,7 @@ static void apply_actual_attack(
     const auto is_berserker = PlayerClass(player_ptr).equals(PlayerClassType::BERSERKER);
     pa_ptr->attack_damage = mon_damage_mod(player_ptr, *pa_ptr->m_ptr, pa_ptr->attack_damage, is_death_scythe || (is_berserker && one_in_(2)));
     critical_attack(player_ptr, pa_ptr);
-    msg_format_wizard(player_ptr, CHEAT_MONSTER, _("%dのダメージを与えた。(残りHP %d/%d(%d))", "You do %d damage. (left HP %d/%d(%d))"),
-        pa_ptr->attack_damage, pa_ptr->m_ptr->hp - pa_ptr->attack_damage, pa_ptr->m_ptr->maxhp, pa_ptr->m_ptr->max_maxhp);
+    msg_print_wizard_damage(player_ptr, *pa_ptr->m_ptr, pa_ptr->attack_damage);
 }
 
 /*!
@@ -531,20 +530,20 @@ void exe_player_attack_to_monster(PlayerType *player_ptr, POSITION y, POSITION x
     player_attack_type tmp_attack(*player_ptr->current_floor_ptr, y, x, hand, mode, fear, mdeath);
     auto pa_ptr = &tmp_attack;
 
-    const auto is_human = pa_ptr->r_ptr->symbol_char_is_any_of("p");
-    const auto is_lowlevel = (pa_ptr->r_ptr->level < (player_ptr->lev - 15));
+    const auto is_human = pa_ptr->monrace->symbol_char_is_any_of("p");
+    const auto is_lowlevel = (pa_ptr->monrace->level < (player_ptr->lev - 15));
 
     attack_classify(player_ptr, pa_ptr);
     get_attack_exp(player_ptr, pa_ptr);
 
     /* Disturb the monster */
-    (void)set_monster_csleep(player_ptr, pa_ptr->m_idx, 0);
+    (void)set_monster_csleep(*player_ptr->current_floor_ptr, pa_ptr->m_idx, 0);
     angband_strcpy(pa_ptr->m_name, monster_desc(player_ptr, *pa_ptr->m_ptr, 0), sizeof(pa_ptr->m_name));
 
     int chance = calc_attack_quality(player_ptr, pa_ptr);
     auto *o_ptr = player_ptr->inventory[enum2i(INVEN_MAIN_HAND) + pa_ptr->hand].get();
-    const auto is_zantetsu_nullified = o_ptr->is_specific_artifact(FixedArtifactId::ZANTETSU) && pa_ptr->r_ptr->symbol_char_is_any_of("j");
-    const auto is_ej_nullified = o_ptr->is_specific_artifact(FixedArtifactId::EXCALIBUR_J) && pa_ptr->r_ptr->symbol_char_is_any_of("S");
+    const auto is_zantetsu_nullified = o_ptr->is_specific_artifact(FixedArtifactId::ZANTETSU) && pa_ptr->monrace->symbol_char_is_any_of("j");
+    const auto is_ej_nullified = o_ptr->is_specific_artifact(FixedArtifactId::EXCALIBUR_J) && pa_ptr->monrace->symbol_char_is_any_of("S");
     calc_num_blow(player_ptr, pa_ptr);
 
     /* Attack once for each legal blow */
@@ -576,7 +575,7 @@ void exe_player_attack_to_monster(PlayerType *player_ptr, POSITION y, POSITION x
     }
 
     if (pa_ptr->weak && !(*mdeath)) {
-        msg_format(_("%sは弱くなったようだ。", "%s^ seems weakened."), pa_ptr->m_name);
+        msg_print(_("{}は弱くなったようだ。", "{} seems weakened."), str_upcase_first(pa_ptr->m_name));
     }
 
     if ((pa_ptr->drain_left != MAX_VAMPIRIC_DRAIN) && one_in_(4)) {

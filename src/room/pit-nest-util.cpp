@@ -9,6 +9,7 @@
 #include "system/monrace/monrace-list.h"
 #include "system/player-type-definition.h"
 #include "util/probability-table.h"
+#include <fmt/format.h>
 
 void nest_pit_type::prepare_filter(PlayerType *player_ptr) const
 {
@@ -35,7 +36,7 @@ void nest_pit_type::prepare_filter(PlayerType *player_ptr) const
         filter.set_dragon_breaths();
         break;
     default:
-        THROW_EXCEPTION(std::logic_error, format("Invalid hook! %d", enum2i(this->pn_hook)));
+        THROW_EXCEPTION(std::logic_error, fmt::format("Invalid hook! {}", enum2i(this->pn_hook)));
     }
 }
 
@@ -171,7 +172,7 @@ tl::optional<NestKind> pick_nest_type(const FloorType &floor, const std::map<Nes
             continue;
         }
 
-        if (none_bits(floor.get_dungeon_definition().nest, (1UL << enum2i(nest_kind)))) {
+        if (floor.get_dungeon_definition().nest.has_not(nest_kind)) {
             continue;
         }
 
@@ -199,7 +200,7 @@ tl::optional<PitKind> pick_pit_type(const FloorType &floor, const std::map<PitKi
             continue;
         }
 
-        if (none_bits(floor.get_dungeon_definition().pit, (1UL << enum2i(pit_kind)))) {
+        if (floor.get_dungeon_definition().pit.has_not(pit_kind)) {
             continue;
         }
 

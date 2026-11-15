@@ -1,8 +1,22 @@
 #pragma once
 
-#include "external-lib/include-json.h"
-#include "system/angband.h"
-#include <string_view>
+#include "info-reader/parse-error-types.h"
+#include <nlohmann/json_fwd.hpp>
+#include <tl/expected.hpp>
 
-struct angband_header;
-errr parse_monster_messages_info(nlohmann::json &element, angband_header *head);
+class MessageReader {
+public:
+    explicit MessageReader(const nlohmann::json &message_data);
+    MessageReader(nlohmann::json &&) = delete;
+    MessageReader(const MessageReader &) = delete;
+    MessageReader(MessageReader &&) = delete;
+    MessageReader &operator=(const MessageReader &) = delete;
+    MessageReader &operator=(MessageReader &&) = delete;
+
+    tl::expected<void, ParseErrorType> read() const;
+
+private:
+    tl::expected<void, ParseErrorType> set_mon_message() const;
+
+    const nlohmann::json &message_data;
+};

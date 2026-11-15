@@ -31,6 +31,13 @@ class Direction;
 class FloorType;
 class ItemEntity;
 class TimedEffects;
+
+constexpr auto COMMAND_ARG_REST_UNTIL_DONE = -2; /*!<休憩コマンド引数 … 必要な分だけ回復 */
+constexpr auto COMMAND_ARG_REST_FULL_HEALING = -1; /*!<休憩コマンド引数 … HPとMPが全回復するまで */
+
+constexpr auto KNOW_STAT = 0x01; /*!< 自分の能力値を知っている (PlayerType::knowledge) */
+constexpr auto KNOW_HPRATE = 0x02; /*!< 自分の体力ランクを知っている (PlayerType::knowledge) */
+
 class PlayerType {
 public:
     PlayerType();
@@ -66,8 +73,6 @@ public:
     uint32_t exp_frac{}; /* Cur exp frac (times 2^16) */
 
     PLAYER_LEVEL lev{}; /* Level */
-
-    int16_t town_num{}; /* Current town number */
 
     int mhp{}; /* Max hit pts */
     int chp{}; /* Cur hit pts */
@@ -142,8 +147,6 @@ public:
 
     bool timewalk{};
 
-#define COMMAND_ARG_REST_UNTIL_DONE -2 /*!<休憩コマンド引数 … 必要な分だけ回復 */
-#define COMMAND_ARG_REST_FULL_HEALING -1 /*!<休憩コマンド引数 … HPとMPが全回復するまで */
     GAME_TURN resting{}; /* Current counter for resting, if any */
 
     int16_t chaos_patron{};
@@ -200,10 +203,7 @@ public:
 
     MONSTER_IDX riding{}; /* Riding on a monster of this index */
 
-#define KNOW_STAT 0x01
-#define KNOW_HPRATE 0x02
     BIT_FLAGS8 knowledge{}; /* Knowledge about yourself */
-    BIT_FLAGS visit{}; /* Visited towns */
 
     BIT_FLAGS old_race1{}; /* Record of race changes */
     BIT_FLAGS old_race2{}; /* Record of race changes */
@@ -386,6 +386,7 @@ public:
     char base_name[32]{}; /*!< Stripped version of "player_name" */
 
     void ride_monster(MONSTER_IDX m_idx);
+    void dismount();
     std::shared_ptr<TimedEffects> effects() const;
     bool is_fully_healthy() const;
     bool is_wielding(FixedArtifactId fa_id) const;

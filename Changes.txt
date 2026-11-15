@@ -1,0 +1,4 @@
+2026-11-6: Items in shops that you cannot afford show name and price in dark color.
+
+TO DO:
+-Change most global speed affects to movement speed changes, most mobs/players are fixed at 110 global speed. Temp haste will affect global speed (for player and mobs) but is only a +5. Speed is not cumulative, use the fastest.

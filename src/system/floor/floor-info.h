@@ -9,6 +9,7 @@
 #include "util/point-2d.h"
 #include <array>
 #include <map>
+#include <set>
 #include <tl/optional.hpp>
 #include <utility>
 #include <vector>
@@ -31,13 +32,6 @@ constexpr auto MON_LITE_MAX = 1536;
  * @details 視界の最大半径は20、実際は8角形で1520グリッドである.
  */
 constexpr auto VIEW_MAX = 1536;
-
-/*!
- * @brief 再描画処理用配列サイズ / Max array size of the "redraw"
- * @details 遅延再描画を適切に機能させるため、最大ビュー領域の 2倍の大きさにする.
- * ビューグリッド数の最大値は1149なのでその2倍とする.
- */
-constexpr auto REDRAW_MAX = 2298;
 
 enum class FloorBoundary {
     OUTER_WALL_EXCLUSIVE,
@@ -79,8 +73,7 @@ public:
     MONSTER_IDX m_max = 0; /* Number of allocated monsters */
     MONSTER_IDX m_cnt = 0; /* Number of live monsters */
 
-    std::map<MonsterTimedEffect, std::vector<short>> mproc_list; /*!< The array to process dungeon monsters[max_m_idx] */
-    std::map<MonsterTimedEffect, short> mproc_max; /*!< Number of monsters to be processed */
+    std::map<MonsterTimedEffect, std::set<short>> mproc_list; /*!< 時限効果ごとの、効果を受けているモンスターの番号 (番号の順に並ぶ) */
 
     bool monster_noise = false;
     QuestId quest_number;
@@ -129,10 +122,9 @@ public:
     void enter_dungeon(bool state);
     void leave_dungeon(bool state);
     void reset_mproc();
-    void reset_mproc_max();
-    tl::optional<int> get_mproc_index(short m_idx, MonsterTimedEffect mte);
+    void clear_mproc();
     void add_mproc(short m_idx, MonsterTimedEffect mte);
-    void remove_mproc(short m_idx, MonsterTimedEffect mte);
+    bool remove_mproc(short m_idx, MonsterTimedEffect mte);
 
     short pop_empty_index_monster();
     short pop_empty_index_item();
@@ -143,6 +135,7 @@ public:
     void reset_lite_area();
     void set_lite_at(const Pos2D &pos);
     void set_redraw_at(const Pos2D &pos);
+    void set_note_and_redraw_walls_lit_from_player_side(const Pos2D &p_pos_old, const Pos2D &p_pos_new);
     void set_view_at(const Pos2D &pos);
     void set_view();
     void set_note_and_redraw();
@@ -156,6 +149,8 @@ public:
     void set_terrain_id_at(const Pos2D &pos, TerrainTag tag, TerrainKind tk = TerrainKind::NORMAL);
     void set_terrain_id_at(const Pos2D &pos, short terrain_id, TerrainKind tk = TerrainKind::NORMAL);
     void place_trap_at(const Pos2D &pos);
+
+    void decide_floor_size();
 
 private:
     bool entering_dungeon = false;
@@ -173,11 +168,20 @@ private:
     std::array<int, MON_LITE_MAX> mon_lite_y{};
     std::array<int, MON_LITE_MAX> mon_lite_x{};
 
-    short redraw_n = 0; //!< Array of grids for delayed visual updating
-    std::array<int, REDRAW_MAX> redraw_y{};
-    std::array<int, REDRAW_MAX> redraw_x{};
+    std::vector<Pos2D> redraw_points; //!< 遅延再描画するグリッドの座標 (CAVE_REDRAW で重複を除くので、フロアのグリッド数を超えない)
 
     static int decide_selection_count();
+    static std::pair<int, int> select_floor_size_beginner();
+    static std::pair<int, int> select_floor_size_small();
+    static tl::optional<std::pair<int, int>> select_floor_size_small_option();
+    static std::pair<int, int> select_floor_size_large();
+    static tl::optional<std::pair<int, int>> select_floor_size_large_option();
+    static std::pair<int, int> select_floor_size_normal();
+    static std::pair<int, int> pick_block_size(size_t size, int min_area, int max_area);
+    static int calc_blocks(const std::pair<int, int> &block);
 
     void set_note_and_redraw_at(const Pos2D &pos);
+    tl::optional<std::pair<int, int>> try_select_largest_floor() const;
+    tl::optional<std::pair<int, int>> try_select_smallest_floor() const;
+    std::pair<int, int> select_floor_size() const;
 };

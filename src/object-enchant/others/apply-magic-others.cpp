@@ -14,7 +14,7 @@
 #include "sv-definition/sv-other-types.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/player-type-definition.h"
@@ -161,7 +161,7 @@ void OtherItemsEnchanter::generate_statue()
     this->o_ptr->pval = enum2i(monrace_id);
     if (cheat_peek) {
         const auto &monrace = monraces.get_monrace(monrace_id);
-        msg_format(_("%sの像", "Statue of %s"), monrace.name.data());
+        msg_print(_("{}の像", "Statue of {}"), monrace.name);
     }
 
     object_aware(this->player_ptr, *this->o_ptr);

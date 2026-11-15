@@ -3,11 +3,8 @@
 #include "system/angband.h"
 #include <string>
 #include <string_view>
-#include <tl/optional.hpp>
 
 #ifdef JP
-
-enum class CharacterEncoding : uint8_t;
 
 enum class JVerbConjugationType {
     AND = 0,
@@ -17,22 +14,11 @@ enum class JVerbConjugationType {
 std::string conjugate_jverb(std::string_view in, JVerbConjugationType type);
 
 std::string sindarin_to_kana(std::string_view sindarin);
-bool is_kinsoku(std::string_view ch);
-void sjis2euc(char *str);
-void euc2sjis(char *str);
-CharacterEncoding codeconv(char *str);
-bool iskanji2(concptr s, int x);
-tl::optional<std::string> sys_to_utf8(std::string_view str);
-tl::optional<std::string> utf8_to_sys(std::string_view utf8_str);
-size_t guess_convert_to_system_encoding(char *strbuf, int buflen);
+bool is_line_start_kinsoku(std::string_view ch);
+bool is_line_end_kinsoku(std::string_view ch);
 
 int lb_to_kg_integer(int x);
 int lb_to_kg_fraction(int x);
-
-#ifdef EUC
-int utf8_to_euc(char *utf8_str, size_t utf8_str_len, char *euc_buf, size_t euc_buf_len);
-int euc_to_utf8(const char *euc_str, size_t euc_str_len, char *utf8_buf, size_t utf8_buf_len);
-#endif
 
 /*!
  * @brief インチ→cm変換
@@ -55,14 +41,14 @@ constexpr int lb_to_kg(int lb)
 
 #else
 
-constexpr bool is_kinsoku(std::string_view)
+constexpr bool is_line_start_kinsoku(std::string_view)
 {
     return false;
 }
 
-inline tl::optional<std::string> sys_to_utf8(std::string_view str)
+constexpr bool is_line_end_kinsoku(std::string_view)
 {
-    return tl::make_optional<std::string>(str);
+    return false;
 }
 
 #endif

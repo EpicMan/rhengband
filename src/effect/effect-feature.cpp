@@ -12,12 +12,12 @@
 #include "monster/monster-util.h"
 #include "room/door-definition.h"
 #include "spell-class/spells-mirror-master.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "timed-effect/timed-effects.h"
 #include "util/bit-flags-calculator.h"
@@ -108,7 +108,7 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
         }
 
         if (message) {
-            msg_format(_("木は%s。", "A tree %s"), message);
+            msg_print(_("木は{}。", "A tree {}"), message);
             set_terrain_id_to_grid(player_ptr, pos, one_in_(3) ? TerrainTag::BRAKE : TerrainTag::GRASS);
 
             /* Observe */
@@ -170,7 +170,7 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
             cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::DISARM);
         }
 
-        if (floor.has_closed_door_at(pos) && terrain.power && terrain.flags.has(TerrainCharacteristics::OPEN)) {
+        if (floor.has_closed_door_at(pos) && terrain.door_power && terrain.flags.has(TerrainCharacteristics::OPEN)) {
             FEAT_IDX old_feat = grid.feat;
             cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::DISARM);
             if (known && (old_feat != grid.feat)) {
@@ -179,7 +179,7 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
             }
         }
 
-        if (player_ptr->effects()->blindness().is_blind() || !grid.has_los()) {
+        if (player_ptr->effects()->blindness().is_active() || !grid.has_los()) {
             break;
         }
 
@@ -198,7 +198,7 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
             cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::TUNNEL);
         }
 
-        if (player_ptr->effects()->blindness().is_blind() || !grid.has_los()) {
+        if (player_ptr->effects()->blindness().is_active() || !grid.has_los()) {
             break;
         }
 
@@ -225,22 +225,22 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
             break;
         }
 
-        msg_format(_("%sに何かがつっかえて開かなくなった。", "The %s seems stuck."), terrain_mimic.name.data());
+        msg_print(_("{}に何かがつっかえて開かなくなった。", "The {} seems stuck."), terrain_mimic.name);
         obvious = true;
         break;
     }
     case AttributeType::KILL_WALL: {
-        if (terrain.flags.has_not(TerrainCharacteristics::HURT_ROCK)) {
+        if (terrain.flags.has_not(TerrainCharacteristics::STONE)) {
             break;
         }
 
         if (known && grid.is_mark()) {
-            msg_format(_("%sが溶けて泥になった！", "The %s turns into mud!"), grid.get_terrain(TerrainKind::MIMIC).name.data());
+            msg_print(_("{}が溶けて泥になった！", "The {} turns into mud!"), grid.get_terrain(TerrainKind::MIMIC).name);
             obvious = true;
         }
 
-        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::HURT_ROCK);
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
+        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::STONE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
         break;
     }
     case AttributeType::MAKE_DOOR:
@@ -403,12 +403,12 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
         }
 
         if (known && (grid.is_mark())) {
-            msg_format(_("%sが割れた！", "The %s crumbled!"), grid.get_terrain(TerrainKind::MIMIC).name.data());
+            msg_print(_("{}が割れた！", "The {} crumbled!"), grid.get_terrain(TerrainKind::MIMIC).name);
             sound(SoundKind::GLASS);
         }
 
-        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::HURT_ROCK);
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
+        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::STONE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
         break;
     }
     case AttributeType::SOUND: {
@@ -425,12 +425,12 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
         }
 
         if (known && (grid.is_mark())) {
-            msg_format(_("%sが割れた！", "The %s crumbled!"), grid.get_terrain(TerrainKind::MIMIC).name.data());
+            msg_print(_("{}が割れた！", "The {} crumbled!"), grid.get_terrain(TerrainKind::MIMIC).name);
             sound(SoundKind::GLASS);
         }
 
-        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::HURT_ROCK);
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
+        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::STONE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
         break;
     }
     case AttributeType::DISINTEGRATE: {
@@ -438,12 +438,12 @@ bool affect_feature(PlayerType *player_ptr, MONSTER_IDX src_idx, POSITION r, POS
             SpellsMirrorMaster(player_ptr).remove_mirror(y, x);
         }
 
-        if (terrain.flags.has_not(TerrainCharacteristics::HURT_DISI) || terrain.flags.has(TerrainCharacteristics::PERMANENT)) {
+        if (terrain.flags.has_not(TerrainCharacteristics::CAN_DISINTEGRATE) || terrain.flags.has(TerrainCharacteristics::PERMANENT)) {
             break;
         }
 
-        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::HURT_DISI);
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
+        cave_alter_feat(player_ptr, y, x, TerrainCharacteristics::CAN_DISINTEGRATE);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::FLOW);
         break;
     }
     default:

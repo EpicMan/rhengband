@@ -10,12 +10,10 @@
 
 #include "floor/wild.h"
 #include "core/asking-player.h"
-#include "dungeon/quest.h"
 #include "game-option/birth-options.h"
 #include "game-option/map-screen-options.h"
 #include "info-reader/fixed-map-parser.h"
-#include "info-reader/parse-error-types.h"
-#include "io/tokenizer.h"
+#include "info-reader/wilderness-reader.h"
 #include "market/building-initializer.h"
 #include "monster-floor/monster-generator.h"
 #include "monster-floor/monster-remover.h"
@@ -29,12 +27,15 @@
 #include "system/angband-system.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/dungeon/dungeon-list.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/enums/dungeon/dungeon-id.h"
+#include "system/enums/terrain/building-type.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/enums/terrain/wilderness-terrain.h"
 #include "system/floor/floor-info.h"
-#include "system/floor/town-info.h"
 #include "system/floor/town-list.h"
+#include "system/floor/town-records.h"
 #include "system/floor/wilderness-grid.h"
 #include "system/grid-type-definition.h"
 #include "system/monster-entity.h"
@@ -42,6 +43,7 @@
 #include "system/terrain/terrain-definition.h"
 #include "system/terrain/terrain-list.h"
 #include "util/bit-flags-calculator.h"
+#include "util/finalizer.h"
 #include "view/display-messages.h"
 #include "window/main-window-util.h"
 #include "world/world.h"
@@ -209,8 +211,8 @@ static void generate_wilderness_area(FloorType &floor, const WildernessGrid &wg,
     }
 
     auto &system = AngbandSystem::get_instance();
-    const Xoshiro128StarStar rng_backup = system.get_rng();
-    Xoshiro128StarStar wilderness_rng(wg.get_seed());
+    const auto restore_rng = util::make_finalizer([&system, rng_backup = system.get_rng()]() { system.set_rng(rng_backup); });
+    xso::rng32 wilderness_rng(wg.get_seed());
     system.set_rng(wilderness_rng);
     if (!corner) {
         for (auto y = 0; y < MAX_HGT; y++) {
@@ -234,7 +236,6 @@ static void generate_wilderness_area(FloorType &floor, const WildernessGrid &wg,
         grid_bottom_left.set_terrain_id(tags.at(grid_bottom_left.feat));
         grid_top_right.set_terrain_id(tags.at(grid_top_right.feat));
         grid_bottom_right.set_terrain_id(tags.at(grid_bottom_right.feat));
-        system.set_rng(rng_backup);
         return;
     }
 
@@ -255,8 +256,6 @@ static void generate_wilderness_area(FloorType &floor, const WildernessGrid &wg,
             grid.set_terrain_id(terrain_table.at(wg_terrain).at(grid.feat));
         }
     }
-
-    system.set_rng(rng_backup);
 }
 
 /*!
@@ -271,13 +270,14 @@ static void generate_area(PlayerType *player_ptr, const Pos2D &pos, bool is_bord
 {
     const auto &wilderness = WildernessGrids::get_instance();
     const auto &wg = wilderness.get_grid(pos);
-    player_ptr->town_num = wg.get_town();
+    auto &world = AngbandWorld::get_instance();
+    world.set_town_index(wg.get_town());
     auto &floor = *player_ptr->current_floor_ptr;
     floor.base_level = wg.get_level();
     floor.dun_level = 0;
     floor.monster_level = floor.base_level;
     floor.object_level = floor.base_level;
-    if (player_ptr->town_num) {
+    if (world.is_in_any_town()) {
         init_buildings();
         if (is_border || is_corner) {
             init_flags = i2enum<init_flags_type>(INIT_CREATE_DUNGEON | INIT_ONLY_FEATURES);
@@ -285,9 +285,9 @@ static void generate_area(PlayerType *player_ptr, const Pos2D &pos, bool is_bord
             init_flags = INIT_CREATE_DUNGEON;
         }
 
-        parse_fixed_map(player_ptr, TOWN_DEFINITION_LIST, 0, 0, MAX_HGT, MAX_WID);
+        load_town_map(player_ptr);
         if (!is_corner && !is_border) {
-            player_ptr->visit |= (1UL << (player_ptr->town_num - 1));
+            TownRecords::get_instance().set_visited(to_town_id(world.get_town_index()));
         }
     } else {
         generate_wilderness_area(floor, wg, is_corner);
@@ -337,13 +337,12 @@ static void generate_area(PlayerType *player_ptr, const Pos2D &pos, bool is_bord
     }
 
     auto &system = AngbandSystem::get_instance();
-    const Xoshiro128StarStar rng_backup = system.get_rng();
-    Xoshiro128StarStar wilderness_rng(wg.get_seed());
+    const auto restore_rng = util::make_finalizer([&system, rng_backup = system.get_rng()]() { system.set_rng(rng_backup); });
+    xso::rng32 wilderness_rng(wg.get_seed());
     system.set_rng(wilderness_rng);
-    const Pos2D pos_entrance(rand_range(6, floor.height - 6), rand_range(6, floor.width - 6));
+    const Pos2D pos_entrance{ rand_range(6, floor.height - 6), rand_range(6, floor.width - 6) };
     floor.get_grid(pos_entrance).set_terrain_id(TerrainTag::ENTRANCE);
     floor.get_grid(pos_entrance).special = static_cast<short>(entrance);
-    system.set_rng(rng_backup);
 }
 
 /*!
@@ -359,9 +358,10 @@ static void generate_wild_monsters(PlayerType *player_ptr)
     constexpr auto num_normal_monsters = 8;
     const auto should_ambush = WildernessGrids::get_instance().should_ambush();
     const auto lim = should_ambush ? num_ambush_monsters : num_normal_monsters;
+    const auto &world = AngbandWorld::get_instance();
     for (auto i = 0; i < lim; i++) {
         BIT_FLAGS mode = 0;
-        if (!should_ambush && (one_in_(2) || player_ptr->town_num)) {
+        if (!should_ambush && (one_in_(2) || world.get_town_index())) {
             mode |= PM_ALLOW_SLEEP;
         }
 
@@ -383,8 +383,7 @@ void wilderness_gen(PlayerType *player_ptr)
     panel_row_min = floor.height;
     panel_col_min = floor.width;
     auto &wilderness = WildernessGrids::get_instance();
-    const auto &area = wilderness.get_area();
-    parse_fixed_map(player_ptr, WILDERNESS_DEFINITION, 0, 0, area.height(), area.width());
+    (void)apply_wilderness_definition();
 
     const auto &pos_wilderness = wilderness.get_player_position();
     get_mon_num_prep_enum(player_ptr, floor.get_monrace_hook());
@@ -491,6 +490,7 @@ void wilderness_gen(PlayerType *player_ptr)
     }
 
     if (player_ptr->teleport_town) {
+        const auto is_in_outpost = world.get_town_index() == to_town_index(TownId::OUTPOST);
         for (const auto &pos : floor.get_area()) {
             auto &grid = floor.get_grid(pos);
             const auto &terrain = grid.get_terrain();
@@ -498,7 +498,7 @@ void wilderness_gen(PlayerType *player_ptr)
                 continue;
             }
 
-            if ((terrain.subtype != 4) && !((player_ptr->town_num == 1) && (terrain.subtype == 0))) {
+            if ((terrain.building_type != BuildingType::BUILDING_04) && !(is_in_outpost && (terrain.building_type == BuildingType::BUILDING_00))) {
                 continue;
             }
 
@@ -561,10 +561,10 @@ void wilderness_gen_small(PlayerType *player_ptr)
     }
 
     const auto &dungeons = DungeonList::get_instance();
-    const auto &world = AngbandWorld::get_instance();
+    auto &world = AngbandWorld::get_instance();
     const auto &wilderness = WildernessGrids::get_instance();
     const auto &area = wilderness.get_area();
-    parse_fixed_map(player_ptr, WILDERNESS_DEFINITION, 0, 0, area.height(), area.width());
+    (void)apply_wilderness_definition();
     for (const auto &pos : area) {
         auto &grid = floor.get_grid(pos);
         const auto &wg = wilderness.get_grid(pos);
@@ -606,125 +606,7 @@ void wilderness_gen_small(PlayerType *player_ptr)
     panel_row_min = floor.height;
     panel_col_min = floor.width;
     player_ptr->set_position(wilderness.get_player_position());
-    player_ptr->town_num = 0;
-}
-
-/*!
- * @brief WildernessDefinition.txt を1行読み取って解析する
- * @param line 読み取ったデータ行のバッファ
- * @param xmin 広域地形マップを読み込みたいx座標の開始位置
- * @param xmax 広域地形マップを読み込みたいx座標の終了位置
- * @param pos_parsing 解析対象の座標
- * @return 解析結果の座標。解析エラー時はエラーの種類。座標はDタグの時だけ更新の可能性があり、それ以外はpos_parsingをそのまま返却する。
- */
-tl::expected<Pos2D, parse_error_type> parse_line_wilderness(char *line, int xmin, int xmax, const Pos2D &pos_parsing)
-{
-    auto &letters = WildernessLetters::get_instance();
-    letters.initialize();
-    if (!std::string_view(line).starts_with("W:")) {
-        return tl::unexpected(PARSE_ERROR_GENERIC);
-    }
-
-    Pos2D pos = pos_parsing;
-    auto &wilderness = WildernessGrids::get_instance();
-    switch (line[2]) {
-        /* Process "W:F:<letter>:<terrain>:<town>:<road>:<name> */
-#ifdef JP
-    case 'E':
-        return pos_parsing;
-    case 'F':
-    case 'J':
-#else
-    case 'J':
-        return pos_parsing;
-    case 'F':
-    case 'E':
-#endif
-    {
-        char *zz[33];
-        const auto num = tokenize(line + 4, 6, zz, 0);
-        if (num <= 1) {
-            return tl::unexpected(PARSE_ERROR_TOO_FEW_ARGUMENTS);
-        }
-
-        const int index = zz[0][0];
-        auto &letter = letters.get_grid(index);
-        if (num > 1) {
-            letter.set_terrain(i2enum<WildernessTerrain>(std::stoi(zz[1])));
-        }
-
-        if (num > 2) {
-            letter.set_level(std::stoi(zz[2]));
-        }
-
-        if (num > 3) {
-            letter.set_town(static_cast<short>(std::stoi(zz[3])));
-        }
-
-        if (num > 4) {
-            letter.set_road(std::stoi(zz[4]));
-        }
-
-        if (num > 5) {
-            letter.set_name(zz[5]);
-        }
-
-        break;
-    }
-
-    /* Process "W:D:<layout> */
-    /* Layout of the wilderness */
-    case 'D': {
-        pos.x = xmin;
-        char *s = line + 4;
-        int len = strlen(s);
-        for (auto i = 0; ((pos.x < xmax) && (i < len)); pos.x++, s++, i++) {
-            int id = s[0];
-            const auto &letter = letters.get_grid(id);
-            wilderness.get_grid(pos).initialize(letter);
-            towns_info[letter.get_town()].name = letter.get_name();
-        }
-
-        pos.y++;
-        break;
-    }
-
-    /* Process "W:P:<x>:<y> - starting position in the wilderness */
-    case 'P': {
-        if (wilderness.has_player_located()) {
-            break;
-        }
-
-        char *zz[33];
-        if (tokenize(line + 4, 2, zz, 0) != 2) {
-            return tl::unexpected(PARSE_ERROR_TOO_FEW_ARGUMENTS);
-        }
-
-        wilderness.set_starting_player_position({ std::stoi(zz[0]), std::stoi(zz[1]) });
-        wilderness.initialize_position();
-        if (!wilderness.is_player_in_bounds()) {
-            return tl::unexpected(PARSE_ERROR_OUT_OF_BOUNDS);
-        }
-
-        break;
-    }
-    default:
-        return tl::unexpected(PARSE_ERROR_UNDEFINED_DIRECTIVE);
-    }
-
-    for (const auto &[dungeon_id, dungeon] : DungeonList::get_instance()) {
-        if (dungeon_id == DungeonId::WILDERNESS) {
-            continue;
-        }
-
-        auto &wg = wilderness.get_grid(dungeon->get_position());
-        wg.set_entrance(dungeon_id);
-        if (!wg.has_town()) {
-            wg.set_level(dungeon->mindepth);
-        }
-    }
-
-    return pos;
+    world.set_town_index(0);
 }
 
 /*!

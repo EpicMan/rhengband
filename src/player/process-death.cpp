@@ -13,16 +13,16 @@
 #include "game-option/game-play-options.h"
 #include "inventory/inventory-slot-types.h"
 #include "io/files-util.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "object/item-tester-hooker.h"
 #include "object/item-use-flags.h"
 #include "perception/object-perception.h"
 #include "player-info/class-info.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
-#include "system/floor/town-info.h"
 #include "system/floor/town-list.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
 #include "util/buffer-shaper.h"
@@ -99,10 +99,12 @@ static int show_killing_monster(PlayerType *player_ptr)
     }
 
     if (lines.size() >= 3) {
-        char buf[GRAVE_LINE_WIDTH + 1];
-        angband_strcpy(buf, lines[1], sizeof(buf) - 2);
-        angband_strcat(buf, "…", sizeof(buf));
         show_tomb_line(lines[0], GRAVE_KILLER_NAME_ROW);
+
+        //!< 文末を2文字削る文字数は日英で異なる.
+        //!< @todo 英語版は関数ごとプリプロで呼び分けているが、後で統一する.
+        const auto omit = _(2, 3);
+        const auto buf = fmt::format(_("{}…", "{}..."), str_substr(lines[1], 0, GRAVE_LINE_WIDTH - omit));
         show_tomb_line(buf, GRAVE_KILLER_NAME_ROW + 1);
         return 1;
     }
@@ -134,18 +136,19 @@ static void show_dead_place(PlayerType *player_ptr, int extra_line)
         return;
     }
 
+    const auto &floor = *player_ptr->current_floor_ptr;
     std::string place;
-    if (!player_ptr->current_floor_ptr->is_underground()) {
-        concptr field_name = player_ptr->town_num ? "街" : "荒野";
+    if (!floor.is_underground()) {
+        std::string_view field_name = AngbandWorld::get_instance().is_in_any_town() ? "街" : "荒野";
         if (streq(player_ptr->died_from, "途中終了")) {
-            place = format("%sで死んだ", field_name);
+            place = fmt::format("{}で死んだ", field_name);
         } else {
-            place = format("に%sで殺された", field_name);
+            place = fmt::format("に{}で殺された", field_name);
         }
     } else if (streq(player_ptr->died_from, "途中終了")) {
-        place = format("地下 %d 階で死んだ", (int)player_ptr->current_floor_ptr->dun_level);
+        place = fmt::format("地下 {} 階で死んだ", floor.dun_level);
     } else {
-        place = format("に地下 %d 階で殺された", (int)player_ptr->current_floor_ptr->dun_level);
+        place = fmt::format("に地下 {} 階で殺された", floor.dun_level);
     }
 
     show_tomb_line(place, GRAVE_DEAD_PLACE_ROW + extra_line);
@@ -179,9 +182,9 @@ static void show_tomb_detail(PlayerType *player_ptr)
  */
 static void show_tomb_detail(PlayerType *player_ptr)
 {
-    show_tomb_line(format("Killed on Level %d", player_ptr->current_floor_ptr->dun_level), GRAVE_DEAD_PLACE_ROW);
+    show_tomb_line(fmt::format("Killed on Level {}", player_ptr->current_floor_ptr->dun_level), GRAVE_DEAD_PLACE_ROW);
 
-    auto lines = shape_buffer(format("by %s.", player_ptr->died_from.data()).data(), GRAVE_LINE_WIDTH + 1);
+    auto lines = shape_buffer(fmt::format("by {}.", player_ptr->died_from), GRAVE_LINE_WIDTH + 1);
     show_tomb_line(lines[0], GRAVE_KILLER_NAME_ROW);
     if (lines.size() == 1) {
         return;
@@ -224,8 +227,9 @@ void print_tomb(PlayerType *player_ptr)
     show_tomb_detail(player_ptr);
 
     time_t ct = time((time_t *)0);
-    show_tomb_line(format("%-.24s", ctime(&ct)), GRAVE_DEAD_DATETIME_ROW);
-    msg_format(_("さようなら、%s!", "Goodbye, %s!"), player_ptr->name);
+    const auto *datetime_str = ctime(&ct);
+    show_tomb_line(datetime_str ? std::string_view(datetime_str).substr(0, 24) : std::string_view(), GRAVE_DEAD_DATETIME_ROW);
+    msg_print(_("さようなら、{}!", "Goodbye, {}!"), player_ptr->name);
 }
 
 /*!
@@ -235,8 +239,8 @@ void print_tomb(PlayerType *player_ptr)
 static void inventory_aware(PlayerType *player_ptr)
 {
     ItemEntity *o_ptr;
-    for (int i = 0; i < INVEN_TOTAL; i++) {
-        o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_ALL_SLOTS) {
+        o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid()) {
             continue;
         }
@@ -252,8 +256,9 @@ static void inventory_aware(PlayerType *player_ptr)
  */
 static void home_aware(PlayerType *player_ptr)
 {
-    for (size_t i = 1; i < towns_info.size(); i++) {
-        const auto &store = towns_info[i].get_store(StoreSaleType::HOME);
+    const auto &towns = TownList::get_instance();
+    for (size_t i = 1; i < towns.size(); i++) {
+        const auto &store = towns.get_town(i).get_store(StoreSaleType::HOME);
         for (auto j = 0; j < store.stock_num; j++) {
             auto &item = *store.stock[j];
             if (!item.is_valid()) {
@@ -276,8 +281,9 @@ static bool show_dead_player_items(PlayerType *player_ptr)
     if (player_ptr->equip_cnt) {
         term_clear();
         (void)show_equipment(player_ptr, 0, USE_FULL, AllMatchItemTester());
-        prt(_("装備していたアイテム: -続く-", "You are using: -more-"), 0, 0);
-        if (inkey() == ESCAPE) {
+        constexpr auto prompt = _("装備していたアイテム: -続く-", "You are using: -more-");
+        prt(prompt, 0, 0);
+        if (input_key_with_context(InputKind::ANY_KEY, prompt) == ESCAPE) {
             return true;
         }
     }
@@ -285,9 +291,10 @@ static bool show_dead_player_items(PlayerType *player_ptr)
     if (player_ptr->inven_cnt) {
         term_clear();
         (void)show_inventory(player_ptr, 0, USE_FULL, AllMatchItemTester());
-        prt(_("持っていたアイテム: -続く-", "You are carrying: -more-"), 0, 0);
+        constexpr auto prompt = _("持っていたアイテム: -続く-", "You are carrying: -more-");
+        prt(prompt, 0, 0);
 
-        if (inkey() == ESCAPE) {
+        if (input_key_with_context(InputKind::ANY_KEY, prompt) == ESCAPE) {
             return true;
         }
     }
@@ -301,8 +308,9 @@ static bool show_dead_player_items(PlayerType *player_ptr)
  */
 static void show_dead_home_items(PlayerType *player_ptr)
 {
-    for (size_t l = 1; l < towns_info.size(); l++) {
-        const auto &store = towns_info[l].get_store(StoreSaleType::HOME);
+    const auto &towns = TownList::get_instance();
+    for (size_t l = 1; l < towns.size(); l++) {
+        const auto &store = towns.get_town(l).get_store(StoreSaleType::HOME);
         if (store.stock_num == 0) {
             continue;
         }
@@ -311,13 +319,14 @@ static void show_dead_home_items(PlayerType *player_ptr)
             term_clear();
             for (int j = 0; (j < 12) && (i < store.stock_num); j++, i++) {
                 const auto &item = *store.stock[i];
-                prt(format("%c) ", I2A(j)), j + 2, 4);
+                prt(fmt::format("{:c}) ", I2A(j)), j + 2, 4);
                 const auto item_name = describe_flavor(player_ptr, item, 0);
                 c_put_str(tval_to_attr[enum2i(item.bi_key.tval())], item_name, j + 2, 7);
             }
 
-            prt(format(_("我が家に置いてあったアイテム ( %d ページ): -続く-", "Your home contains (page %d): -more-"), k + 1), 0, 0);
-            if (inkey() == ESCAPE) {
+            const auto prompt = fmt::format(_("我が家に置いてあったアイテム ( {} ページ): -続く-", "Your home contains (page {}): -more-"), k + 1);
+            prt(prompt, 0, 0);
+            if (input_key_with_context(InputKind::ANY_KEY, prompt) == ESCAPE) {
                 return;
             }
         }
@@ -334,8 +343,7 @@ static void export_player_info(PlayerType *player_ptr)
     prt(_("キャラクターの記録をファイルに書き出すことができます。", "You may now dump a character record to one or more files."), 21, 0);
     prt(_("リターンキーでキャラクターを見ます。ESCで中断します。", "Then, hit RETURN to see the character, or ESC to abort."), 22, 0);
     while (true) {
-        put_str(_("ファイルネーム: ", "Filename: "), 23, 0);
-        const auto ask_result = askfor(60);
+        const auto ask_result = input_string_on_row(_("ファイルネーム: ", "Filename: "), 23, 60);
         if (!ask_result || ask_result->empty()) {
             return;
         }
@@ -357,7 +365,7 @@ static void file_character_auto(PlayerType *player_ptr)
     char datetime[32];
     strftime(datetime, sizeof(datetime), "%Y-%m-%d_%H%M%S", now_tm);
     screen_save();
-    const auto filename = format("%s_Autodump_%s.txt", player_ptr->name, datetime);
+    const auto filename = fmt::format("{}_Autodump_{}.txt", player_ptr->name, datetime);
     file_character(player_ptr, filename);
     screen_load();
 }
@@ -372,8 +380,8 @@ void show_death_info(PlayerType *player_ptr)
     inventory_aware(player_ptr);
     home_aware(player_ptr);
 
-    RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
-    handle_stuff(player_ptr);
+    DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
+    handle_stuff_with_inventory_arrangement(player_ptr);
     flush();
     msg_erase();
 
@@ -383,8 +391,9 @@ void show_death_info(PlayerType *player_ptr)
 
     export_player_info(player_ptr);
     (void)display_player(player_ptr, 0);
-    prt(_("何かキーを押すとさらに情報が続きます (ESCで中断): ", "Hit any key to see more information (ESC to abort): "), 23, 0);
-    if (inkey() == ESCAPE) {
+    constexpr auto prompt = _("何かキーを押すとさらに情報が続きます (ESCで中断): ", "Hit any key to see more information (ESC to abort): ");
+    prt(prompt, 23, 0);
+    if (input_key_with_context(InputKind::ANY_KEY, prompt) == ESCAPE) {
         return;
     }
     if (show_dead_player_items(player_ptr)) {

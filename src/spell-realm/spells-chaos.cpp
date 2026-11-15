@@ -1,5 +1,4 @@
 #include "spell-realm/spells-chaos.h"
-#include "dungeon/quest.h"
 #include "effect/effect-characteristics.h"
 #include "effect/effect-processor.h"
 #include "grid/grid.h"
@@ -9,14 +8,16 @@
 #include "player/player-damage.h"
 #include "spell-kind/spells-floor.h"
 #include "spell-kind/spells-launcher.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
+#include "system/dungeon/quest-definition.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/projection-path-calculator.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 
 /*!
@@ -61,11 +62,11 @@ void call_the_void(PlayerType *player_ptr)
         return;
     }
 
+    const auto is_prayer = mp_ptr->spell_book == ItemKindType::LIFE_BOOK;
 #ifdef JP
-    msg_format("あなたは%sを壁に近すぎる場所で唱えてしまった！", ((mp_ptr->spell_book == ItemKindType::LIFE_BOOK) ? "祈り" : "呪文"));
+    msg_print("あなたは{}を壁に近すぎる場所で唱えてしまった！", is_prayer ? "祈り" : "呪文");
 #else
-    msg_format("You %s the %s too close to a wall!", ((mp_ptr->spell_book == ItemKindType::LIFE_BOOK) ? "recite" : "cast"),
-        ((mp_ptr->spell_book == ItemKindType::LIFE_BOOK) ? "prayer" : "spell"));
+    msg_print("You {} the {} too close to a wall!", is_prayer ? "recite" : "cast", is_prayer ? "prayer" : "spell");
 #endif
     msg_print(_("大きな爆発音があった！", "There is a loud explosion!"));
 
@@ -95,12 +96,12 @@ static void erase_wall(FloorType &floor, const Pos2D &pos)
 {
     auto &grid = floor.get_grid(pos);
     const auto &terrain = grid.get_terrain(TerrainKind::MIMIC_RAW);
-    grid.info &= ~(CAVE_ROOM | CAVE_ICKY);
-    if ((grid.mimic == 0) || terrain.flags.has_not(TerrainCharacteristics::HURT_DISI)) {
+    grid.info &= ~(CAVE_ROOM | CAVE_NO_TELEPORT_DEST);
+    if ((grid.mimic == 0) || terrain.flags.has_not(TerrainCharacteristics::CAN_DISINTEGRATE)) {
         return;
     }
 
-    grid.mimic = floor.get_dungeon_definition().convert_terrain_id(grid.mimic, TerrainCharacteristics::HURT_DISI);
+    grid.mimic = floor.get_dungeon_definition().convert_terrain_id(grid.mimic, TerrainCharacteristics::CAN_DISINTEGRATE);
     const auto &terrain_changed = grid.get_terrain(TerrainKind::MIMIC_RAW);
     if (terrain_changed.flags.has_not(TerrainCharacteristics::REMEMBER)) {
         grid.info &= ~(CAVE_MARK);
@@ -138,39 +139,26 @@ bool vanish_dungeon(PlayerType *player_ptr)
     for (const auto &pos : floor.get_area(FloorBoundary::OUTER_WALL_EXCLUSIVE)) {
         auto &grid = floor.get_grid(pos);
         const auto &terrrain = grid.get_terrain();
-        grid.info &= ~(CAVE_ROOM | CAVE_ICKY);
+        grid.info &= ~(CAVE_ROOM | CAVE_NO_TELEPORT_DEST);
         const auto &monster = floor.m_list[grid.m_idx];
         if (grid.has_monster() && monster.is_asleep()) {
-            (void)set_monster_csleep(player_ptr, grid.m_idx, 0);
+            (void)set_monster_csleep(floor, grid.m_idx, 0);
             if (monster.ml) {
                 const auto m_name = monster_desc(player_ptr, monster, 0);
-                msg_format(_("%s^が目を覚ました。", "%s^ wakes up."), m_name.data());
+                msg_print(_("{}が目を覚ました。", "{} wakes up."), str_upcase_first(m_name));
             }
         }
 
-        if (terrrain.flags.has(TerrainCharacteristics::HURT_DISI)) {
-            cave_alter_feat(player_ptr, pos.y, pos.x, TerrainCharacteristics::HURT_DISI);
+        if (terrrain.flags.has(TerrainCharacteristics::CAN_DISINTEGRATE)) {
+            cave_alter_feat(player_ptr, pos.y, pos.x, TerrainCharacteristics::CAN_DISINTEGRATE);
         }
     }
 
     erase_all_walls(floor);
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::UN_VIEW,
-        StatusRecalculatingFlag::UN_LITE,
-        StatusRecalculatingFlag::VIEW,
-        StatusRecalculatingFlag::LITE,
-        StatusRecalculatingFlag::FLOW,
-        StatusRecalculatingFlag::MONSTER_LITE,
-        StatusRecalculatingFlag::MONSTER_STATUSES,
-    };
-    rfu.set_flags(flags_srf);
-    rfu.set_flag(MainWindowRedrawingFlag::MAP);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::OVERHEAD,
-        SubWindowRedrawingFlag::DUNGEON,
-    };
-    rfu.set_flags(flags_swrf);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_monster_update_and_map_redrawing();
+    dur.request_sight_recalculation();
+    dur.set_flag(StatusRecalculatingFlag::FLOW);
     return true;
 }
 
@@ -191,7 +179,7 @@ void cast_meteor(PlayerType *player_ptr, int dam, POSITION rad)
         Pos2D pos(0, 0);
         int count;
         for (count = 0; count <= 20; count++) {
-            const Pos2DVec vec(randint0(17) - 8, randint0(17) - 8);
+            const Pos2DVec vec{ randint0(17) - 8, randint0(17) - 8 };
             pos = p_pos + vec;
             const auto dx = std::abs(player_ptr->x - pos.x);
             const auto dy = std::abs(player_ptr->y - pos.y);

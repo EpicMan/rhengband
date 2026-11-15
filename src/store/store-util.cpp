@@ -6,13 +6,20 @@
 
 #include "store/store-util.h"
 #include "object-enchant/item-feeling.h"
-#include "object-enchant/special-object-flags.h"
 #include "object/object-value.h"
 #include "object/tval-types.h"
-#include "system/item-entity.h"
+#include "store/store-owners.h"
+#include "system/item/item-entity.h"
 #include <algorithm>
 
-Store *st_ptr = nullptr;
+/*!
+ * @brief 店舗を生成する
+ * @param sale_type 店舗の種類
+ */
+Store::Store(StoreSaleType sale_type)
+    : sale_type(sale_type)
+{
+}
 
 /*!
  * @brief 店舗のオブジェクト数を増やす
@@ -161,7 +168,7 @@ tl::optional<int> Store::carry(ItemEntity &item)
         return tl::nullopt;
     }
 
-    item.ident |= IDENT_FULL_KNOWN;
+    item.set_identification_flag(IdentificationFlag::FULL_KNOWN);
     item.inscription.reset();
     item.feeling = FEEL_NONE;
     for (auto slot = 0; slot < this->stock_num; slot++) {
@@ -187,4 +194,22 @@ tl::optional<int> Store::carry(ItemEntity &item)
     this->stock_num++;
     *this->stock[slot] = item.clone();
     return slot;
+}
+
+/*!
+ * @brief 店舗の種類を返す
+ * @return 店舗の種類
+ */
+StoreSaleType Store::get_sale_type() const
+{
+    return this->sale_type;
+}
+
+/*!
+ * @brief 店舗の現在の店主を返す
+ * @return 店主の情報
+ */
+const owner_type &Store::get_owner() const
+{
+    return owners.at(this->sale_type).at(this->owner);
 }

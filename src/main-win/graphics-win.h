@@ -6,6 +6,7 @@
 
 #include "system/h-type.h"
 #include <filesystem>
+#define NOMINMAX
 #include <windows.h>
 
 /*
@@ -16,6 +17,7 @@ enum class graphics_mode : byte {
     GRAPHICS_ORIGINAL = 1, //!< Old tiles
     GRAPHICS_ADAM_BOLT = 2, //!< Adam Bolt's tiles
     GRAPHICS_HENGBAND = 3, //!< 新タイル
+    GRAPHICS_ORIGINAL_TERRAIN = 4, //!< オリジナル地形32x32
 };
 
 /*!

@@ -1,15 +1,17 @@
 #include "monster/monster-util.h"
-#include "dungeon/quest.h"
 #include "game-option/cheat-options.h"
+#include "grid/grid.h"
 #include "monster-floor/place-monster-types.h"
 #include "monster-race/monster-kind-mask.h"
 #include "monster-race/race-ability-mask.h"
 #include "monster/monster-info.h"
+#include "monster/monster-update.h"
 #include "mspell/summon-checker.h"
 #include "room/pit-nest-util.h"
 #include "spell/summon-types.h"
 #include "system/angband-exceptions.h"
 #include "system/dungeon/dungeon-definition.h"
+#include "system/dungeon/quest-definition.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/enums/terrain/wilderness-terrain.h"
 #include "system/floor/floor-info.h"
@@ -22,9 +24,11 @@
 #include "system/player-type-definition.h"
 #include "system/services/dungeon-monrace-service.h"
 #include "system/terrain/terrain-definition.h"
+#include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
 #include "wizard/monrace-filter-debug-info.h"
 #include <algorithm>
+#include <fmt/format.h>
 #include <iterator>
 
 /**
@@ -58,11 +62,11 @@ static bool is_possible_monster_or(const EnumClassFlagGroup<T> &r_flags, const E
  * @param dungeon ダンジョンへの参照
  * @param floor_level 生成階層
  * @param monrace_id チェックするモンスター種族ID
- * @param summon_specific_type summon_specific() によるものの場合、召喚種別を指定する
+ * @param has_summon_specific_type summon_specific() によるものの場合、true
  * @param is_chameleon_polymorph カメレオンの変身の場合、true
  * @return 召喚条件が一致するならtrue / Return TRUE is the monster is OK and FALSE otherwise
  */
-static bool restrict_monster_to_dungeon(const DungeonDefinition &dungeon, int floor_level, MonraceId monrace_id, bool has_summon_specific_type = false, bool is_chameleon_polymorph = false)
+bool restrict_monster_to_dungeon(const DungeonDefinition &dungeon, int floor_level, MonraceId monrace_id, bool has_summon_specific_type, bool is_chameleon_polymorph)
 {
     const auto &monrace = MonraceList::get_instance().get_monrace(monrace_id);
     if (dungeon.flags.has(DungeonFeatureType::CHAMELEON)) {
@@ -82,16 +86,7 @@ static bool restrict_monster_to_dungeon(const DungeonDefinition &dungeon, int fl
             return true;
         }
 
-        static const EnumClassFlagGroup<MonsterAbilityType> rf_ability_masks(RF_ABILITY_BOLT_MASK | RF_ABILITY_BEAM_MASK | RF_ABILITY_BALL_MASK);
-        static const EnumClassFlagGroup<MonsterAbilityType> abilities = {
-            MonsterAbilityType::CAUSE_1,
-            MonsterAbilityType::CAUSE_2,
-            MonsterAbilityType::CAUSE_3,
-            MonsterAbilityType::CAUSE_4,
-            MonsterAbilityType::MIND_BLAST,
-            MonsterAbilityType::BRAIN_SMASH,
-        };
-        if (monrace.ability_flags.has_none_of(rf_ability_masks) && monrace.ability_flags.has_none_of(abilities)) {
+        if (monrace.ability_flags.has_none_of(RF_ABILITY_DAMAGE_MASK)) {
             return false;
         }
     }
@@ -102,7 +97,7 @@ static bool restrict_monster_to_dungeon(const DungeonDefinition &dungeon, int fl
         }
     }
 
-    if (dungeon.special_div >= 64) {
+    if (dungeon.normal_monster_rate >= 100) {
         return true;
     }
 
@@ -110,11 +105,23 @@ static bool restrict_monster_to_dungeon(const DungeonDefinition &dungeon, int fl
         return true;
     }
 
+    // 読み込み (r_info_sex) と同じ値で比べるため、種族の性別をそのまま立てる。性別の無い種族は空のまま。
+    EnumClassFlagGroup<MonsterSex> sex_flags;
+    if (const auto sex = monrace.get_sex(); sex != MonsterSex::NONE) {
+        sex_flags.set(sex);
+    }
+
     switch (dungeon.mode) {
+    case DungeonMode::NONE:
+        return true;
     case DungeonMode::AND:
     case DungeonMode::NAND: {
         std::vector<bool> is_possible = {
+            is_possible_monster_and(sex_flags, dungeon.mon_sex),
             is_possible_monster_and(monrace.ability_flags, dungeon.mon_ability_flags),
+            is_possible_monster_and(monrace.aura_flags, dungeon.mon_aura_flags),
+            is_possible_monster_and(monrace.visual_flags, dungeon.mon_visual_flags),
+            is_possible_monster_and(monrace.special_flags, dungeon.mon_special_flags),
             is_possible_monster_and(monrace.behavior_flags, dungeon.mon_behavior_flags),
             is_possible_monster_and(monrace.resistance_flags, dungeon.mon_resistance_flags),
             is_possible_monster_and(monrace.drop_flags, dungeon.mon_drop_flags),
@@ -134,7 +141,11 @@ static bool restrict_monster_to_dungeon(const DungeonDefinition &dungeon, int fl
     case DungeonMode::OR:
     case DungeonMode::NOR: {
         std::vector<bool> is_possible = {
+            is_possible_monster_or(sex_flags, dungeon.mon_sex),
             is_possible_monster_or(monrace.ability_flags, dungeon.mon_ability_flags),
+            is_possible_monster_or(monrace.aura_flags, dungeon.mon_aura_flags),
+            is_possible_monster_or(monrace.visual_flags, dungeon.mon_visual_flags),
+            is_possible_monster_or(monrace.special_flags, dungeon.mon_special_flags),
             is_possible_monster_or(monrace.behavior_flags, dungeon.mon_behavior_flags),
             is_possible_monster_or(monrace.resistance_flags, dungeon.mon_resistance_flags),
             is_possible_monster_or(monrace.drop_flags, dungeon.mon_drop_flags),
@@ -241,7 +252,7 @@ static bool do_hook(PlayerType *player_ptr, MonraceHook hook, MonraceId monrace_
     case MonraceHook::DARK_ELF:
         return is_suitable_for_dungeon && MonraceList::is_dark_elf(monrace_id) && monrace.is_suitable_for_special_room();
     default:
-        THROW_EXCEPTION(std::logic_error, format("Invalid monrace hook type is specified! %d", enum2i(hook)));
+        THROW_EXCEPTION(std::logic_error, fmt::format("Invalid monrace hook type is specified! {}", enum2i(hook)));
     }
 }
 
@@ -292,7 +303,7 @@ void get_mon_num_prep_enum(PlayerType *player_ptr, MonraceHook hook1, MonraceHoo
         const auto in_random_quest = floor.is_in_quest() && !QuestType::is_fixed(floor.quest_number);
         const auto cond = !system.is_phase_out() && floor.is_underground() && !in_random_quest;
         if (cond && !restrict_monster_to_dungeon(dungeon, dungeon_level, monrace_id)) {
-            entry.update_prob2(dungeon.special_div);
+            entry.update_prob2(dungeon.normal_monster_rate);
         }
 
         mfdi.update(entry.prob2, entry.level);
@@ -401,7 +412,7 @@ void get_mon_num_prep_escort(PlayerType *player_ptr, MonraceId escorted_monrace_
         const auto in_random_quest = floor.is_in_quest() && !QuestType::is_fixed(floor.quest_number);
         const auto cond = !system.is_phase_out() && floor.is_underground() && !in_random_quest;
         if (cond && !restrict_monster_to_dungeon(dungeon, dungeon_level, monrace_id)) {
-            entry.update_prob2(dungeon.special_div);
+            entry.update_prob2(dungeon.normal_monster_rate);
         }
 
         mfdi.update(entry.prob2, entry.level);
@@ -506,7 +517,7 @@ void get_mon_num_prep_summon(PlayerType *player_ptr, const SummonCondition &cond
         const auto in_random_quest = floor.is_in_quest() && !QuestType::is_fixed(floor.quest_number);
         const auto cond = !system.is_phase_out() && floor.is_underground() && !in_random_quest;
         if (cond && !restrict_monster_to_dungeon(dungeon, dungeon_level, monrace_id, true)) {
-            entry.update_prob2(dungeon.special_div);
+            entry.update_prob2(dungeon.normal_monster_rate);
         }
 
         mfdi.update(entry.prob2, entry.level);
@@ -642,7 +653,7 @@ void get_mon_num_prep_chameleon(PlayerType *player_ptr, const ChameleonTransform
         const auto in_random_quest = floor.is_in_quest() && !QuestType::is_fixed(floor.quest_number);
         const auto cond = !system.is_phase_out() && floor.is_underground() && !in_random_quest;
         if (cond && !restrict_monster_to_dungeon(dungeon, dungeon_level, monrace_id, false, true)) {
-            entry.update_prob2(dungeon.special_div);
+            entry.update_prob2(dungeon.normal_monster_rate);
         }
 
         mfdi.update(entry.prob2, entry.level);
@@ -715,4 +726,17 @@ bool is_player(MONSTER_IDX m_idx)
 bool is_monster(MONSTER_IDX m_idx)
 {
     return m_idx > 0;
+}
+
+void move_monster_to(PlayerType *player_ptr, MonsterEntity &monster, const Pos2D &pos_to)
+{
+    auto &floor = *player_ptr->current_floor_ptr;
+    const auto pos_from = monster.get_position();
+    auto &grid_from = floor.get_grid(pos_from);
+    auto &grid_to = floor.get_grid(pos_to);
+    grid_to.m_idx = std::exchange(grid_from.m_idx, {});
+    monster.set_position(pos_to);
+    update_monster(player_ptr, grid_to.m_idx, true);
+    lite_spot(player_ptr, pos_from);
+    lite_spot(player_ptr, pos_to);
 }

@@ -84,16 +84,19 @@
 #include "store/cmd-store.h"
 #include "store/home.h"
 #include "store/store-util.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/floor/floor-info.h"
+#include "system/inner-game-data.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "term/screen-processor.h"
+#include "term/z-rand.h"
 #include "util/int-char-converter.h"
 #include "view/display-messages.h"
 #include "window/display-sub-windows.h"
 #include "wizard/cmd-wizard.h"
 #include "world/world.h"
+#include <fmt/format.h>
 #include <string>
 #include <tl/optional.hpp>
 
@@ -105,25 +108,26 @@
  */
 bool enter_wizard_mode(const FloorType &floor)
 {
-    auto &world = AngbandWorld::get_instance();
-    if (!world.noscore) {
-        if (!allow_debug_opts) {
-            msg_print(_("ウィザードモードは許可されていません。 ", "Wizard mode is not permitted."));
-            return false;
-        }
-
-        msg_print(_("ウィザードモードはデバッグと実験のためのモードです。 ", "Wizard mode is for debugging and experimenting."));
-        msg_print(_("一度ウィザードモードに入るとスコアは記録されません。", "The game will not be scored if you enter wizard mode."));
-        msg_erase();
-        if (!input_check(_("本当にウィザードモードに入りたいのですか? ", "Are you sure you want to enter wizard mode? "))) {
-            return false;
-        }
-
-        constexpr auto mes = _("ウィザードモードに突入してスコアを残せなくなった。", "gave up recording score to enter wizard mode.");
-        exe_write_diary(floor, DiaryKind::DESCRIPTION, 0, mes);
-        world.noscore |= 0x0002;
+    auto &igd = InnerGameData::get_instance();
+    if (igd.is_no_score()) {
+        return true;
     }
 
+    if (!allow_debug_opts) {
+        msg_print(_("ウィザードモードは許可されていません。 ", "Wizard mode is not permitted."));
+        return false;
+    }
+
+    msg_print(_("ウィザードモードはデバッグと実験のためのモードです。 ", "Wizard mode is for debugging and experimenting."));
+    msg_print(_("一度ウィザードモードに入るとスコアは記録されません。", "The game will not be scored if you enter wizard mode."));
+    msg_erase();
+    if (!input_check(_("本当にウィザードモードに入りたいのですか? ", "Are you sure you want to enter wizard mode? "))) {
+        return false;
+    }
+
+    constexpr auto mes = _("ウィザードモードに突入してスコアを残せなくなった。", "gave up recording score to enter wizard mode.");
+    exe_write_diary(floor, DiaryKind::DESCRIPTION, 0, mes);
+    igd.add_no_score(0x0002);
     return true;
 }
 
@@ -135,25 +139,26 @@ bool enter_wizard_mode(const FloorType &floor)
  */
 static bool enter_debug_mode(const FloorType &floor)
 {
-    auto &world = AngbandWorld::get_instance();
-    if (!world.noscore) {
-        if (!allow_debug_opts) {
-            msg_print(_("デバッグコマンドは許可されていません。 ", "Use of debug command is not permitted."));
-            return false;
-        }
-
-        msg_print(_("デバッグ・コマンドはデバッグと実験のためのコマンドです。 ", "The debug commands are for debugging and experimenting."));
-        msg_print(_("デバッグ・コマンドを使うとスコアは記録されません。", "The game will not be scored if you use debug commands."));
-        msg_erase();
-        if (!input_check(_("本当にデバッグ・コマンドを使いますか? ", "Are you sure you want to use debug commands? "))) {
-            return false;
-        }
-
-        constexpr auto mes = _("デバッグモードに突入してスコアを残せなくなった。", "gave up sending score to use debug commands.");
-        exe_write_diary(floor, DiaryKind::DESCRIPTION, 0, mes);
-        world.noscore |= 0x0008;
+    auto &igd = InnerGameData::get_instance();
+    if (igd.is_no_score()) {
+        return true;
     }
 
+    if (!allow_debug_opts) {
+        msg_print(_("デバッグコマンドは許可されていません。 ", "Use of debug command is not permitted."));
+        return false;
+    }
+
+    msg_print(_("デバッグ・コマンドはデバッグと実験のためのコマンドです。 ", "The debug commands are for debugging and experimenting."));
+    msg_print(_("デバッグ・コマンドを使うとスコアは記録されません。", "The game will not be scored if you use debug commands."));
+    msg_erase();
+    if (!input_check(_("本当にデバッグ・コマンドを使いますか? ", "Are you sure you want to use debug commands? "))) {
+        return false;
+    }
+
+    constexpr auto mes = _("デバッグモードに突入してスコアを残せなくなった。", "gave up sending score to use debug commands.");
+    exe_write_diary(floor, DiaryKind::DESCRIPTION, 0, mes);
+    igd.add_no_score(0x0008);
     return true;
 }
 
@@ -192,9 +197,9 @@ void process_command(PlayerType *player_ptr)
             msg_print(_("ウィザードモード突入。", "Wizard mode on."));
         }
 
-        auto &rfu = RedrawingFlagsUpdater::get_instance();
-        rfu.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
-        rfu.set_flag(MainWindowRedrawingFlag::TITLE);
+        auto &dur = DeferredUpdateRequests::get_instance();
+        dur.set_flag(StatusRecalculatingFlag::MONSTER_STATUSES);
+        dur.set_flag(MainWindowRedrawingFlag::TITLE);
         break;
     }
     case KTRL('A'): {
@@ -230,11 +235,11 @@ void process_command(PlayerType *player_ptr)
         break;
     }
     case 'e': {
-        do_cmd_equip(player_ptr);
+        do_cmd_equip(player_ptr, false);
         break;
     }
     case 'i': {
-        do_cmd_inven(player_ptr);
+        do_cmd_inven(player_ptr, false);
         break;
     }
     case 'I': {
@@ -444,13 +449,13 @@ void process_command(PlayerType *player_ptr)
                 break;
             }
 
-            msg_format(_("反魔法バリアが%sを邪魔した！", "An anti-magic shell disrupts your %s!"), which_power);
+            msg_print(_("反魔法バリアが{}を邪魔した！", "An anti-magic shell disrupts your {}!"), which_power);
             PlayerEnergy(player_ptr).reset_player_turn();
             break;
         }
 
         if (is_shero(player_ptr) && !pc.equals(PlayerClassType::BERSERKER)) {
-            msg_format(_("狂戦士化していて頭が回らない！", "You cannot think directly!"));
+            msg_print(_("狂戦士化していて頭が回らない！", "You cannot think directly!"));
             PlayerEnergy(player_ptr).reset_player_turn();
             break;
         }
@@ -688,9 +693,11 @@ void process_command(PlayerType *player_ptr)
         if (flush_failure) {
             flush();
         }
-        if (one_in_(2)) {
+        // ゲームの時間が経過しない操作なので、ゲームの乱数生成器は使わない
+        auto &rng = get_external_rng();
+        if (one_in_(rng, 2)) {
             sound(SoundKind::ILLEGAL);
-            const auto error_mes = get_random_line(_("error_j.txt", "error.txt"), 0);
+            const auto error_mes = get_random_line(rng, _("error_j.txt", "error.txt"), 0);
             if (error_mes) {
                 msg_print(*error_mes);
             }

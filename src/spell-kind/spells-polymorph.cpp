@@ -11,7 +11,7 @@
 #include "system/angband-system.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/monster-entity.h"
@@ -34,8 +34,12 @@ static MonraceId select_polymorph_monrace_id(PlayerType *player_ptr, MonraceId m
         return monrace_id;
     }
 
-    const auto lev1 = monrace.level - ((randint1(20) / randint1(9)) + 1);
-    const auto lev2 = monrace.level + ((randint1(20) / randint1(9)) + 1);
+    const auto roll_level_diff = [] {
+        const auto numerator = randint1(20);
+        return numerator / randint1(9) + 1;
+    };
+    const auto lev1 = monrace.level - roll_level_diff();
+    const auto lev2 = monrace.level + roll_level_diff();
     for (auto i = 0; i < 1000; i++) {
         const auto new_monrace_id = get_mon_num(player_ptr, 0, (player_ptr->current_floor_ptr->dun_level + monrace.level) / 2 + 5, PM_NONE);
         if (!MonraceList::is_valid(new_monrace_id)) {

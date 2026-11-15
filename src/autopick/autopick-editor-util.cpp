@@ -1,32 +1,31 @@
-#include <cstdlib>
-
-#include "autopick/autopick-dirty-flags.h"
 #include "autopick/autopick-editor-util.h"
+#include "autopick/autopick-dirty-flags.h"
 #include "autopick/autopick-entry.h"
 #include "autopick/autopick-flags-table.h"
-#include "autopick/autopick-key-flag-process.h"
 #include "autopick/autopick-methods-table.h"
 #include "autopick/autopick-util.h"
+#include "util/string-processor.h"
+#include <cstdlib>
+#include <utility>
 
 /*!
  * @brief Delete or insert string
  */
-void toggle_keyword(text_body_type *tb, BIT_FLAGS flg)
+void toggle_keyword(AutopickTextBody *tb, BIT_FLAGS flg)
 {
     int by1, by2;
     bool add = true;
     bool fixed = false;
-    if (tb->mark) {
+    if (tb->marks.any()) {
         by1 = std::min(tb->my, tb->cy);
         by2 = std::max(tb->my, tb->cy);
-    } else /* if (!tb->mark) */
-    {
+    } else {
         by1 = by2 = tb->cy;
     }
 
     for (int y = by1; y <= by2; y++) {
         autopick_type an_entry, *entry = &an_entry;
-        if (!autopick_new_entry(entry, *tb->lines_list[y], !fixed)) {
+        if (!autopick_new_entry(entry, tb->lines[y].line, !fixed)) {
             continue;
         }
 
@@ -68,7 +67,7 @@ void toggle_keyword(text_body_type *tb, BIT_FLAGS flg)
             entry->remove(flg);
         }
 
-        tb->lines_list[y] = std::make_unique<std::string>(autopick_line_from_entry(*entry));
+        tb->lines[y].line = autopick_line_from_entry(*entry);
         tb->dirty_flags |= DIRTY_ALL;
         tb->changed = true;
     }
@@ -77,84 +76,76 @@ void toggle_keyword(text_body_type *tb, BIT_FLAGS flg)
 /*!
  * @brief Change command letter
  */
-void toggle_command_letter(text_body_type *tb, byte flg)
+void toggle_command_letter(AutopickTextBody *tb, AutopickMethod am)
 {
     autopick_type an_entry;
     autopick_type *entry = &an_entry;
     int by1, by2;
     bool add = true;
     bool fixed = false;
-    if (tb->mark) {
+    if (tb->marks.any()) {
         by1 = std::min(tb->my, tb->cy);
         by2 = std::max(tb->my, tb->cy);
-    } else /* if (!tb->mark) */
-    {
+    } else {
         by1 = by2 = tb->cy;
     }
 
     for (int y = by1; y <= by2; y++) {
-        int wid = 0;
-
-        if (!autopick_new_entry(entry, *tb->lines_list[y], false)) {
+        auto wid = 0;
+        if (!autopick_new_entry(entry, tb->lines[y].line, false)) {
             continue;
         }
 
         if (!fixed) {
-            if (!(entry->action & flg)) {
-                add = true;
-            } else {
-                add = false;
-            }
-
+            add = entry->action.has_not(am);
             fixed = true;
         }
 
-        if (entry->action & DONT_AUTOPICK) {
+        if (entry->action.has(AutopickMethod::NOT_AUTOPICK)) {
             wid--;
-        } else if (entry->action & DO_AUTODESTROY) {
+        } else if (entry->action.has(AutopickMethod::AUTODESTROY)) {
             wid--;
-        } else if (entry->action & DO_QUERY_AUTOPICK) {
-            wid--;
-        }
-        if (!(entry->action & DO_DISPLAY)) {
+        } else if (entry->action.has(AutopickMethod::QUERY_AUTOPICK)) {
             wid--;
         }
 
-        if (flg != DO_DISPLAY) {
-            entry->action &= ~(DO_AUTOPICK | DONT_AUTOPICK | DO_AUTODESTROY | DO_QUERY_AUTOPICK);
-            if (add) {
-                entry->action |= flg;
-            } else {
-                entry->action |= DO_AUTOPICK;
-            }
+        if (entry->action.has_not(AutopickMethod::DISPLAY)) {
+            wid--;
+        }
+
+        if (am != AutopickMethod::DISPLAY) {
+            entry->action.reset({ AutopickMethod::AUTOPICK, AutopickMethod::NOT_AUTOPICK, AutopickMethod::AUTODESTROY, AutopickMethod::QUERY_AUTOPICK });
+            entry->action.set(add ? am : AutopickMethod::AUTOPICK);
         } else {
-            entry->action &= ~(DO_DISPLAY);
+            entry->action.reset(AutopickMethod::DISPLAY);
             if (add) {
-                entry->action |= flg;
+                entry->action.set(am);
             }
         }
 
         if (tb->cy == y) {
-            if (entry->action & DONT_AUTOPICK) {
+            if (entry->action.has(AutopickMethod::NOT_AUTOPICK)) {
                 wid++;
-            } else if (entry->action & DO_AUTODESTROY) {
+            } else if (entry->action.has(AutopickMethod::AUTODESTROY)) {
                 wid++;
-            } else if (entry->action & DO_QUERY_AUTOPICK) {
+            } else if (entry->action.has(AutopickMethod::QUERY_AUTOPICK)) {
                 wid++;
             }
-            if (!(entry->action & DO_DISPLAY)) {
+
+            if (entry->action.has_not(AutopickMethod::DISPLAY)) {
                 wid++;
             }
 
             if (wid > 0) {
                 tb->cx++;
             }
+
             if (wid < 0 && tb->cx > 0) {
                 tb->cx--;
             }
         }
 
-        tb->lines_list[y] = std::make_unique<std::string>(autopick_line_from_entry(*entry));
+        tb->lines[y].line = autopick_line_from_entry(*entry);
         tb->dirty_flags |= DIRTY_ALL;
         tb->changed = true;
     }
@@ -163,10 +154,10 @@ void toggle_command_letter(text_body_type *tb, byte flg)
 /*!
  * @brief Delete or insert string
  */
-void add_keyword(text_body_type *tb, BIT_FLAGS flg)
+void add_keyword(AutopickTextBody *tb, BIT_FLAGS flg)
 {
     int by1, by2;
-    if (tb->mark) {
+    if (tb->marks.any()) {
         by1 = std::min(tb->my, tb->cy);
         by2 = std::max(tb->my, tb->cy);
     } else {
@@ -175,7 +166,7 @@ void add_keyword(text_body_type *tb, BIT_FLAGS flg)
 
     for (int y = by1; y <= by2; y++) {
         autopick_type an_entry, *entry = &an_entry;
-        if (!autopick_new_entry(entry, *tb->lines_list[y], false)) {
+        if (!autopick_new_entry(entry, tb->lines[y].line, false)) {
             continue;
         }
 
@@ -191,7 +182,7 @@ void add_keyword(text_body_type *tb, BIT_FLAGS flg)
         }
 
         entry->add(flg);
-        tb->lines_list[y] = std::make_unique<std::string>(autopick_line_from_entry(*entry));
+        tb->lines[y].line = autopick_line_from_entry(*entry);
         tb->dirty_flags |= DIRTY_ALL;
         tb->changed = true;
     }
@@ -199,28 +190,28 @@ void add_keyword(text_body_type *tb, BIT_FLAGS flg)
 
 /*!
  * @brief Add an empty line at the last of the file
+ * @param tb エディタの状態
+ * @return 空行を追加した場合true、最終行が既に空の場合はfalse
  */
-bool add_empty_line(text_body_type *tb)
+bool add_empty_line(AutopickTextBody *tb)
 {
-    int num_lines = count_line(tb);
-
-    if (tb->lines_list[num_lines - 1]->empty()) {
+    if (tb->lines.back().line.empty()) {
         return false;
     }
 
-    tb->lines_list[num_lines] = std::make_unique<std::string>();
+    tb->lines.emplace_back();
     tb->dirty_flags |= DIRTY_EXPRESSION;
     tb->changed = true;
     return true;
 }
 
-void kill_yank_chain(text_body_type *tb)
+void kill_yank_chain(AutopickTextBody *tb)
 {
     tb->yank.clear();
     tb->yank_eol = true;
 }
 
-void add_str_to_yank(text_body_type *tb, std::string_view str)
+void add_str_to_yank(AutopickTextBody *tb, std::string_view str)
 {
     tb->yank_eol = false;
     tb->yank.emplace_back(str);
@@ -229,14 +220,14 @@ void add_str_to_yank(text_body_type *tb, std::string_view str)
 /*!
  * @brief Do work for the copy editor-command
  */
-void copy_text_to_yank(text_body_type *tb)
+void copy_text_to_yank(AutopickTextBody *tb)
 {
-    const int len = tb->lines_list[tb->cy]->length();
+    const int len = tb->lines[tb->cy].line.length();
     if (tb->cx > len) {
         tb->cx = len;
     }
 
-    if (!tb->mark) {
+    if (tb->marks.none()) {
         tb->cx = 0;
         tb->my = tb->cy;
         tb->mx = len;
@@ -248,11 +239,11 @@ void copy_text_to_yank(text_body_type *tb)
         int by2 = std::max(tb->my, tb->cy);
 
         for (int y = by1; y <= by2; y++) {
-            add_str_to_yank(tb, *tb->lines_list[y]);
+            add_str_to_yank(tb, tb->lines[y].line);
         }
 
         add_str_to_yank(tb, "");
-        tb->mark = 0;
+        tb->marks.clear();
         tb->dirty_flags |= DIRTY_ALL;
         return;
     }
@@ -264,13 +255,31 @@ void copy_text_to_yank(text_body_type *tb)
     }
 
     if ((bx1 == 0) && (bx2 == len)) {
-        add_str_to_yank(tb, *tb->lines_list[tb->cy]);
+        add_str_to_yank(tb, tb->lines[tb->cy].line);
         add_str_to_yank(tb, "");
     } else {
-        const std::string_view buf(*tb->lines_list[tb->cy]);
+        const std::string_view buf(tb->lines[tb->cy].line);
         add_str_to_yank(tb, buf.substr(bx1, bx2 - bx1));
     }
 
-    tb->mark = 0;
+    tb->marks.clear();
     tb->dirty_flags |= DIRTY_ALL;
+}
+
+/*!
+ * @brief 行の指定の位置が2バイト文字の2バイト目かどうかを判定する
+ * @param line 行
+ * @param pos 位置 (バイト)
+ * @return pos の直前から2バイト文字が始まり、pos がその2バイト目であれば true
+ * @details
+ * 行末に2バイト文字の1バイト目だけが残っている場合、その直後 (行の長さの位置) は2バイト目とみなさない。
+ * 英語版では常に false を返す。
+ */
+bool is_second_byte_of_kanji(std::string_view line, int pos)
+{
+    if ((pos <= 0) || std::cmp_greater_equal(pos, line.length())) {
+        return false;
+    }
+
+    return str_find_all_multibyte_chars(line).contains(pos - 1);
 }

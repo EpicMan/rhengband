@@ -1,9 +1,8 @@
 #pragma once
 
-enum class SaveType;
 class Store;
 
-void wr_store(Store *store_ptr);
+void wr_store(const Store &store);
 void wr_randomizer();
 void wr_options();
 void wr_ghost();

@@ -8,6 +8,13 @@
 #include "main-win/main-win-utils.h"
 #include "system/system-variables.h"
 #include "util/angband-files.h"
+#include "view/actor-readability.h"
+#include "view/original-item-catalog.h"
+#include "view/original-monster-catalog.h"
+#include "view/original-player-tiles.h"
+#include "view/original-tiles.h"
+#include <cstring>
+#include <fmt/format.h>
 #include <gdiplus.h>
 
 // Flag set once "GDI+" has been initialized
@@ -63,6 +70,60 @@ HBITMAP read_graphic(const std::filesystem::path &path)
     return result;
 }
 
+// 画像読込時に一度だけ補正し、描画では同じキャッシュ画像とタイル番号を使う。
+// 元ファイルと地形・アイテムの画素は変更しない。
+static HBITMAP readable_actor_bitmap(HBITMAP original)
+{
+    BITMAP bitmap{};
+    if (GetObject(original, static_cast<int>(sizeof(bitmap)), &bitmap) != static_cast<int>(sizeof(bitmap)) || bitmap.bmWidth != 512 || bitmap.bmHeight <= 0) {
+        return nullptr;
+    }
+    const auto width = static_cast<int>(bitmap.bmWidth);
+    const auto height = static_cast<int>(bitmap.bmHeight);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    const auto dc = GetDC(nullptr);
+    if (!dc) {
+        return nullptr;
+    }
+    std::vector<uint32_t> pixels(static_cast<size_t>(width) * static_cast<size_t>(height));
+    if (GetDIBits(dc, original, 0, static_cast<UINT>(height), pixels.data(), &info, DIB_RGB_COLORS) != height ||
+        !original_tiles::make_actor_region_readable(pixels, width, height, original_tiles::MONSTER_BASE_ROW, original_tiles::MONSTER_TILES, false, true) ||
+        !original_tiles::make_actor_region_readable(pixels, width, height, original_tiles::PLAYER_BASE_ROW, original_tiles::PLAYER_TILES, true) ||
+        (original_tiles::monster_catalog_available && !original_tiles::make_actor_region_readable(pixels, width, height, original_tiles::MONSTER_CATALOG_BASE_ROW, original_tiles::MONSTER_CATALOG_FRAMES, false))) {
+        ReleaseDC(nullptr, dc);
+        return nullptr;
+    }
+    if (original_tiles::monster_catalog_available) {
+        // 古いPNGの未使用枠は透明色なので、追加画像がない種族は汎用画像へ戻す。
+        for (auto frame = 0; frame < original_tiles::MONSTER_CATALOG_FRAMES; ++frame) {
+            auto missing = true;
+            for (auto y = 0; y < 32 && missing; ++y) {
+                for (auto x = 0; x < 32; ++x) {
+                    const auto pixel = pixels[(original_tiles::MONSTER_CATALOG_BASE_ROW * 32 + frame / 16 * 32 + y) * width + frame % 16 * 32 + x] & 0x00ffffffU;
+                    if (pixel != original_tiles::ACTOR_TRANSPARENT) {
+                        missing = false;
+                        break;
+                    }
+                }
+            }
+            original_tiles::monster_catalog_missing_frames[frame] = missing;
+        }
+    }
+    void *bits = nullptr;
+    const auto result = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (result && bits) {
+        std::memcpy(bits, pixels.data(), pixels.size() * sizeof(uint32_t));
+    }
+    ReleaseDC(nullptr, dc);
+    return result;
+}
+
 namespace Impl {
 graphics_mode change_graphics(graphics_mode arg)
 {
@@ -75,6 +136,9 @@ graphics_mode change_graphics(graphics_mode arg)
     std::string name_mask("");
 
     infGraph.delete_bitmap();
+    original_tiles::catalog_available = false;
+    original_tiles::monster_catalog_available = false;
+    original_tiles::monster_catalog_missing_frames.set();
 
     if (arg == graphics_mode::GRAPHICS_ORIGINAL) {
         wid = 8;
@@ -107,6 +171,11 @@ graphics_mode change_graphics(graphics_mode arg)
         name_mask = "mask32.bmp";
 
         ANGBAND_GRAF = "ne2";
+    } else if (arg == graphics_mode::GRAPHICS_ORIGINAL_TERRAIN) {
+        wid = hgt = twid = thgt = 32;
+        ox = oy = 0;
+        name = "original32.png";
+        ANGBAND_GRAF = "original32";
     } else {
         ANGBAND_GRAF = "ascii";
         current_graphics_mode = graphics_mode::GRAPHICS_NONE;
@@ -116,10 +185,21 @@ graphics_mode change_graphics(graphics_mode arg)
     const auto path = path_build(ANGBAND_DIR_XTRA_GRAF, name);
     infGraph.hBitmap = read_graphic(path);
     if (!infGraph.hBitmap) {
-        plog_fmt(_("ビットマップ '%s' を読み込めません。", "Cannot read bitmap file '%s'"), name.data());
+        plog(fmt::format(_("ビットマップ '{}' を読み込めません。", "Cannot read bitmap file '{}'"), name));
         ANGBAND_GRAF = "ascii";
         current_graphics_mode = graphics_mode::GRAPHICS_NONE;
         return current_graphics_mode;
+    }
+
+    if (arg == graphics_mode::GRAPHICS_ORIGINAL_TERRAIN) {
+        BITMAP dimensions{};
+        original_tiles::catalog_available = GetObject(infGraph.hBitmap, static_cast<int>(sizeof(dimensions)), &dimensions) == static_cast<int>(sizeof(dimensions)) &&
+                                            dimensions.bmWidth == 512 && dimensions.bmHeight >= original_tiles::CATALOG_NATIVE_HEIGHT;
+        original_tiles::monster_catalog_available = original_tiles::catalog_available && dimensions.bmHeight >= original_tiles::MONSTER_CATALOG_NATIVE_HEIGHT;
+        if (const auto readable = readable_actor_bitmap(static_cast<HBITMAP>(infGraph.hBitmap))) {
+            DeleteObject(infGraph.hBitmap);
+            infGraph.hBitmap = readable;
+        }
     }
 
     infGraph.CellWidth = wid;
@@ -141,7 +221,7 @@ graphics_mode change_graphics(graphics_mode arg)
         return arg;
     }
 
-    plog_fmt(_("ビットマップ '%s' を読み込めません。", "Cannot read bitmap file '%s'"), name_mask.data());
+    plog(fmt::format(_("ビットマップ '{}' を読み込めません。", "Cannot read bitmap file '{}'"), name_mask));
     ANGBAND_GRAF = "ascii";
     current_graphics_mode = graphics_mode::GRAPHICS_NONE;
     return current_graphics_mode;

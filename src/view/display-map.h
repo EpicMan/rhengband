@@ -1,12 +1,17 @@
 #pragma once
 
+#include "autopick/autopick-methods-table.h"
+#include "util/flag-group.h"
 #include "util/point-2d.h"
 #include <cstdint>
 #include <tl/optional.hpp>
 
-extern uint8_t display_autopick;
+extern EnumClassFlagGroup<AutopickMethod> display_autopick;
 
 class DisplaySymbolPair;
+class FloorType;
 class PlayerType;
+bool is_map_terrain_visible(const PlayerType &player, const Pos2D &pos);
+int decide_map_terrain_lighting(const PlayerType &player, const Pos2D &pos, tl::optional<uint8_t> monochrome = tl::nullopt);
 DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos);
 tl::optional<uint8_t> get_monochrome_display_color(PlayerType *player_ptr);

@@ -24,7 +24,7 @@
 #include "monster/monster-info.h"
 #include "mutation/mutation-flag-types.h"
 #include "mutation/mutation-techniques.h"
-#include "object-enchant/item-feeling.h"
+#include "perception/simple-perception.h"
 #include "player-info/self-info.h"
 #include "player-status/player-energy.h"
 #include "player/player-damage.h"
@@ -46,7 +46,6 @@
 #include "status/shape-changer.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
@@ -162,13 +161,8 @@ bool exe_mutation_power(PlayerType *player_ptr, PlayerMutationType power)
         (void)lite_area(player_ptr, Dice::roll(2, (lvl / 2)), (lvl / 10) + 1);
         return true;
     case PlayerMutationType::DET_CURSE:
-        for (int i = 0; i < INVEN_TOTAL; i++) {
-            auto *o_ptr = player_ptr->inventory[i].get();
-            if (!o_ptr->is_valid() || !o_ptr->is_cursed()) {
-                continue;
-            }
-
-            o_ptr->feeling = FEEL_CURSED;
+        for (const auto i_idx : INVEN_ALL_SLOTS) {
+            sense_curse(player_ptr, i_idx);
         }
 
         return true;
@@ -311,7 +305,7 @@ bool exe_mutation_power(PlayerType *player_ptr, PlayerMutationType power)
         return ThrowCommand(player_ptr).do_cmd_throw(2 + lvl / 40, false, -1);
     default:
         PlayerEnergy(player_ptr).reset_player_turn();
-        msg_format(_("能力 PlayerMutationType::%d は実装されていません。", "Power PlayerMutationType::%d not implemented. Oops."), enum2i(power));
+        msg_print(_("能力 PlayerMutationType::{} は実装されていません。", "Power PlayerMutationType::{} not implemented. Oops."), enum2i(power));
         return true;
     }
 }

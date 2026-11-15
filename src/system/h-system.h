@@ -11,7 +11,6 @@
 
 #include <cctype>
 #include <cerrno>
-#include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -23,7 +22,7 @@
 
 // clang-format off
 
-#ifdef WINDOWS
+#ifdef _WIN32
   #include <io.h>
 #else
   #ifdef SET_UID

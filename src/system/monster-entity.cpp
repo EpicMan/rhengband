@@ -8,12 +8,12 @@
 #include "system/enums/monrace/monrace-id.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
-#include "system/redrawing-flags-updater.h"
+#include "system/monrace/monrace-records.h"
 #include "term/term-color-types.h"
-#include "tracking/lore-tracker.h"
 #include "util/bit-flags-calculator.h"
 #include "util/string-processor.h"
 #include <algorithm>
+#include <fmt/format.h>
 
 MonsterEntity::MonsterEntity()
 {
@@ -142,7 +142,7 @@ bool MonsterEntity::is_mimicry() const
         return true;
     }
 
-    const auto &monrace = this->get_appearance_monrace();
+    const auto &monrace = this->get_apparent_monrace();
     if (!monrace.symbol_char_is_any_of(R"(/|\()[]="$,.!?&`#%<>+~)")) {
         return false;
     }
@@ -157,6 +157,11 @@ bool MonsterEntity::is_mimicry() const
 bool MonsterEntity::is_valid() const
 {
     return MonraceList::is_valid(this->r_idx);
+}
+
+MonraceId MonsterEntity::get_monrace_id() const
+{
+    return this->r_idx;
 }
 
 MonraceId MonsterEntity::get_real_monrace_id() const
@@ -178,14 +183,34 @@ MonraceDefinition &MonsterEntity::get_real_monrace() const
     return MonraceList::get_instance().get_monrace(this->get_real_monrace_id());
 }
 
-MonraceDefinition &MonsterEntity::get_appearance_monrace() const
+MonraceDefinition &MonsterEntity::get_apparent_monrace() const
 {
     return MonraceList::get_instance().get_monrace(this->ap_r_idx);
+}
+
+std::shared_ptr<MonraceDefinition> MonsterEntity::get_apparent_monrace_shared()
+{
+    return MonraceList::get_instance().get_monrace_shared(this->ap_r_idx);
+}
+
+std::shared_ptr<const MonraceDefinition> MonsterEntity::get_apparent_monrace_shared() const
+{
+    return MonraceList::get_instance().get_monrace_shared(this->ap_r_idx);
 }
 
 MonraceDefinition &MonsterEntity::get_monrace() const
 {
     return MonraceList::get_instance().get_monrace(this->r_idx);
+}
+
+std::shared_ptr<MonraceDefinition> MonsterEntity::get_monrace_shared()
+{
+    return MonraceList::get_instance().get_monrace_shared(this->r_idx);
+}
+
+std::shared_ptr<const MonraceDefinition> MonsterEntity::get_monrace_shared() const
+{
+    return MonraceList::get_instance().get_monrace_shared(this->r_idx);
 }
 
 short MonsterEntity::get_remaining_sleep() const
@@ -292,7 +317,7 @@ byte MonsterEntity::get_temporary_speed() const
  */
 bool MonsterEntity::has_living_flag(bool is_apperance) const
 {
-    const auto &monrace = is_apperance ? this->get_appearance_monrace() : this->get_monrace();
+    const auto &monrace = is_apperance ? this->get_apparent_monrace() : this->get_monrace();
     return monrace.has_living_flag();
 }
 
@@ -304,7 +329,7 @@ bool MonsterEntity::has_living_flag(bool is_apperance) const
  */
 bool MonsterEntity::has_demon_flag(bool is_apperance) const
 {
-    const auto &monrace = is_apperance ? this->get_appearance_monrace() : this->get_monrace();
+    const auto &monrace = is_apperance ? this->get_apparent_monrace() : this->get_monrace();
     return monrace.has_demon_flag();
 }
 
@@ -316,7 +341,7 @@ bool MonsterEntity::has_demon_flag(bool is_apperance) const
  */
 bool MonsterEntity::has_undead_flag(bool is_apperance) const
 {
-    const auto &monrace = is_apperance ? this->get_appearance_monrace() : this->get_monrace();
+    const auto &monrace = is_apperance ? this->get_apparent_monrace() : this->get_monrace();
     return monrace.has_undead_flag();
 }
 
@@ -495,9 +520,6 @@ void MonsterEntity::make_lore_treasure(int num_item, int num_gold) const
     }
 
     monrace.make_lore_treasure(num_item, num_gold);
-    if (LoreTracker::get_instance().is_tracking(this->r_idx)) {
-        RedrawingFlagsUpdater::get_instance().set_flag(SubWindowRedrawingFlag::MONSTER_LORE);
-    }
 }
 
 tl::optional<bool> MonsterEntity::order_pet_named(const MonsterEntity &other) const
@@ -552,6 +574,11 @@ void MonsterEntity::set_friendly()
     this->mflag2.set(MonsterConstantFlagType::FRIENDLY);
 }
 
+void MonsterEntity::increment_seen_count() const
+{
+    MonraceRecords::get_instance().increment_seen_count(this->r_idx);
+}
+
 bool MonsterEntity::is_riding() const
 {
     return this->mflag2.has(MonsterConstantFlagType::RIDING);
@@ -582,14 +609,14 @@ std::string MonsterEntity::build_looking_description(bool needs_attitude) const
     const auto description = this->build_damage_description();
     const auto attitude = needs_attitude ? this->build_attitude_description() : "";
     const std::string clone(this->mflag2.has(MonsterConstantFlagType::CLONED) ? ", clone" : "");
-    const auto &apparent_monrace = this->get_appearance_monrace();
+    const auto &apparent_monrace = this->get_apparent_monrace();
     if ((apparent_monrace.r_tkills > 0) && this->mflag2.has_not(MonsterConstantFlagType::KAGE)) {
-        constexpr auto fmt = _("レベル%d, %s%s%s", "Level %d, %s%s%s");
-        return format(fmt, apparent_monrace.level, description.data(), attitude.data(), clone.data());
+        constexpr auto fmt = _("レベル{}, {}{}{}", "Level {}, {}{}{}");
+        return fmt::format(fmt, apparent_monrace.level, description, attitude, clone);
     }
 
-    constexpr auto fmt = _("レベル???, %s%s%s", "Level ???, %s%s%s");
-    return format(fmt, description.data(), attitude.data(), clone.data());
+    constexpr auto fmt = _("レベル???, {}{}{}", "Level ???, {}{}{}");
+    return fmt::format(fmt, description, attitude, clone);
 }
 
 std::string MonsterEntity::build_damage_description() const

@@ -21,11 +21,11 @@
 #include "system/monrace/monrace-list.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
-#include "term/z-form.h"
 #include "util/angband-files.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
 #include <algorithm>
+#include <fmt/format.h>
 #ifdef SAVEFILE_USE_UID
 #include "main-unix/unix-user-ids.h"
 #endif
@@ -102,12 +102,24 @@ void file_character(PlayerType *player_ptr, std::string_view filename)
 }
 
 /*!
- * @brief ファイルからランダムに行を一つ取得する
+ * @brief ゲームの乱数生成器で、ファイルからランダムに行を一つ取得する
  * @param file_name ファイル名
  * @param entry 特定条件時のN:タグヘッダID
  * @return ファイルから取得した行 (但しファイルがなかったり異常値ならばnullopt)
  */
 tl::optional<std::string> get_random_line(concptr file_name, int entry)
+{
+    return get_random_line(get_game_rng(), file_name, entry);
+}
+
+/*!
+ * @brief 指定した乱数生成器で、ファイルからランダムに行を一つ取得する
+ * @param rng 乱数生成器
+ * @param file_name ファイル名
+ * @param entry 特定条件時のN:タグヘッダID
+ * @return ファイルから取得した行 (但しファイルがなかったり異常値ならばnullopt)
+ */
+tl::optional<std::string> get_random_line(xso::rng32 &rng, concptr file_name, int entry)
 {
     const auto path = path_build(ANGBAND_DIR_FILE, file_name);
     auto *fp = angband_fopen(path, FileOpenMode::READ);
@@ -115,7 +127,7 @@ tl::optional<std::string> get_random_line(concptr file_name, int entry)
         return tl::nullopt;
     }
 
-    int test;
+    auto test = 0;
     auto line_num = 0;
     const auto monrace_id = i2enum<MonraceId>(entry);
     const auto &monrace = MonraceList::get_instance().get_monrace(monrace_id);
@@ -144,12 +156,12 @@ tl::optional<std::string> get_random_line(concptr file_name, int entry)
             if (monrace.is_female()) {
                 break;
             }
-        } else if (sscanf(&(buf[2]), "%d", &test) != EOF) {
+        } else if (sscanf(&(buf[2]), "%d", &test) == 1) {
             if (test == entry) {
                 break;
             }
         } else {
-            msg_format("Error in line %d of %s!", line_num, file_name);
+            msg_print("Error in line {} of {}!", line_num, file_name);
             angband_fclose(fp);
             return tl::nullopt;
         }
@@ -178,7 +190,7 @@ tl::optional<std::string> get_random_line(concptr file_name, int entry)
             break;
         }
 
-        if (one_in_(counter + 1)) {
+        if (one_in_(rng, counter + 1)) {
             line = std::move(buf);
         }
 
@@ -188,38 +200,6 @@ tl::optional<std::string> get_random_line(concptr file_name, int entry)
     angband_fclose(fp);
     return line;
 }
-
-#ifdef JP
-/*!
- * @brief ファイルからランダムに行を一つ取得する(日本語文字列のみ)
- * @param file_name ファイル名
- * @param entry 特定条件時のN:タグヘッダID
- * @param count 試行回数
- * @return ファイルから取得した行 (但しファイルがなかったり異常値ならばnullopt)
- * @details
- */
-tl::optional<std::string> get_random_line_ja_only(concptr file_name, int entry, int count)
-{
-    tl::optional<std::string> line;
-    for (auto i = 0; i < count; i++) {
-        line = get_random_line(file_name, entry);
-        if (!line) {
-            return tl::nullopt;
-        }
-
-        auto is_kanji = false;
-        for (const auto c : *line) {
-            is_kanji |= iskanji(c);
-        }
-
-        if (is_kanji) {
-            return line;
-        }
-    }
-
-    return line;
-}
-#endif
 
 /*!
  * @brief ファイル位置をシーク /
@@ -236,9 +216,9 @@ static errr counts_seek(PlayerType *player_ptr, int fd, uint32_t where, bool fla
     auto short_pclass = enum2i(player_ptr->pclass);
 #ifdef SAVEFILE_USE_UID
     const auto user_id = UnixUserIds::get_instance().get_user_id();
-    const auto header = format("%d.%s.%d%d%d", user_id, savefile_base.string().data(), short_pclass, player_ptr->ppersonality, player_ptr->age);
+    const auto header = fmt::format("{}.{}.{}{}{}", user_id, savefile_base.string(), short_pclass, static_cast<int>(player_ptr->ppersonality), player_ptr->age);
 #else
-    const auto header = format("%s.%d%d%d", savefile_base.string().data(), short_pclass, player_ptr->ppersonality, player_ptr->age);
+    const auto header = fmt::format("{}.{}{}{}", savefile_base.string(), short_pclass, static_cast<int>(player_ptr->ppersonality), player_ptr->age);
 #endif
     angband_strcpy(temp1, header, sizeof(temp1));
     for (int i = 0; temp1[i]; i++) {

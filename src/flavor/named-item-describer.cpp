@@ -7,20 +7,21 @@
 #include "locale/english.h"
 #include "mind/mind-weaponsmith.h"
 #include "object-enchant/object-ego.h"
-#include "object-enchant/special-object-flags.h"
 #include "object-enchant/tr-types.h"
 #include "perception/object-perception.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-definition.h"
 #include "system/baseitem/baseitem-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "util/bit-flags-calculator.h"
 #include "util/string-processor.h"
 #ifdef JP
 #else
 #include "object/tval-types.h"
+#include "system/artifact/artifact-list.h"
 #include "system/monrace/monrace-definition.h"
 #endif
+#include <fmt/format.h>
 #include <sstream>
 
 static std::string get_fullname_if_set(const ItemEntity &item, const describe_option_type &opt)
@@ -139,7 +140,7 @@ static tl::optional<std::string> describe_random_artifact_name_after_body_ja(con
 
     // "'foobar'" の foobar の部分を取り出し『foobar』と表記する
     // (英語版のセーブファイルのランダムアーティファクトを考慮)
-    return format("『%s』", name_sv.substr(1, name_sv.length() - 2).data());
+    return fmt::format("『{}』", name_sv.substr(1, name_sv.length() - 2));
 }
 
 static std::string describe_fake_artifact_name_after_body_ja(const ItemEntity &item)
@@ -148,26 +149,12 @@ static std::string describe_fake_artifact_name_after_body_ja(const ItemEntity &i
         return "";
     }
 
-    auto str = item.inscription->data();
-    while (*str) {
-        if (iskanji(*str)) {
-            str += 2;
-            continue;
-        }
-
-        if (*str == '#') {
-            break;
-        }
-
-        str++;
-    }
-
-    if (*str == '\0') {
+    const auto *str = angband_strchr(item.inscription->data(), '#');
+    if (str == nullptr) {
         return "";
     }
 
-    auto str_aux = angband_strchr(item.inscription->data(), '#');
-    return format("『%s』", str_aux + 1);
+    return fmt::format("『{}』", str + 1);
 }
 
 /*!
@@ -210,20 +197,15 @@ static std::string describe_unique_name_after_body_ja(const ItemEntity &item, co
 
 static std::string describe_vowel(const ItemEntity &item, std::string_view basename, std::string_view modstr)
 {
-    bool vowel;
-    switch (basename[0]) {
-    case '#':
-        vowel = is_a_vowel(modstr[0]);
-        break;
-    case '%':
-        vowel = is_a_vowel(item.get_baseitem().name[0]);
-        break;
-    default:
-        vowel = is_a_vowel(basename[0]);
-        break;
+    // 名前の先頭が置き換えられる場合は、置き換える文字列の先頭で決める
+    std::string_view head = basename;
+    if (basename.starts_with('#')) {
+        head = modstr;
+    } else if (basename.starts_with('%')) {
+        head = item.get_baseitem().name;
     }
 
-    return (vowel) ? "an " : "a ";
+    return (!head.empty() && is_a_vowel(head.front())) ? "an " : "a ";
 }
 
 static std::string describe_prefix_en(const ItemEntity &item)
@@ -250,7 +232,7 @@ static std::string describe_item_count_or_article_en(const ItemEntity &item, con
     }
 
     auto is_unique_item = opt.known && item.is_fixed_or_random_artifact();
-    is_unique_item |= (item.bi_key.tval() == ItemKindType::MONSTER_REMAINS) && item.get_monrace().kind_flags.has(MonsterKindType::UNIQUE);
+    is_unique_item |= (item.bi_key.tval() == ItemKindType::MONSTER_REMAINS) && none_bits(opt.mode, OD_OMIT_MONRACE) && item.get_monrace().kind_flags.has(MonsterKindType::UNIQUE);
     if (is_unique_item) {
         return "The ";
     }
@@ -330,10 +312,10 @@ static std::string describe_unique_name_after_body_en(const ItemEntity &item, co
 static std::string describe_body(const ItemEntity &item, [[maybe_unused]] const describe_option_type &opt, std::string_view basename, std::string_view modstr)
 {
 #ifndef JP
-    auto pluralize = [&opt, &item](auto &ss, auto it) {
+    // preceding は '~' より前の部分。'~' が先頭にある場合は空になる
+    auto pluralize = [&opt, &item](auto &ss, std::string_view preceding) {
         if (none_bits(opt.mode, OD_NO_PLURAL) && (item.number != 1)) {
-            char k = *std::next(it, -1);
-            if ((k == 's') || (k == 'h')) {
+            if (preceding.ends_with('s') || preceding.ends_with('h')) {
                 ss << 'e';
             }
             ss << 's';
@@ -355,7 +337,7 @@ static std::string describe_body(const ItemEntity &item, [[maybe_unused]] const 
 #else
             for (auto ib = baseitem.name.begin(), ib_end = baseitem.name.end(); ib != ib_end; ++ib) {
                 if (*ib == '~') {
-                    pluralize(ss, ib);
+                    pluralize(ss, std::string_view(baseitem.name.begin(), ib));
                 } else {
                     ss << *ib;
                 }
@@ -366,18 +348,16 @@ static std::string describe_body(const ItemEntity &item, [[maybe_unused]] const 
 
 #ifndef JP
         case '~':
-            pluralize(ss, it);
+            pluralize(ss, std::string_view(basename.begin(), it));
             break;
 #endif
 
         default:
             ss << *it;
-#ifdef JP
-            if (iskanji(*it)) {
+            if (is_multibyte_char_at(std::string_view(it, it_end))) {
                 ++it;
                 ss << *it;
             }
-#endif
             break;
         }
     }
@@ -394,22 +374,23 @@ static std::string describe_body(const ItemEntity &item, [[maybe_unused]] const 
  */
 std::string describe_named_item(PlayerType *player_ptr, const ItemEntity &item, const describe_option_type &opt)
 {
-    auto [basename, modstr] = switch_tval_description(item, opt);
+    auto [basename, modstr] = switch_tval_description(*player_ptr, item, opt);
     if (auto name = get_fullname_if_set(item, opt); !name.empty()) {
         basename = std::move(name);
     }
     std::string_view basename_sv = basename;
+    const auto has_article = basename_sv.starts_with('&');
+    if (has_article) {
+        basename_sv.remove_prefix(std::min<size_t>(basename_sv.length(), 2));
+    }
+
     std::stringstream ss;
 
 #ifdef JP
-    if (basename_sv[0] == '&') {
-        basename_sv.remove_prefix(2);
-    }
     ss << describe_item_count_ja(item, opt)
        << describe_artifact_mark_ja(item, opt);
 #else
-    if (basename_sv[0] == '&') {
-        basename_sv.remove_prefix(2);
+    if (has_article) {
         ss << describe_item_count_or_article_en(item, opt, basename_sv, modstr);
     } else {
         ss << describe_item_count_or_definite_article_en(item, opt);
@@ -418,14 +399,14 @@ std::string describe_named_item(PlayerType *player_ptr, const ItemEntity &item, 
 
 #ifdef JP
     if (item.is_smith() && none_bits(opt.mode, OD_BASE_NAME)) {
-        ss << format("鍛冶師%sの", player_ptr->name);
+        ss << fmt::format("鍛冶師{}の", player_ptr->name);
     }
 
     ss << describe_unique_name_before_body_ja(item, opt);
 #endif
     if (item.is_spell_book()) {
         // svalは0から数えているので表示用に+1している
-        ss << format("Lv%d ", *item.bi_key.sval() + 1);
+        ss << fmt::format("Lv{} ", *item.bi_key.sval() + 1);
     }
 
     ss << describe_body(item, opt, basename_sv, modstr);
@@ -434,7 +415,7 @@ std::string describe_named_item(PlayerType *player_ptr, const ItemEntity &item, 
     ss << describe_unique_name_after_body_ja(item, opt);
 #else
     if (item.is_smith() && none_bits(opt.mode, OD_BASE_NAME)) {
-        ss << format(" of %s the Smith", player_ptr->name);
+        ss << fmt::format(" of {} the Smith", player_ptr->name);
     }
 
     ss << describe_unique_name_after_body_en(item, opt);

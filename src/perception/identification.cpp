@@ -1,9 +1,10 @@
 #include "perception/identification.h"
 #include "artifact/fixed-art-types.h"
+#include "core/asking-player.h"
 #include "flavor/flavor-describer.h"
 #include "flavor/object-flavor-types.h"
 #include "game-option/special-options.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "object-enchant/object-ego.h"
 #include "object-enchant/tr-types.h"
 #include "object-enchant/trc-types.h"
@@ -13,10 +14,10 @@
 #include "sv-definition/sv-other-types.h"
 #include "sv-definition/sv-ring-types.h"
 #include "sv-definition/sv-weapon-types.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-definition.h"
 #include "system/baseitem/baseitem-definition.h"
 #include "system/enums/monrace/monrace-id.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "term/screen-processor.h"
 #include "util/bit-flags-calculator.h"
@@ -24,6 +25,7 @@
 #include "util/enum-converter.h"
 #include <algorithm>
 #include <array>
+#include <fmt/format.h>
 #include <string>
 
 /*!
@@ -37,6 +39,8 @@ bool screen_object(PlayerType *player_ptr, const ItemEntity &item, BIT_FLAGS mod
 {
     std::array<std::string, 128> info{};
     auto trivial_info = 0;
+    // ベースアイテムから作った仮のアイテムは人形・像・死体類のモンスター種族が未設定である
+    const auto is_fake_object = any_bits(mode, SCROBJ_FAKE_OBJECT);
     const auto flags = item.get_flags();
     const auto item_text = item.is_fixed_artifact() ? item.get_fixed_artifact().text.data() : item.get_baseitem().text.data();
     const auto item_text_lines = shape_buffer(item_text, 77 - 15);
@@ -91,7 +95,7 @@ bool screen_object(PlayerType *player_ptr, const ItemEntity &item, BIT_FLAGS mod
         info[i++] = _("それは物を強く投げることを可能にする。", "It provides great strength when you throw an item.");
     }
 
-    if (bi_key.tval() == ItemKindType::STATUE) {
+    if (!is_fake_object && (bi_key.tval() == ItemKindType::STATUE)) {
         const auto &monrace = item.get_monrace();
         if (monrace.idx == MonraceId::BULLGATES) {
             info[i++] = _("それは部屋に飾ると恥ずかしい。", "It is shameful.");
@@ -760,10 +764,10 @@ bool screen_object(PlayerType *player_ptr, const ItemEntity &item, BIT_FLAGS mod
     screen_save();
     const auto &[wid, hgt] = term_get_size();
     std::string item_name;
-    if (!(mode & SCROBJ_FAKE_OBJECT)) {
+    if (!is_fake_object) {
         item_name = describe_flavor(player_ptr, item, 0);
     } else {
-        item_name = describe_flavor(player_ptr, item, (OD_NAME_ONLY | OD_STORE));
+        item_name = describe_flavor(player_ptr, item, (OD_NAME_ONLY | OD_STORE | OD_OMIT_MONRACE));
     }
 
     prt(item_name, 0, 0);
@@ -771,10 +775,10 @@ bool screen_object(PlayerType *player_ptr, const ItemEntity &item, BIT_FLAGS mod
         prt("", k, 13);
     }
 
-    if (bi_key == BaseitemKey(ItemKindType::STATUE, SV_PHOTO)) {
+    if (!is_fake_object && (bi_key == BaseitemKey(ItemKindType::STATUE, SV_PHOTO))) {
         const auto &monrace = item.get_monrace();
         const auto name_length = monrace.name->length();
-        prt(format("%s: '", monrace.name.data()), 1, 15);
+        prt(fmt::format("{}: '", monrace.name), 1, 15);
         term_queue_bigchar(18 + name_length, 1, { monrace.symbol_config, {} });
         prt("'", 1, (use_bigtile ? 20 : 19) + name_length);
     } else {
@@ -785,16 +789,18 @@ bool screen_object(PlayerType *player_ptr, const ItemEntity &item, BIT_FLAGS mod
     for (int j = 0; j < i; j++) {
         prt(info[j], k++, 15);
         if ((k == hgt - 2) && (j + 1 < i)) {
-            prt(_("-- 続く --", "-- more --"), k, 15);
-            inkey();
+            constexpr auto more_prompt = _("-- 続く --", "-- more --");
+            prt(more_prompt, k, 15);
+            (void)input_key_with_context(InputKind::ANY_KEY, more_prompt);
             for (; k > 2; k--) {
                 prt("", k, 15);
             }
         }
     }
 
-    prt(_("[何かキーを押すとゲームに戻ります]", "[Press any key to continue]"), k, 15);
-    inkey();
+    constexpr auto prompt = _("[何かキーを押すとゲームに戻ります]", "[Press any key to continue]");
+    prt(prompt, k, 15);
+    (void)input_key_with_context(InputKind::ANY_KEY, prompt);
     screen_load();
     return true;
 }

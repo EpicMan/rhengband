@@ -4,15 +4,15 @@
 #include "game-option/birth-options.h"
 #include "inventory/inventory-slot-types.h"
 #include "object-enchant/item-feeling.h"
-#include "object-enchant/special-object-flags.h"
 #include "perception/object-perception.h"
 #include "player/player-status-flags.h"
 #include "spell-kind/spells-floor.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
+#include <fmt/format.h>
 
 /* Array of stat "descriptions" */
 static concptr desc_stat_pos[] = {
@@ -70,7 +70,7 @@ bool inc_stat(PlayerType *player_ptr, int stat)
         player_ptr->stat_max[stat] = value;
     }
 
-    RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
+    DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
     return true;
 }
 
@@ -177,9 +177,9 @@ bool dec_stat(PlayerType *player_ptr, int stat, int amount, int permanent)
     if (res) {
         player_ptr->stat_cur[stat] = cur;
         player_ptr->stat_max[stat] = max;
-        auto &rfu = RedrawingFlagsUpdater::get_instance();
-        rfu.set_flag(MainWindowRedrawingFlag::ABILITY_SCORE);
-        rfu.set_flag(StatusRecalculatingFlag::BONUS);
+        auto &dur = DeferredUpdateRequests::get_instance();
+        dur.set_flag(MainWindowRedrawingFlag::ABILITY_SCORE);
+        dur.set_flag(StatusRecalculatingFlag::BONUS);
     }
 
     return res;
@@ -194,9 +194,9 @@ bool res_stat(PlayerType *player_ptr, int stat)
 {
     if (player_ptr->stat_cur[stat] != player_ptr->stat_max[stat]) {
         player_ptr->stat_cur[stat] = player_ptr->stat_max[stat];
-        auto &rfu = RedrawingFlagsUpdater::get_instance();
-        rfu.set_flag(StatusRecalculatingFlag::BONUS);
-        rfu.set_flag(MainWindowRedrawingFlag::ABILITY_SCORE);
+        auto &dur = DeferredUpdateRequests::get_instance();
+        dur.set_flag(StatusRecalculatingFlag::BONUS);
+        dur.set_flag(MainWindowRedrawingFlag::ABILITY_SCORE);
         return true;
     }
 
@@ -243,12 +243,12 @@ bool do_dec_stat(PlayerType *player_ptr, int stat)
     }
 
     if (sust && (!ironman_nightmare || randint0(13))) {
-        msg_format(_("%sなった気がしたが、すぐに元に戻った。", "You feel %s for a moment, but the feeling passes."), desc_stat_neg[stat]);
+        msg_print(_("{}なった気がしたが、すぐに元に戻った。", "You feel {} for a moment, but the feeling passes."), desc_stat_neg[stat]);
         return true;
     }
 
     if (dec_stat(player_ptr, stat, 10, (ironman_nightmare && !randint0(13)))) {
-        msg_format(_("ひどく%sなった気がする。", "You feel %s."), desc_stat_neg[stat]);
+        msg_print(_("ひどく{}なった気がする。", "You feel {}."), desc_stat_neg[stat]);
         return true;
     }
 
@@ -261,7 +261,7 @@ bool do_dec_stat(PlayerType *player_ptr, int stat)
 bool do_res_stat(PlayerType *player_ptr, int stat)
 {
     if (res_stat(player_ptr, stat)) {
-        msg_format(_("元通りに%sなった気がする。", "You feel %s."), desc_stat_pos[stat]);
+        msg_print(_("元通りに{}なった気がする。", "You feel {}."), desc_stat_pos[stat]);
         return true;
     }
 
@@ -285,12 +285,12 @@ bool do_inc_stat(PlayerType *player_ptr, int stat)
             chg_virtue(player_ptr, Virtue::VITALITY, 1);
         }
 
-        msg_format(_("ワーオ！とても%sなった！", "Wow! You feel %s!"), desc_stat_pos[stat]);
+        msg_print(_("ワーオ！とても{}なった！", "Wow! You feel {}!"), desc_stat_pos[stat]);
         return true;
     }
 
     if (res) {
-        msg_format(_("元通りに%sなった気がする。", "You feel %s."), desc_stat_pos[stat]);
+        msg_print(_("元通りに{}なった気がする。", "You feel {}."), desc_stat_pos[stat]);
         return true;
     }
 
@@ -304,33 +304,20 @@ bool lose_all_info(PlayerType *player_ptr)
 {
     chg_virtue(player_ptr, Virtue::KNOWLEDGE, -5);
     chg_virtue(player_ptr, Virtue::ENLIGHTEN, -5);
-    for (int i = 0; i < INVEN_TOTAL; i++) {
-        auto *o_ptr = player_ptr->inventory[i].get();
+    for (const auto i_idx : INVEN_ALL_SLOTS) {
+        auto *o_ptr = player_ptr->inventory[i_idx].get();
         if (!o_ptr->is_valid() || o_ptr->is_fully_known()) {
             continue;
         }
 
         o_ptr->feeling = FEEL_NONE;
-        o_ptr->ident &= ~(IDENT_EMPTY);
-        o_ptr->ident &= ~(IDENT_KNOWN);
-        o_ptr->ident &= ~(IDENT_SENSE);
+        o_ptr->reset_identification_flags({ IdentificationFlag::EMPTY, IdentificationFlag::KNOWN, IdentificationFlag::SENSE });
     }
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    static constexpr auto flags_srf = {
-        StatusRecalculatingFlag::BONUS,
-        StatusRecalculatingFlag::COMBINATION,
-        StatusRecalculatingFlag::REORDER,
-    };
-    rfu.set_flags(flags_srf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::PLAYER,
-        SubWindowRedrawingFlag::FLOOR_ITEMS,
-        SubWindowRedrawingFlag::FOUND_ITEMS,
-    };
-    rfu.set_flags(flags_swrf);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.set_flag(StatusRecalculatingFlag::BONUS);
+    dur.request_inventory_arrangement();
+    dur.request_item_lists_redrawing();
     wiz_dark(player_ptr);
     return true;
 }

@@ -16,13 +16,14 @@
 #include "player/player-status-flags.h"
 #include "status/bad-status-setter.h"
 #include "status/base-status.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "timed-effect/timed-effects.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "world/world.h"
 #include <string>
@@ -34,11 +35,11 @@
 
 static bool process_mod_hallucination(PlayerType *player_ptr, std::string_view m_name, const MonraceDefinition &monrace)
 {
-    if (!player_ptr->effects()->hallucination().is_hallucinated()) {
+    if (!player_ptr->effects()->hallucination().is_active()) {
         return false;
     }
 
-    msg_format(_("%s%sの顔を見てしまった！", "You behold the %s visage of %s!"), rand_choice(funny_desc).data(), m_name.data());
+    msg_print(_("{}{}の顔を見てしまった！", "You behold the {} visage of {}!"), rand_choice(funny_desc), m_name);
     if (one_in_(3)) {
         msg_print(rand_choice(funny_comments));
         BadStatusSetter(player_ptr).mod_hallucination(randnum1<short>(monrace.level));
@@ -63,7 +64,7 @@ void sanity_blast(PlayerType *player_ptr, tl::optional<short> m_idx, bool necro)
     auto power = 100;
     if (!necro && m_idx) {
         auto &monster = player_ptr->current_floor_ptr->m_list[*m_idx];
-        auto &monrace = monster.get_appearance_monrace();
+        auto &monrace = monster.get_apparent_monrace();
         const auto m_name = monster_desc(player_ptr, monster, 0);
         power = monrace.level / 2;
         if (monrace.kind_flags.has_not(MonsterKindType::UNIQUE)) {
@@ -141,7 +142,7 @@ void sanity_blast(PlayerType *player_ptr, tl::optional<short> m_idx, bool necro)
         }
 
         if (evaluate_percent(player_ptr->skill_sav * 100 / power)) {
-            msg_format(_("夢の中で%sに追いかけられた。", "%s^ chases you through your dreams."), m_name.data());
+            msg_print(_("夢の中で{}に追いかけられた。", "{} chases you through your dreams."), str_upcase_first(m_name));
             return;
         }
 
@@ -292,6 +293,6 @@ void sanity_blast(PlayerType *player_ptr, tl::optional<short> m_idx, bool necro)
         break;
     }
 
-    RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
+    DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::BONUS);
     handle_stuff(player_ptr);
 }

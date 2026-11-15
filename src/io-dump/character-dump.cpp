@@ -5,13 +5,13 @@
 #include "flavor/flavor-describer.h"
 #include "game-option/birth-options.h"
 #include "game-option/game-play-options.h"
+#include "info-reader/definition-hash-data.h"
 #include "inventory/inventory-slot-types.h"
 #include "io-dump/player-status-dump.h"
 #include "io-dump/special-class-dump.h"
 #include "io/mutations-dump.h"
 #include "io/write-diary.h"
 #include "knowledge/knowledge-quests.h"
-#include "main/angband-headers.h"
 #include "market/arena-entry.h"
 #include "monster/monster-describer.h"
 #include "monster/monster-description-types.h"
@@ -29,18 +29,18 @@
 #include "store/store.h"
 #include "system/angband-system.h"
 #include "system/building-type-definition.h"
+#include "system/dungeon/quest-definition.h"
+#include "system/dungeon/quest-list.h"
 #include "system/floor/floor-info.h"
-#include "system/floor/town-info.h"
 #include "system/floor/town-list.h"
 #include "system/inner-game-data.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
 #include "system/services/dungeon-service.h"
 #include "term/gameterm.h"
-#include "term/z-form.h"
 #include "util/buffer-shaper.h"
 #include "util/enum-converter.h"
 #include "util/int-char-converter.h"
@@ -49,6 +49,7 @@
 #include "world/world.h"
 #include <fmt/format.h>
 #include <numeric>
+#include <range/v3/algorithm.hpp>
 #include <range/v3/view.hpp>
 #include <string>
 
@@ -177,8 +178,12 @@ static void dump_aux_last_message(PlayerType *player_ptr, FILE *fff)
  */
 static void dump_aux_recall(FILE *fff)
 {
-    fmt::println(fff, _("\n  [帰還場所]\n", "\n  [Recall Depth]\n"));
-    for (const auto &known_dungeon : DungeonService::build_known_dungeons(DungeonMessageFormat::DUMP)) {
+    fmt::println(fff, _("\n  [帰還場所 (訪問済み)]\n", "\n  [Recall Depth (Visited)]\n"));
+    for (const auto &known_dungeon : DungeonService::build_known_dungeons(DungeonMessageFormat::DUMP, true)) {
+        fmt::print(fff, "{}", known_dungeon);
+    }
+    fmt::println(fff, _("\n  [帰還場所 (解放済み・未訪問)]\n", "\n  [Recall Depth (Unlocked Only)]\n"));
+    for (const auto &known_dungeon : DungeonService::build_known_dungeons(DungeonMessageFormat::DUMP, false)) {
         fmt::print(fff, "{}", known_dungeon);
     }
 }
@@ -189,21 +194,25 @@ static void dump_aux_recall(FILE *fff)
  */
 static void dump_aux_options(FILE *fff)
 {
-    fprintf(fff, _("\n  [オプション設定]\n", "\n  [Option Settings]\n"));
+    fmt::println(fff, _("\n  [オプション設定]", "\n  [Option Settings]"));
     if (preserve_mode) {
         fmt::print(fff, _("\n 保存モード:         ON", "\n Preserve Mode:      ON"));
     } else {
         fmt::print(fff, _("\n 保存モード:         OFF", "\n Preserve Mode:      OFF"));
     }
 
-    if (ironman_small_levels) {
-        fmt::print(fff, _("\n 小さいダンジョン:   ALWAYS", "\n Small Levels:       ALWAYS"));
-    } else if (always_small_levels) {
-        fmt::print(fff, _("\n 小さいダンジョン:   ON", "\n Small Levels:       ON"));
-    } else if (small_levels) {
-        fmt::print(fff, _("\n 小さいダンジョン:   ENABLED", "\n Small Levels:       ENABLED"));
+    if (ironman_smallest_floor) {
+        fmt::print(fff, _("\n (鉄人)最小フロア:   ON", "\n Ironman Smallest Floor:  ON"));
+        fmt::print(fff, _("\n 常に小さめフロア:   IGNORED", "\n Always Small Floor:      IGNORED"));
+        fmt::print(fff, _("\n 常に大きめフロア:   IGNORED", "\n Always Large Floor:      IGNORED"));
+        fmt::print(fff, _("\n 最小フロア許可  :   IGNORED", "\n Possible Smallest Floor: IGNORED"));
+        fmt::print(fff, _("\n 最大フロア許可  :   IGNORED", "\n Possible Largest Floor:  IGNORED"));
     } else {
-        fmt::print(fff, _("\n 小さいダンジョン:   OFF", "\n Small Levels:       OFF"));
+        const auto always_large_floor_is_effective = always_large_floor && !always_small_floor;
+        fmt::print(fff, _("\n 常に小さめフロア:   {}", "\n Always Small Floor:      {}"), always_small_floor ? "ON" : "OFF");
+        fmt::print(fff, _("\n 常に大きめフロア:   {}", "\n Always Large Floor:      {}"), always_small_floor ? "IGNORED" : (always_large_floor ? "ON" : "OFF"));
+        fmt::print(fff, _("\n 最小フロア許可  :   {}", "\n Possible Smallest Floor: {}"), always_large_floor_is_effective ? "IGNORED" : (allow_smallest_floor ? "ON" : "OFF"));
+        fmt::print(fff, _("\n 最大フロア許可  :   {}", "\n Possible Largest Floor:  {}"), always_small_floor ? "IGNORED" : (allow_largest_floor ? "ON" : "OFF"));
     }
 
     if (vanilla_town) {
@@ -228,16 +237,16 @@ static void dump_aux_options(FILE *fff)
         fmt::print(fff, _("\n 悪夢モード:         ON", "\n Nightmare Mode:     ON"));
     }
 
-    if (ironman_empty_levels) {
-        fmt::print(fff, _("\n アリーナ:           ALWAYS", "\n Arena Levels:       ALWAYS"));
-    } else if (empty_levels) {
-        fmt::print(fff, _("\n アリーナ:           ENABLED", "\n Arena Levels:       ENABLED"));
+    if (ironman_force_arena_floor) {
+        fmt::print(fff, _("\n (鉄人)常時アリーナ: ON", "\n Ironman Arena Floor: ON"));
+    } else if (allow_arena_floor) {
+        fmt::print(fff, _("\n アリーナフロア許可: ON", "\n Arena Floor:         ON"));
     } else {
-        fmt::print(fff, _("\n アリーナ:           OFF", "\n Arena Levels:       OFF"));
+        fmt::print(fff, _("\n アリーナフロア許可: OFF", "\n Arena Floor :        OFF"));
     }
 
     fmt::print(fff, "\n");
-    if (AngbandWorld::get_instance().noscore) {
+    if (InnerGameData::get_instance().is_no_score()) {
         fmt::println(fff, _("\n 何か不正なことをしてしまっています。", "\n You have done something illegal."));
     }
 
@@ -280,11 +289,10 @@ static void dump_aux_arena(FILE *fff)
         return;
     }
 
-    const auto victory_count = current_entry > max_entries ? max_entries : current_entry;
 #ifdef JP
-    fprintf(fff, "\n 闘技場: %2d勝\n", victory_count);
+    fmt::println(fff, "\n 闘技場: {:2}勝", current_entry);
 #else
-    fprintf(fff, "\n Arena: %2d %s\n", victory_count, (current_entry > 1) ? "Victories" : "Victory");
+    fmt::println(fff, "\n Arena: {:2} {}", current_entry, (current_entry == 1) ? "Victory" : "Victories");
 #endif
     fmt::print(fff, "\n");
 }
@@ -301,23 +309,23 @@ static void dump_aux_monsters(FILE *fff)
     auto norm_total = 0;
     for (const auto &[monrace_id, monrace] : monraces) {
         /* Ignore unused index */
-        if (!monrace.is_valid()) {
+        if (!monrace->is_valid()) {
             continue;
         }
 
-        if (monrace.kind_flags.has(MonsterKindType::UNIQUE)) {
-            if (monrace.is_dead_unique()) {
+        if (monrace->kind_flags.has(MonsterKindType::UNIQUE)) {
+            if (monrace->is_dead_unique()) {
                 norm_total++;
 
                 /* Add a unique monster to the list */
-                monrace_ids.push_back(monrace.idx);
+                monrace_ids.push_back(monrace->idx);
             }
 
             continue;
         }
 
-        if (monrace.r_pkills > 0) {
-            norm_total += monrace.r_pkills;
+        if (monrace->r_pkills > 0) {
+            norm_total += monrace->r_pkills;
         }
     }
 
@@ -345,20 +353,31 @@ static void dump_aux_monsters(FILE *fff)
     fmt::println(fff, "You have defeated {} {} including {} unique monster{} in total.", norm_total, norm_total == 1 ? "enemy" : "enemies", uniq_total, (uniq_total == 1 ? "" : "s"));
 #endif
 
-    std::stable_sort(monrace_ids.begin(), monrace_ids.end(), [&monraces](auto x, auto y) { return monraces.order(x, y); });
-    fmt::println(fff, _("\n《上位{}体のユニーク・モンスター》", "\n< Unique monsters top {} >"), std::min(uniq_total, 10));
-    for (auto it = monrace_ids.rbegin(); it != monrace_ids.rend() && std::distance(monrace_ids.rbegin(), it) < 10; it++) {
-        const auto &monrace = monraces.get_monrace(*it);
+    ranges::stable_sort(monrace_ids, [&monraces](auto x, auto y) { return monraces.order(x, y); });
+    ranges::reverse(monrace_ids);
+
+    const auto id_to_monrace = [&monraces](auto id) -> const MonraceDefinition & { return monraces.get_monrace(id); };
+    const auto top_display_num = std::min(uniq_total, 10);
+    const auto top_monraces = monrace_ids | ranges::views::take(top_display_num) | ranges::views::transform(id_to_monrace);
+    const auto max_defeat_time = ranges::max(top_monraces | ranges::views::transform(&MonraceDefinition::defeat_time));
+    const auto max_hour_digits = count_digits(max_defeat_time / (60 * 60));
+
+    fmt::println(fff, _("\n《上位{}体のユニーク・モンスター》", "\n< Unique monsters top {} >"), top_display_num);
+    for (const auto &monrace : top_monraces) {
         const auto defeat_level = monrace.defeat_level;
         const auto defeat_time = monrace.defeat_time;
         std::string defeat_info;
         if ((defeat_level > 0) && (defeat_time > 0)) {
-            constexpr auto fmt = _(" - レベル%2d - %d:%02d:%02d", " - level %2d - %d:%02d:%02d");
-            defeat_info = format(fmt, defeat_level, defeat_time / (60 * 60), (defeat_time / 60) % 60, defeat_time % 60);
+            const auto defeat_hour = defeat_time / (60 * 60);
+            const auto defeat_minute = (defeat_time / 60) % 60;
+            const auto defeat_second = defeat_time % 60;
+            constexpr auto fmt = _(" - レベル{:2} - {:>{}}:{:02}:{:02}", " - level {:2} - {:>{}}:{:02}:{:02}");
+            defeat_info = fmt::format(fmt, defeat_level, defeat_hour, max_hour_digits, defeat_minute, defeat_second);
         }
 
-        const auto names = str_separate(monrace.name, 40);
-        fprintf(fff, _("  %-40s (レベル%3d)%s\n", "  %-40s (level %3d)%s\n"), names.front().data(), monrace.level, defeat_info.data());
+        // shape_buffer() は終端文字の分を除いた maxlen - 1 バイトごとに区切るので、名前の欄の幅 + 1 を渡す
+        const auto names = shape_buffer(monrace.name, 40 + 1);
+        fmt::println(fff, _("  {:<40} (レベル{:3}){}", "  {:<40} (level {:3}){}"), fmt::bytes(names.front()), monrace.level, defeat_info);
         for (const auto &name : names | ranges::views::drop(1)) {
             fmt::println(fff, "  {}", name);
         }
@@ -480,28 +499,28 @@ static void dump_aux_equipment_inventory(PlayerType *player_ptr, FILE *fff)
 {
     if (player_ptr->equip_cnt) {
         fmt::println(fff, _("  [キャラクタの装備]\n", "  [Character Equipment]\n"));
-        for (int i = INVEN_MAIN_HAND; i < INVEN_TOTAL; i++) {
-            auto item_name = describe_flavor(player_ptr, *player_ptr->inventory[i], 0);
-            auto is_two_handed = ((i == INVEN_MAIN_HAND) && can_attack_with_sub_hand(player_ptr));
-            is_two_handed |= ((i == INVEN_SUB_HAND) && can_attack_with_main_hand(player_ptr));
+        for (const auto i_idx : INVEN_WIELDING_SLOTS) {
+            auto item_name = describe_flavor(player_ptr, *player_ptr->inventory[i_idx], 0);
+            auto is_two_handed = ((i_idx == INVEN_MAIN_HAND) && can_attack_with_sub_hand(player_ptr));
+            is_two_handed |= ((i_idx == INVEN_SUB_HAND) && can_attack_with_main_hand(player_ptr));
             if (is_two_handed && has_two_handed_weapons(player_ptr)) {
                 item_name = _("(武器を両手持ち)", "(wielding with two-hands)");
             }
 
-            fmt::println(fff, "{}) {}", index_to_label(i), item_name);
+            fmt::println(fff, "{}) {}", index_to_label(i_idx), item_name);
         }
 
         fmt::println(fff, "\n");
     }
 
     fmt::println(fff, _("  [キャラクタの持ち物]\n", "  [Character Inventory]\n"));
-    for (auto i = 0; i < INVEN_PACK; i++) {
-        if (!player_ptr->inventory[i]->is_valid()) {
+    for (const auto i_idx : INVEN_PACK_SLOTS) {
+        if (!player_ptr->inventory[i_idx]->is_valid()) {
             break;
         }
 
-        const auto item_name = describe_flavor(player_ptr, *player_ptr->inventory[i], 0);
-        fmt::println(fff, "{}) {}", index_to_label(i), item_name);
+        const auto item_name = describe_flavor(player_ptr, *player_ptr->inventory[i_idx], 0);
+        fmt::println(fff, "{}) {}", index_to_label(i_idx), item_name);
     }
 
     fmt::println(fff, "\n");
@@ -513,7 +532,8 @@ static void dump_aux_equipment_inventory(PlayerType *player_ptr, FILE *fff)
  */
 static void dump_aux_home_museum(PlayerType *player_ptr, FILE *fff)
 {
-    const auto &home = towns_info[1].get_store(StoreSaleType::HOME);
+    const auto &towns = TownList::get_instance();
+    const auto &home = towns.get_home();
     if (home.stock_num) {
         fmt::println(fff, _("  [我が家のアイテム]", "  [Home Inventory]"));
         auto page = 1;
@@ -529,7 +549,7 @@ static void dump_aux_home_museum(PlayerType *player_ptr, FILE *fff)
         fmt::println(fff, "\n");
     }
 
-    const auto &museum = towns_info[1].get_store(StoreSaleType::MUSEUM);
+    const auto &museum = towns.get_museum();
     if (museum.stock_num == 0) {
         return;
     }
@@ -546,33 +566,6 @@ static void dump_aux_home_museum(PlayerType *player_ptr, FILE *fff)
     }
 
     fmt::println(fff, "\n");
-}
-
-/*!
- * @brief チェックサム情報を出力
- * @return チェックサム情報の文字列
- */
-static std::string get_check_sum()
-{
-    static constexpr auto headers = {
-        &artifacts_header,
-        &baseitems_header,
-        &class_magics_header,
-        &class_skills_header,
-        &dungeons_header,
-        &egos_header,
-        &monraces_header,
-        &monster_messages_header,
-        &terrains_header,
-        &vaults_header,
-    };
-
-    util::SHA256 sha256;
-    for (const auto *header : headers) {
-        sha256.update(header->digest.data(), header->digest.size());
-    }
-
-    return util::to_string(sha256.digest());
 }
 
 /*!
@@ -606,6 +599,6 @@ void make_character_dump(PlayerType *player_ptr, FILE *fff)
     dump_aux_home_museum(player_ptr, fff);
 
     // ダンプの幅をはみ出さないように48文字目以降を切り捨てる
-    const std::string checksum = get_check_sum().erase(48);
+    const std::string checksum = DefinitionHashData::get_instance().get_check_sum().erase(48);
     fmt::println(fff, _("  [チェックサム: \"{}\"]\n", "  [Check Sum: \"{}\"]\n"), checksum);
 }

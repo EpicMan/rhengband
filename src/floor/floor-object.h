@@ -4,7 +4,10 @@
 #include "system/angband.h"
 #include "system/baseitem/baseitem-allocation.h"
 #include "util/point-2d.h"
+#include <memory>
+#include <string_view>
 #include <tl/optional.hpp>
+#include <utility>
 #include <vector>
 
 class ObjectIndexList;
@@ -24,6 +27,6 @@ void delete_items(PlayerType *player_ptr, ObjectIndexList &o_idx_list);
 ObjectIndexList &get_o_idx_list_contains(FloorType &floor, OBJECT_IDX o_idx);
 short drop_near(PlayerType *player_ptr, ItemEntity &drop_item, const Pos2D &pos, bool show_drop_message = true);
 void drop_ammo_near(PlayerType *player_ptr, ItemEntity &drop_item, const Pos2D &pos, int destruction_chance);
-void floor_item_charges(const FloorType &floor, INVENTORY_IDX i_idx);
+void floor_item_charges(const ItemEntity &item);
 void floor_item_describe(PlayerType *player_ptr, INVENTORY_IDX i_idx);
-ItemEntity *choose_object(PlayerType *player_ptr, short *initial_i_idx, concptr q, concptr s, BIT_FLAGS option, const ItemTester &item_tester = AllMatchItemTester());
+std::pair<std::shared_ptr<ItemEntity>, short> choose_item(PlayerType *player_ptr, std::string_view q, std::string_view s, BIT_FLAGS option, const ItemTester &item_tester = AllMatchItemTester());

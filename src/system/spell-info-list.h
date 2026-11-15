@@ -1,6 +1,5 @@
 #pragma once
 
-#include "external-lib/include-json.h"
 #include "realm/realm-types.h"
 #include "system/angband.h"
 #include <string>
@@ -40,6 +39,10 @@ public:
     std::string tag; /*!< 呪文タグ() */
 };
 
+namespace test {
+class SpellInfoListTestAccess;
+}
+
 class SpellInfoList {
 public:
     SpellInfoList(SpellInfoList &&) = delete;
@@ -49,7 +52,7 @@ public:
     ~SpellInfoList() = default;
 
     void initialize();
-    errr parse(nlohmann::json &spell_data);
+    void set_spell_info(RealmType realm, int spell_id, SpellInfo &&spell_info);
 
     static SpellInfoList &get_instance();
 
@@ -57,6 +60,8 @@ public:
     const SpellInfo &get_spell_info(RealmType realm, int spell_id) const;
 
 private:
+    friend class test::SpellInfoListTestAccess;
+
     SpellInfoList() = default;
 
     static SpellInfoList instance;

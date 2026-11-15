@@ -21,13 +21,13 @@
 #include "core/show-file.h"
 #include "game-option/input-options.h"
 #include "game-option/keymap-directory-getter.h"
+#include "io/input-context.h"
 #include "io/macro-configurations-store.h"
 #include "locale/language-switcher.h"
 #include "player-info/class-info.h"
 #include "player-info/race-info.h"
 #include "system/player-type-definition.h"
 #include "term/term-color-types.h"
-#include "term/z-form.h"
 #include "util/string-processor.h"
 #include <fmt/format.h>
 #include <sstream>
@@ -42,10 +42,10 @@
  * @return
  * @details Execute a single editor command
  */
-ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int com_id)
+ape_quittance do_editor_command(PlayerType *player_ptr, AutopickTextBody *tb, EditorCommandId com_id)
 {
     switch (com_id) {
-    case EC_QUIT: {
+    case EditorCommandId::QUIT: {
         if (tb->changed) {
             if (!input_check(_("全ての変更を破棄してから終了します。よろしいですか？ ", "Discard all changes and quit. Are you sure? "))) {
                 break;
@@ -54,66 +54,60 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
 
         return APE_QUIT_WITHOUT_SAVE;
     }
-    case EC_SAVEQUIT:
+    case EditorCommandId::SAVEQUIT:
         return APE_QUIT_AND_SAVE;
-    case EC_REVERT: {
+    case EditorCommandId::REVERT: {
         if (!input_check(_("全ての変更を破棄して元の状態に戻します。よろしいですか？ ", "Discard all changes and revert to original file. Are you sure? "))) {
             break;
         }
 
-        tb->lines_list = read_pickpref_text_lines(player_ptr->base_name, &tb->filename_mode);
+        auto [filename_mode, lines] = read_pickpref_text_lines(player_ptr->base_name);
+        tb->filename_mode = filename_mode;
+        tb->set_lines(std::move(lines));
+
         tb->dirty_flags |= DIRTY_ALL | DIRTY_MODE | DIRTY_EXPRESSION;
         tb->cx = tb->cy = 0;
-        tb->mark = 0;
+        tb->marks.clear();
         tb->changed = false;
         break;
     }
-    case EC_HELP: {
+    case EditorCommandId::HELP: {
         FileDisplayer(player_ptr->name).display(true, _("jeditor.txt", "editor.txt"), 0, 0);
         tb->dirty_flags |= DIRTY_SCREEN;
         break;
     }
-    case EC_RETURN: {
-        if (tb->mark) {
-            tb->mark = 0;
+    case EditorCommandId::RETURN: {
+        if (tb->marks.any()) {
+            tb->marks.clear();
             tb->dirty_flags |= DIRTY_ALL;
         }
 
-        if (!insert_return_code(tb)) {
-            break;
-        }
+        insert_return_code(tb);
         tb->cy++;
         tb->cx = 0;
         tb->dirty_flags |= DIRTY_ALL;
         break;
     }
-    case EC_LEFT: {
+    case EditorCommandId::LEFT: {
         if (0 < tb->cx) {
             tb->cx--;
-            const int len = tb->lines_list[tb->cy]->length();
+            const int len = tb->lines[tb->cy].line.length();
             if (len < tb->cx) {
                 tb->cx = len;
             }
-#ifdef JP
-            for (auto i = 0; (*tb->lines_list[tb->cy])[i] != '\0'; i++) {
-                if (iskanji((*tb->lines_list[tb->cy])[i])) {
-                    i++;
-                    if (i == tb->cx) {
-                        tb->cx--;
-                        break;
-                    }
-                }
+
+            if (tb->is_cursor_on_second_byte_of_kanji()) {
+                tb->cx--;
             }
-#endif
         } else if (tb->cy > 0) {
             tb->cy--;
-            tb->cx = tb->lines_list[tb->cy]->length();
+            tb->cx = tb->lines[tb->cy].line.length();
         }
 
         break;
     }
-    case EC_DOWN: {
-        if (!tb->lines_list[tb->cy + 1]) {
+    case EditorCommandId::DOWN: {
+        if (tb->is_last_line(tb->cy)) {
             if (!add_empty_line(tb)) {
                 break;
             }
@@ -122,23 +116,21 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         tb->cy++;
         break;
     }
-    case EC_UP:
+    case EditorCommandId::UP:
         if (tb->cy > 0) {
             tb->cy--;
         }
         break;
-    case EC_RIGHT: {
-        const int len = tb->lines_list[tb->cy]->length();
-#ifdef JP
-        if ((tb->cx + 1 < len) && iskanji((*tb->lines_list[tb->cy])[tb->cx])) {
+    case EditorCommandId::RIGHT: {
+        const int len = tb->lines[tb->cy].line.length();
+        if (is_multibyte_char_at(tb->lines[tb->cy].line, tb->cx)) {
             tb->cx++;
         }
-#endif
         tb->cx++;
 
         if (len < tb->cx) {
             tb->cx = len;
-            if (!tb->lines_list[tb->cy + 1]) {
+            if (tb->is_last_line(tb->cy)) {
                 if (!add_empty_line(tb)) {
                     break;
                 }
@@ -150,13 +142,13 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
 
         break;
     }
-    case EC_BOL:
+    case EditorCommandId::BOL:
         tb->cx = 0;
         break;
-    case EC_EOL:
-        tb->cx = tb->lines_list[tb->cy]->length();
+    case EditorCommandId::EOL:
+        tb->cx = tb->lines[tb->cy].line.length();
         break;
-    case EC_PGUP:
+    case EditorCommandId::PGUP:
         while (0 < tb->cy && tb->upper <= tb->cy) {
             tb->cy--;
         }
@@ -166,9 +158,9 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         }
 
         break;
-    case EC_PGDOWN:
+    case EditorCommandId::PGDOWN:
         while (tb->cy < tb->upper + tb->hgt) {
-            if (!tb->lines_list[tb->cy + 1]) {
+            if (tb->is_last_line(tb->cy)) {
                 if (!add_empty_line(tb)) {
                     break;
                 }
@@ -179,28 +171,20 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
 
         tb->upper = tb->cy;
         break;
-    case EC_TOP:
+    case EditorCommandId::TOP:
         tb->cy = 0;
         break;
-    case EC_BOTTOM:
-        while (true) {
-            if (!tb->lines_list[tb->cy + 1]) {
-                if (!add_empty_line(tb)) {
-                    break;
-                }
-            }
-
-            tb->cy++;
-        }
-
+    case EditorCommandId::BOTTOM:
+        add_empty_line(tb);
+        tb->cy = static_cast<int>(tb->lines.size()) - 1;
         tb->cx = 0;
         break;
-    case EC_CUT: {
+    case EditorCommandId::CUT: {
         copy_text_to_yank(tb);
         if (tb->my == tb->cy) {
             const auto bx1 = std::min(tb->mx, tb->cx);
             auto bx2 = std::max(tb->mx, tb->cx);
-            const int len = tb->lines_list[tb->cy]->length();
+            const int len = tb->lines[tb->cy].line.length();
             if (bx2 > len) {
                 bx2 = len;
             }
@@ -211,7 +195,7 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
             const auto by1 = std::min(tb->my, tb->cy);
             const auto by2 = std::max(tb->my, tb->cy);
             for (auto y = by2; y >= by1; y--) {
-                const int len = tb->lines_list[y]->length();
+                const int len = tb->lines[y].line.length();
                 kill_line_segment(tb, y, 0, len, true);
             }
 
@@ -219,12 +203,12 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
             tb->cx = 0;
         }
 
-        tb->mark = 0;
+        tb->marks.clear();
         tb->dirty_flags |= DIRTY_ALL;
         tb->changed = true;
         break;
     }
-    case EC_COPY: {
+    case EditorCommandId::COPY: {
         copy_text_to_yank(tb);
 
         /*
@@ -234,7 +218,7 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
          */
         if (tb->my != tb->cy) {
             tb->cy = std::max(tb->cy, tb->my);
-            if (!tb->lines_list[tb->cy + 1]) {
+            if (tb->is_last_line(tb->cy)) {
                 if (!add_empty_line(tb)) {
                     break;
                 }
@@ -245,8 +229,8 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         }
 
         tb->cx = std::max(tb->cx, tb->mx);
-        if ((*tb->lines_list[tb->cy])[tb->cx] == '\0') {
-            if (!tb->lines_list[tb->cy + 1]) {
+        if (tb->lines[tb->cy].line[tb->cx] == '\0') {
+            if (tb->is_last_line(tb->cy)) {
                 if (!add_empty_line(tb)) {
                     break;
                 }
@@ -258,8 +242,8 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
 
         break;
     }
-    case EC_PASTE: {
-        const int len = tb->lines_list[tb->cy]->length();
+    case EditorCommandId::PASTE: {
+        const int len = tb->lines[tb->cy].line.length();
         if (tb->yank.empty()) {
             break;
         }
@@ -267,23 +251,20 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
             tb->cx = len;
         }
 
-        if (tb->mark) {
-            tb->mark = 0;
+        if (tb->marks.any()) {
+            tb->marks.clear();
             tb->dirty_flags |= DIRTY_ALL;
         }
 
         for (auto i = 0U; i < tb->yank.size(); ++i) {
-            const std::string_view line(*tb->lines_list[tb->cy]);
-            std::string buf(line.substr(0, tb->cx));
-            buf.append(tb->yank[i], 0, MAX_LINELEN - buf.length() - 1);
+            const std::string_view line(tb->lines[tb->cy].line);
+            // 行の上限を超える分は、2バイト文字を分断しないように切り詰める
+            auto buf = str_substr(std::string(line.substr(0, tb->cx)) + tb->yank[i], 0, MAX_LINELEN - 1);
 
-            const auto is_last_line = i + 1 == tb->yank.size();
-            if (!is_last_line || tb->yank_eol) {
-                if (!insert_return_code(tb)) {
-                    break;
-                }
-
-                tb->lines_list[tb->cy] = std::make_unique<std::string>(std::move(buf));
+            const auto is_last_yank_line = i + 1 == tb->yank.size();
+            if (!is_last_yank_line || tb->yank_eol) {
+                insert_return_code(tb);
+                tb->lines[tb->cy].line = std::move(buf);
                 tb->cx = 0;
                 tb->cy++;
                 continue;
@@ -291,9 +272,8 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
 
             const auto rest = line.substr(tb->cx);
             tb->cx = buf.length();
-            buf.append(rest, 0, MAX_LINELEN - buf.length() - 1);
-
-            tb->lines_list[tb->cy] = std::make_unique<std::string>(std::move(buf));
+            buf.append(rest);
+            tb->lines[tb->cy].line = str_substr(std::move(buf), 0, MAX_LINELEN - 1);
             break;
         }
 
@@ -302,14 +282,14 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         tb->changed = true;
         break;
     }
-    case EC_BLOCK: {
-        if (tb->mark) {
-            tb->mark = 0;
+    case EditorCommandId::BLOCK: {
+        if (tb->marks.any()) {
+            tb->marks.clear();
             tb->dirty_flags |= DIRTY_ALL;
             break;
         }
 
-        tb->mark = MARK_MARK;
+        tb->marks.set(AutopickMark::MARK);
         if (com_id == tb->old_com_id) {
             int tmp = tb->cy;
             tb->cy = tb->my;
@@ -321,7 +301,7 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
             break;
         }
 
-        const int len = tb->lines_list[tb->cy]->length();
+        const int len = tb->lines[tb->cy].line.length();
 
         tb->my = tb->cy;
         tb->mx = tb->cx;
@@ -330,14 +310,14 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         }
         break;
     }
-    case EC_KILL_LINE: {
-        const int len = tb->lines_list[tb->cy]->length();
+    case EditorCommandId::KILL_LINE: {
+        const int len = tb->lines[tb->cy].line.length();
         if (tb->cx > len) {
             tb->cx = len;
         }
 
-        if (tb->mark) {
-            tb->mark = 0;
+        if (tb->marks.any()) {
+            tb->marks.clear();
             tb->dirty_flags |= DIRTY_ALL;
         }
 
@@ -346,7 +326,7 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         }
 
         if (tb->cx < len) {
-            add_str_to_yank(tb, &((*tb->lines_list[tb->cy])[tb->cx]));
+            add_str_to_yank(tb, &(tb->lines[tb->cy].line[tb->cx]));
             kill_line_segment(tb, tb->cy, tb->cx, len, false);
             tb->dirty_line = tb->cy;
             break;
@@ -357,28 +337,28 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         }
 
         tb->yank_eol = true;
-        do_editor_command(player_ptr, tb, EC_DELETE_CHAR);
+        do_editor_command(player_ptr, tb, EditorCommandId::DELETE_CHAR);
         break;
     }
-    case EC_DELETE_CHAR: {
-        if (tb->mark) {
-            tb->mark = 0;
+    case EditorCommandId::DELETE_CHAR: {
+        if (tb->marks.any()) {
+            tb->marks.clear();
             tb->dirty_flags |= DIRTY_ALL;
         }
 
 #ifdef JP
-        if (iskanji((*tb->lines_list[tb->cy])[tb->cx])) {
+        if (iskanji(tb->lines[tb->cy].line[tb->cx])) {
             tb->cx++;
         }
 #endif
         tb->cx++;
-        const int len = tb->lines_list[tb->cy]->length();
+        const int len = tb->lines[tb->cy].line.length();
         if (len >= tb->cx) {
-            do_editor_command(player_ptr, tb, EC_BACKSPACE);
+            do_editor_command(player_ptr, tb, EditorCommandId::BACKSPACE);
             break;
         }
 
-        if (tb->lines_list[tb->cy + 1]) {
+        if (!tb->is_last_line(tb->cy)) {
             tb->cy++;
             tb->cx = 0;
         } else {
@@ -386,16 +366,16 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
             break;
         }
 
-        do_editor_command(player_ptr, tb, EC_BACKSPACE);
+        do_editor_command(player_ptr, tb, EditorCommandId::BACKSPACE);
         break;
     }
-    case EC_BACKSPACE: {
-        if (tb->mark) {
-            tb->mark = 0;
+    case EditorCommandId::BACKSPACE: {
+        if (tb->marks.any()) {
+            tb->marks.clear();
             tb->dirty_flags |= DIRTY_ALL;
         }
 
-        const int len = tb->lines_list[tb->cy]->length();
+        const int len = tb->lines[tb->cy].line.length();
         if (len < tb->cx) {
             tb->cx = len;
         }
@@ -404,15 +384,9 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
             if (tb->cy == 0) {
                 break;
             }
-            tb->cx = tb->lines_list[tb->cy - 1]->length();
-            tb->lines_list[tb->cy - 1]->append(*tb->lines_list[tb->cy]);
-
-            int i;
-            for (i = tb->cy; tb->lines_list[i + 1]; i++) {
-                std::swap(tb->lines_list[i], tb->lines_list[i + 1]);
-            }
-
-            tb->lines_list[i].reset();
+            tb->cx = tb->lines[tb->cy - 1].line.length();
+            tb->lines[tb->cy - 1].line.append(tb->lines[tb->cy].line);
+            tb->lines.erase(tb->lines.begin() + tb->cy);
             tb->cy--;
             tb->dirty_flags |= DIRTY_ALL;
             tb->dirty_flags |= DIRTY_EXPRESSION;
@@ -420,31 +394,31 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
             break;
         }
 
-        const auto mb_chars = str_find_all_multibyte_chars(*tb->lines_list[tb->cy]);
-        const auto delete_bytes = mb_chars.contains(tb->cx - 2) ? 2 : 1;
+        const auto delete_bytes = is_second_byte_of_kanji(tb->lines[tb->cy].line, tb->cx - 1) ? 2 : 1;
         tb->cx -= delete_bytes;
-        tb->lines_list[tb->cy]->erase(tb->cx, delete_bytes);
+        tb->lines[tb->cy].line.erase(tb->cx, delete_bytes);
         tb->dirty_line = tb->cy;
         check_expression_line(tb, tb->cy);
         tb->changed = true;
         break;
     }
-    case EC_SEARCH_STR: {
+    case EditorCommandId::SEARCH_STR: {
         tb->dirty_flags |= DIRTY_SCREEN;
-        const auto as_result = get_string_for_search(player_ptr, { tb->search_o_ptr, tb->search_str });
-        tb->search_o_ptr = as_result.item_ptr;
+        AutopickSearch as(tb->search_item, tb->search_str);
+        const auto as_result = get_string_for_search(player_ptr, as);
+        tb->search_item = as_result.item;
         tb->search_str = as_result.search_str;
         if (as_result.result == AutopickSearchResult::CANCEL) {
             break;
         }
 
-        const auto command = as_result.result == AutopickSearchResult::FORWARD ? EC_SEARCH_FORW : EC_SEARCH_BACK;
+        const auto command = as_result.result == AutopickSearchResult::FORWARD ? EditorCommandId::SEARCH_FORW : EditorCommandId::SEARCH_BACK;
         do_editor_command(player_ptr, tb, command);
         break;
     }
-    case EC_SEARCH_FORW:
-        if (tb->search_o_ptr) {
-            search_for_object(player_ptr, tb, tb->search_o_ptr, true);
+    case EditorCommandId::SEARCH_FORW:
+        if (tb->search_item) {
+            search_for_object(player_ptr, tb, tb->search_item.get(), true);
             break;
         }
 
@@ -456,9 +430,9 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         tb->dirty_flags |= DIRTY_NO_SEARCH;
         break;
 
-    case EC_SEARCH_BACK: {
-        if (tb->search_o_ptr) {
-            search_for_object(player_ptr, tb, tb->search_o_ptr, false);
+    case EditorCommandId::SEARCH_BACK: {
+        if (tb->search_item) {
+            search_for_object(player_ptr, tb, tb->search_item.get(), false);
             break;
         }
 
@@ -470,29 +444,29 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         tb->dirty_flags |= DIRTY_NO_SEARCH;
         break;
     }
-    case EC_SEARCH_OBJ: {
+    case EditorCommandId::SEARCH_OBJ: {
         tb->dirty_flags |= DIRTY_SCREEN;
-        AutopickSearch as(tb->search_o_ptr, tb->search_str);
+        AutopickSearch as(tb->search_item, tb->search_str);
         if (!get_object_for_search(player_ptr, as)) {
             break;
         }
 
         tb->search_str = as.search_str;
-        do_editor_command(player_ptr, tb, EC_SEARCH_FORW);
+        do_editor_command(player_ptr, tb, EditorCommandId::SEARCH_FORW);
         break;
     }
-    case EC_SEARCH_DESTROYED: {
-        AutopickSearch as(tb->search_o_ptr, tb->search_str);
+    case EditorCommandId::SEARCH_DESTROYED: {
+        AutopickSearch as(tb->search_item, tb->search_str);
         if (!get_destroyed_object_for_search(player_ptr, as)) {
             tb->dirty_flags |= DIRTY_NO_SEARCH;
             break;
         }
 
         tb->search_str = as.search_str;
-        do_editor_command(player_ptr, tb, EC_SEARCH_FORW);
+        do_editor_command(player_ptr, tb, EditorCommandId::SEARCH_FORW);
         break;
     }
-    case EC_INSERT_OBJECT: {
+    case EditorCommandId::INSERT_OBJECT: {
         autopick_type an_entry, *entry = &an_entry;
         if (!entry_from_choosed_object(player_ptr, entry)) {
             tb->dirty_flags |= DIRTY_SCREEN;
@@ -500,50 +474,41 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         }
 
         tb->cx = 0;
-        if (!insert_return_code(tb)) {
-            break;
-        }
-
-        tb->lines_list[tb->cy] = std::make_unique<std::string>(autopick_line_from_entry(*entry));
+        insert_return_code(tb);
+        tb->lines[tb->cy].line = autopick_line_from_entry(*entry);
         tb->dirty_flags |= DIRTY_SCREEN;
         break;
     }
-    case EC_INSERT_DESTROYED: {
+    case EditorCommandId::INSERT_DESTROYED: {
         if (tb->last_destroyed.empty()) {
             break;
         }
 
         tb->cx = 0;
-        if (!insert_return_code(tb)) {
-            break;
-        }
-
-        tb->lines_list[tb->cy] = std::make_unique<std::string>(tb->last_destroyed);
+        insert_return_code(tb);
+        tb->lines[tb->cy].line = tb->last_destroyed;
         tb->dirty_flags |= DIRTY_ALL;
         tb->changed = true;
         break;
     }
-    case EC_INSERT_BLOCK: {
-        if (!can_insert_line(tb, 2)) {
-            break;
-        }
-        const auto expression = format("?:[AND [EQU $RACE %s] [EQU $CLASS %s] [GEQ $LEVEL %02d]]",
-            rp_ptr->title.en_string().data(), cp_ptr->title.en_string().data(),
-            player_ptr->lev);
+    case EditorCommandId::INSERT_BLOCK: {
+        const auto expression = fmt::format("?:[AND [EQU $RACE {}] [EQU $CLASS {}] [GEQ $LEVEL {:02}]]", rp_ptr->title.en_string(), cp_ptr->title.en_string(), player_ptr->lev);
         tb->cx = 0;
         insert_return_code(tb);
-        tb->lines_list[tb->cy] = std::make_unique<std::string>(expression);
+        tb->lines[tb->cy].line = expression;
         tb->cy++;
         insert_return_code(tb);
-        tb->lines_list[tb->cy] = std::make_unique<std::string>("?:1");
+        tb->lines[tb->cy].line = "?:1";
         tb->dirty_flags |= DIRTY_ALL;
         tb->changed = true;
         break;
     }
-    case EC_INSERT_MACRO: {
+    case EditorCommandId::INSERT_MACRO: {
         draw_text_editor(player_ptr, tb);
         term_erase(0, tb->cy - tb->upper + 1, tb->wid);
-        term_putstr(0, tb->cy - tb->upper + 1, tb->wid - 1, TERM_YELLOW, _("P:<トリガーキー>: ", "P:<Trigger key>: "));
+        constexpr auto prompt = _("P:<トリガーキー>: ", "P:<Trigger key>: ");
+        term_putstr(0, tb->cy - tb->upper + 1, tb->wid - 1, TERM_YELLOW, prompt);
+        const InputContextScope context_scope(InputKind::COMMAND_CHAR, prompt);
         if (!insert_macro_line(tb)) {
             break;
         }
@@ -553,12 +518,13 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         tb->changed = true;
         break;
     }
-    case EC_INSERT_KEYMAP: {
+    case EditorCommandId::INSERT_KEYMAP: {
         draw_text_editor(player_ptr, tb);
         term_erase(0, tb->cy - tb->upper + 1, tb->wid);
         const auto mode = rogue_like_commands ? KeymapMode::ROGUE : KeymapMode::ORIGINAL;
         const auto mes = fmt::format("C:{}:<{}>: ", enum2i(mode), _("コマンドキー", "Keypress"));
         term_putstr(0, tb->cy - tb->upper + 1, tb->wid - 1, TERM_YELLOW, mes);
+        const InputContextScope context_scope(InputKind::COMMAND_CHAR, mes);
         if (!insert_keymap_line(tb)) {
             break;
         }
@@ -568,159 +534,161 @@ ape_quittance do_editor_command(PlayerType *player_ptr, text_body_type *tb, int 
         tb->changed = true;
         break;
     }
-    case EC_CL_AUTOPICK:
-        toggle_command_letter(tb, DO_AUTOPICK);
+    case EditorCommandId::CL_AUTOPICK:
+        toggle_command_letter(tb, AutopickMethod::AUTOPICK);
         break;
-    case EC_CL_DESTROY:
-        toggle_command_letter(tb, DO_AUTODESTROY);
+    case EditorCommandId::CL_DESTROY:
+        toggle_command_letter(tb, AutopickMethod::AUTODESTROY);
         break;
-    case EC_CL_LEAVE:
-        toggle_command_letter(tb, DONT_AUTOPICK);
+    case EditorCommandId::CL_LEAVE:
+        toggle_command_letter(tb, AutopickMethod::NOT_AUTOPICK);
         break;
-    case EC_CL_QUERY:
-        toggle_command_letter(tb, DO_QUERY_AUTOPICK);
+    case EditorCommandId::CL_QUERY:
+        toggle_command_letter(tb, AutopickMethod::QUERY_AUTOPICK);
         break;
-    case EC_CL_NO_DISP:
-        toggle_command_letter(tb, DO_DISPLAY);
+    case EditorCommandId::CL_NO_DISP:
+        toggle_command_letter(tb, AutopickMethod::DISPLAY);
         break;
-    case EC_IK_UNAWARE:
+    case EditorCommandId::IK_UNAWARE:
         toggle_keyword(tb, FLG_UNAWARE);
         break;
-    case EC_IK_UNIDENTIFIED:
+    case EditorCommandId::IK_UNIDENTIFIED:
         toggle_keyword(tb, FLG_UNIDENTIFIED);
         break;
-    case EC_IK_IDENTIFIED:
+    case EditorCommandId::IK_IDENTIFIED:
         toggle_keyword(tb, FLG_IDENTIFIED);
         break;
-    case EC_IK_STAR_IDENTIFIED:
+    case EditorCommandId::IK_STAR_IDENTIFIED:
         toggle_keyword(tb, FLG_STAR_IDENTIFIED);
         break;
-    case EC_KK_WEAPONS:
+    case EditorCommandId::KK_WEAPONS:
         toggle_keyword(tb, FLG_WEAPONS);
         break;
-    case EC_KK_FAVORITE_WEAPONS:
+    case EditorCommandId::KK_FAVORITE_WEAPONS:
         toggle_keyword(tb, FLG_FAVORITE_WEAPONS);
         break;
-    case EC_KK_ARMORS:
+    case EditorCommandId::KK_ARMORS:
         toggle_keyword(tb, FLG_ARMORS);
         break;
-    case EC_KK_MISSILES:
+    case EditorCommandId::KK_MISSILES:
         toggle_keyword(tb, FLG_MISSILES);
         break;
-    case EC_KK_DEVICES:
+    case EditorCommandId::KK_DEVICES:
         toggle_keyword(tb, FLG_DEVICES);
         break;
-    case EC_KK_LIGHTS:
+    case EditorCommandId::KK_LIGHTS:
         toggle_keyword(tb, FLG_LIGHTS);
         break;
-    case EC_KK_JUNKS:
+    case EditorCommandId::KK_JUNKS:
         toggle_keyword(tb, FLG_JUNKS);
         break;
-    case EC_KK_CORPSES:
+    case EditorCommandId::KK_CORPSES:
         toggle_keyword(tb, FLG_CORPSES);
         break;
-    case EC_KK_SPELLBOOKS:
+    case EditorCommandId::KK_SPELLBOOKS:
         toggle_keyword(tb, FLG_SPELLBOOKS);
         break;
-    case EC_KK_SHIELDS:
+    case EditorCommandId::KK_SHIELDS:
         toggle_keyword(tb, FLG_SHIELDS);
         break;
-    case EC_KK_BOWS:
+    case EditorCommandId::KK_BOWS:
         toggle_keyword(tb, FLG_BOWS);
         break;
-    case EC_KK_RINGS:
+    case EditorCommandId::KK_RINGS:
         toggle_keyword(tb, FLG_RINGS);
         break;
-    case EC_KK_AMULETS:
+    case EditorCommandId::KK_AMULETS:
         toggle_keyword(tb, FLG_AMULETS);
         break;
-    case EC_KK_SUITS:
+    case EditorCommandId::KK_SUITS:
         toggle_keyword(tb, FLG_SUITS);
         break;
-    case EC_KK_CLOAKS:
+    case EditorCommandId::KK_CLOAKS:
         toggle_keyword(tb, FLG_CLOAKS);
         break;
-    case EC_KK_HELMS:
+    case EditorCommandId::KK_HELMS:
         toggle_keyword(tb, FLG_HELMS);
         break;
-    case EC_KK_GLOVES:
+    case EditorCommandId::KK_GLOVES:
         toggle_keyword(tb, FLG_GLOVES);
         break;
-    case EC_KK_BOOTS:
+    case EditorCommandId::KK_BOOTS:
         toggle_keyword(tb, FLG_BOOTS);
         break;
-    case EC_OK_COLLECTING:
+    case EditorCommandId::OK_COLLECTING:
         toggle_keyword(tb, FLG_COLLECTING);
         break;
-    case EC_OK_BOOSTED:
+    case EditorCommandId::OK_BOOSTED:
         toggle_keyword(tb, FLG_BOOSTED);
         break;
-    case EC_OK_MORE_DICE:
+    case EditorCommandId::OK_MORE_DICE:
         toggle_keyword(tb, FLG_MORE_DICE);
         break;
-    case EC_OK_MORE_BONUS:
+    case EditorCommandId::OK_MORE_BONUS:
         toggle_keyword(tb, FLG_MORE_BONUS);
         break;
-    case EC_OK_WORTHLESS:
+    case EditorCommandId::OK_WORTHLESS:
         toggle_keyword(tb, FLG_WORTHLESS);
         break;
-    case EC_OK_ARTIFACT:
+    case EditorCommandId::OK_ARTIFACT:
         toggle_keyword(tb, FLG_ARTIFACT);
         break;
-    case EC_OK_EGO:
+    case EditorCommandId::OK_EGO:
         toggle_keyword(tb, FLG_EGO);
         break;
-    case EC_OK_GOOD:
+    case EditorCommandId::OK_GOOD:
         toggle_keyword(tb, FLG_GOOD);
         break;
-    case EC_OK_NAMELESS:
+    case EditorCommandId::OK_NAMELESS:
         toggle_keyword(tb, FLG_NAMELESS);
         break;
-    case EC_OK_AVERAGE:
+    case EditorCommandId::OK_AVERAGE:
         toggle_keyword(tb, FLG_AVERAGE);
         break;
-    case EC_OK_RARE:
+    case EditorCommandId::OK_RARE:
         toggle_keyword(tb, FLG_RARE);
         break;
-    case EC_OK_COMMON:
+    case EditorCommandId::OK_COMMON:
         toggle_keyword(tb, FLG_COMMON);
         break;
-    case EC_OK_WANTED:
+    case EditorCommandId::OK_WANTED:
         toggle_keyword(tb, FLG_WANTED);
         break;
-    case EC_OK_UNIQUE:
+    case EditorCommandId::OK_UNIQUE:
         toggle_keyword(tb, FLG_UNIQUE);
         break;
-    case EC_OK_HUMAN:
+    case EditorCommandId::OK_HUMAN:
         toggle_keyword(tb, FLG_HUMAN);
         break;
-    case EC_OK_UNREADABLE:
+    case EditorCommandId::OK_UNREADABLE:
         toggle_keyword(tb, FLG_UNREADABLE);
         add_keyword(tb, FLG_SPELLBOOKS);
         break;
-    case EC_OK_REALM1:
+    case EditorCommandId::OK_REALM1:
         toggle_keyword(tb, FLG_REALM1);
         add_keyword(tb, FLG_SPELLBOOKS);
         break;
-    case EC_OK_REALM2:
+    case EditorCommandId::OK_REALM2:
         toggle_keyword(tb, FLG_REALM2);
         add_keyword(tb, FLG_SPELLBOOKS);
         break;
-    case EC_OK_FIRST:
+    case EditorCommandId::OK_FIRST:
         toggle_keyword(tb, FLG_FIRST);
         add_keyword(tb, FLG_SPELLBOOKS);
         break;
-    case EC_OK_SECOND:
+    case EditorCommandId::OK_SECOND:
         toggle_keyword(tb, FLG_SECOND);
         add_keyword(tb, FLG_SPELLBOOKS);
         break;
-    case EC_OK_THIRD:
+    case EditorCommandId::OK_THIRD:
         toggle_keyword(tb, FLG_THIRD);
         add_keyword(tb, FLG_SPELLBOOKS);
         break;
-    case EC_OK_FOURTH:
+    case EditorCommandId::OK_FOURTH:
         toggle_keyword(tb, FLG_FOURTH);
         add_keyword(tb, FLG_SPELLBOOKS);
+        break;
+    default:
         break;
     }
 

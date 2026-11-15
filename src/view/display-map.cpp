@@ -5,25 +5,32 @@
 #include "game-option/map-screen-options.h"
 #include "game-option/special-options.h"
 #include "player/player-status.h"
+#include "system/baseitem/baseitem-config.h"
+#include "system/baseitem/baseitem-service.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monrace/monrace-list.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
 #include "system/terrain/terrain-definition.h"
 #include "system/terrain/terrain-list.h"
+#include "term/z-rand.h"
 #include "timed-effect/timed-effects.h"
 #include "util/bit-flags-calculator.h"
 #include "view/display-symbol.h"
+#include "view/original-monster-catalog.h"
+#include "view/original-symbol-tiles.h"
+#include "view/original-tiles.h"
 #include "window/main-window-util.h"
 #include "world/world.h"
 #include <algorithm>
 #include <span>
+#include <tl/optional.hpp>
 
-uint8_t display_autopick; /*!< 自動拾い状態の設定フラグ */
+EnumClassFlagGroup<AutopickMethod> display_autopick{}; /*!< 自動拾い状態の設定フラグ */
 
 namespace {
 /* 一般的にオブジェクトシンボルとして扱われる記号を定義する(幻覚処理向け) /  Hack -- Legal object codes */
@@ -34,63 +41,65 @@ const std::string image_monsters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQR
 
 /*!
  * @brief オブジェクトの表示を幻覚状態に差し替える
+ * @param rng 乱数生成器
  * @return 差し替えたシンボルと色
  */
-DisplaySymbol image_object()
+DisplaySymbol image_object(xso::rng32 &rng)
 {
     if (use_graphics) {
-        const auto &baseitem = BaseitemList::get_instance().pick_one_at_random();
-        return baseitem.symbol_config;
+        return original_tiles::item_symbol_fallback(BaseitemService::pick_one_at_random(rng).get_symbol());
     }
 
-    const auto color = randnum1<uint8_t>(15);
-    const auto character = rand_choice(image_objects);
+    const auto color = randnum1<uint8_t>(rng, 15);
+    const auto character = rand_choice(rng, image_objects);
     return { color, character }; //!< @details 乱数引数の評価順を固定する.
 }
 
 /*!
  * @brief モンスターの表示を幻覚状態に差し替える
+ * @param rng 乱数生成器
  * @return 差し替えたシンボルと色
  */
-DisplaySymbol image_monster()
+DisplaySymbol image_monster(xso::rng32 &rng)
 {
     if (use_graphics) {
         const auto &monraces = MonraceList::get_instance();
-        const auto &monrace = monraces.pick_monrace_at_random();
-        return monrace.symbol_config;
+        const auto &monrace = monraces.pick_monrace_at_random(rng);
+        return original_tiles::monster_catalog_symbol(static_cast<int>(monrace.idx), monrace.symbol_config);
     }
 
-    const auto color = randnum1<uint8_t>(15);
-    const auto character = one_in_(25) ? rand_choice(image_objects) : rand_choice(image_monsters);
+    const auto color = randnum1<uint8_t>(rng, 15);
+    const auto character = one_in_(rng, 25) ? rand_choice(rng, image_objects) : rand_choice(rng, image_monsters);
     return { color, character };
 }
 
 /*!
  * @brief オブジェクト＆モンスターの表示を幻覚状態に差し替える
+ * @param rng 乱数生成器
  * @return 差し替えたシンボルと色
  */
-DisplaySymbol image_random()
+DisplaySymbol image_random(xso::rng32 &rng)
 {
-    if (evaluate_percent(75)) {
-        return image_monster();
+    if (evaluate_percent(rng, 75)) {
+        return image_monster(rng);
     } else {
-        return image_object();
+        return image_object(rng);
     }
-}
 }
 
 /*!
  * @brief マップに表示されるべき地形(壁)かどうかを判定する
  * @param floor 階の情報への参照
+ * @param grid 判定するグリッド
+ * @param terrain グリッドの地形 (MIMIC)
  * @param pos グリッド座標
  * @return 表示されるべきならtrue、そうでないならfalse
  * @details
  * 周り全てが壁に囲まれている壁についてはオプション状態による。
  * 1か所でも空きがあるか、壁ではない地形、金を含む地形、永久岩は表示。
  */
-static bool is_revealed_wall(const FloorType &floor, const Pos2D &pos)
+bool is_revealed_wall(const FloorType &floor, const Grid &grid, const TerrainType &terrain, const Pos2D &pos)
 {
-    const auto &grid = floor.get_grid(pos);
     if (view_hidden_walls) {
         if (view_unsafe_walls) {
             return true;
@@ -100,125 +109,195 @@ static bool is_revealed_wall(const FloorType &floor, const Pos2D &pos)
         }
     }
 
-    const auto &terrain = grid.get_terrain(TerrainKind::MIMIC);
     if (terrain.flags.has_not(TerrainCharacteristics::WALL) || terrain.flags.has(TerrainCharacteristics::HAS_GOLD)) {
         return true;
     }
 
-    if (floor.contains(pos, FloorBoundary::OUTER_WALL_EXCLUSIVE) && terrain.flags.has(TerrainCharacteristics::PERMANENT)) {
+    if (terrain.flags.has(TerrainCharacteristics::PERMANENT) && floor.contains(pos, FloorBoundary::OUTER_WALL_EXCLUSIVE)) {
         return true;
     }
 
+    // 周りに壁でないマス (フロアの外は壁とみなす) が 1 つでもあれば表示する。
     const auto dirs = Direction::directions_8();
-    const auto num_of_walls = std::count_if(dirs.begin(), dirs.end(),
-        [&floor, &pos](const auto &d) {
-            const auto pos_neighbor = pos + d.vec();
-            if (!floor.contains(pos_neighbor, FloorBoundary::OUTER_WALL_EXCLUSIVE)) {
-                return true;
-            }
-
-            const auto &terrain_neighbor = floor.get_grid(pos_neighbor).get_terrain();
-            return terrain_neighbor.flags.has(TerrainCharacteristics::WALL);
-        });
-
-    return num_of_walls != std::ssize(dirs);
+    return std::any_of(dirs.begin(), dirs.end(), [&floor, &pos](const auto &d) {
+        const auto pos_neighbor = pos + d.vec();
+        return floor.contains(pos_neighbor, FloorBoundary::OUTER_WALL_EXCLUSIVE) && floor.get_grid(pos_neighbor).get_terrain().flags.has_not(TerrainCharacteristics::WALL);
+    });
 }
 
 /*!
- * @brief 指定した座標の地形の表示属性を取得する
+ * @brief 通常の地図描画で地形自体を表示するか判定する (色や重ね描きの前)
+ * @param player プレイヤー情報
+ * @param grid 判定するグリッド
+ * @param terrain グリッドの地形 (MIMIC)
+ * @param pos 階の中の座標
+ * @return 不明地形や未調査マークに置き換えず地形を表示するならtrue
+ */
+bool is_terrain_visible_on_map(const PlayerType &player, const Grid &grid, const TerrainType &terrain, const Pos2D &pos)
+{
+    const auto &floor = *player.current_floor_ptr;
+    const auto is_blind = player.effects()->blindness().is_active();
+    const auto has_nocto = player.see_nocto != 0;
+    const auto is_darkened = !AngbandWorld::get_instance().is_wild_mode() && !has_nocto && grid.is_darkened();
+    if (terrain.flags.has(TerrainCharacteristics::REMEMBER)) {
+        return grid.is_mark() && is_revealed_wall(floor, grid, terrain, pos) && !(is_darkened && !is_blind && terrain.flags.has_all_of({ TerrainCharacteristics::LOS, TerrainCharacteristics::PROJECTION }));
+    }
+
+    const auto is_visible = any_bits(grid.info, CAVE_MARK | CAVE_LITE | CAVE_MNLT);
+    const auto is_glowing = match_bits(grid.info, CAVE_GLOW | CAVE_MNDK, CAVE_GLOW);
+    return !is_blind && !is_darkened && (is_visible || (grid.is_view() && (is_glowing || has_nocto)));
+}
+
+/*!
+ * @brief 表示すると判定済みの地形を、どの照明状態の記号で描くかを決める
+ * @param player プレイヤー情報
+ * @param grid 判定するグリッド
+ * @param terrain グリッドの地形 (MIMIC)
+ * @param pos 階の中の座標
+ * @return 地形記号の照明状態 (F_LIT_STANDARD / F_LIT_LITE / F_LIT_DARK)
+ */
+int decide_visible_terrain_lighting(const PlayerType &player, const Grid &grid, const TerrainType &terrain, const Pos2D &pos)
+{
+    const auto &floor = *player.current_floor_ptr;
+    const auto &world = AngbandWorld::get_instance();
+    const auto is_wild_mode = world.is_wild_mode();
+    if (terrain.flags.has_not(TerrainCharacteristics::REMEMBER)) {
+        if (is_wild_mode) {
+            if (view_special_lite && !world.is_daytime()) {
+                return F_LIT_DARK;
+            }
+        } else if (view_special_lite) {
+            if (grid.info & (CAVE_LITE | CAVE_MNLT)) {
+                if (view_yellow_lite) {
+                    return F_LIT_LITE;
+                }
+            } else if ((grid.info & (CAVE_GLOW | CAVE_MNDK)) != CAVE_GLOW) {
+                return F_LIT_DARK;
+            } else if (!(grid.info & CAVE_VIEW)) {
+                if (view_bright_lite) {
+                    return F_LIT_DARK;
+                }
+            }
+        }
+
+        return F_LIT_STANDARD;
+    }
+
+    const auto is_blind = player.effects()->blindness().is_active();
+    const auto has_nocto = player.see_nocto != 0;
+    const auto is_darkened = !has_nocto && grid.is_darkened();
+    if (is_wild_mode) {
+        if (view_granite_lite && (is_blind || !world.is_daytime())) {
+            return F_LIT_DARK;
+        }
+    } else if (is_darkened && !is_blind) {
+        if (view_granite_lite && view_bright_lite) {
+            return F_LIT_DARK;
+        }
+    } else if (view_granite_lite) {
+        if (is_blind) {
+            return F_LIT_DARK;
+        } else if (grid.info & (CAVE_LITE | CAVE_MNLT)) {
+            if (view_yellow_lite) {
+                return F_LIT_LITE;
+            }
+        } else if (view_bright_lite) {
+            if (!(grid.info & CAVE_VIEW)) {
+                return F_LIT_DARK;
+            } else if ((grid.info & (CAVE_GLOW | CAVE_MNDK)) != CAVE_GLOW) {
+                return F_LIT_DARK;
+            } else if (terrain.flags.has_not(TerrainCharacteristics::LOS) && !floor.is_illuminated_at(player.get_position(), pos)) {
+                return F_LIT_DARK;
+            }
+        }
+    }
+
+    return F_LIT_STANDARD;
+}
+}
+
+/*!
+ * @brief 通常の地図描画で地形自体を表示するか判定する (色や重ね描きの前)
+ * @param player プレイヤー情報
+ * @param pos 階の中の座標
+ * @return 不明地形や未調査マークに置き換えず地形を表示するならtrue
+ */
+bool is_map_terrain_visible(const PlayerType &player, const Pos2D &pos)
+{
+    const auto &grid = player.current_floor_ptr->get_grid(pos);
+    return is_terrain_visible_on_map(player, grid, grid.get_terrain(TerrainKind::MIMIC), pos);
+}
+
+/*!
+ * @brief 通常の地図描画で地形をどの照明状態の記号で描くかを返す
+ * @param player プレイヤー情報
+ * @param pos 階の中の座標
+ * @param monochrome 通常マップの最終描画で色を上書きする場合の色
+ * @return 地形記号の照明状態 (F_LIT_STANDARD / F_LIT_LITE / F_LIT_DARK)。地形を表示しない座標は F_LIT_STANDARD
+ * @details 同じ色と文字を描く照明状態は最小の添字に統合し、表示で区別できない内部状態を公開しない。
+ */
+int decide_map_terrain_lighting(const PlayerType &player, const Pos2D &pos, tl::optional<uint8_t> monochrome)
+{
+    const auto &grid = player.current_floor_ptr->get_grid(pos);
+    const auto &terrain = grid.get_terrain(TerrainKind::MIMIC);
+    if (!is_terrain_visible_on_map(player, grid, terrain, pos) || monochrome == TERM_DARK) {
+        return F_LIT_STANDARD;
+    }
+
+    const auto lighting = decide_visible_terrain_lighting(player, grid, terrain, pos);
+    if (original_tiles::is_enabled()) {
+        return lighting;
+    }
+    const auto &symbols = terrain.symbol_configs;
+    const auto &displayed = symbols.at(lighting);
+    for (auto candidate = F_LIT_STANDARD; candidate < lighting; ++candidate) {
+        const auto &other = symbols.at(candidate);
+        if (other.character == displayed.character && (monochrome || other.color == displayed.color)) {
+            return candidate;
+        }
+    }
+
+    return lighting;
+}
+
+/*!
+ * @brief 指定した座標の地形・物体・モンスターの表示属性を取得する
  * @param player_ptr プレイヤー情報への参照ポインタ
  * @param pos 階の中の座標
- * @return シンボル表記
- * @todo 強力発動コピペの嵐…ポインタ引数の嵐……Fuuu^h^hck!!
+ * @return 前景・背景のシンボルと色
  */
-DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
+static DisplaySymbolPair map_info_impl(PlayerType *player_ptr, const Pos2D &pos)
 {
     const auto &floor = *player_ptr->current_floor_ptr;
     const auto &grid = floor.get_grid(pos);
     const auto &terrains = TerrainList::get_instance();
-    const auto &world = AngbandWorld::get_instance();
-    const auto is_wild_mode = world.is_wild_mode();
-    const auto is_blind = player_ptr->effects()->blindness().is_blind();
-    const auto has_nocto = player_ptr->see_nocto != 0;
-    const auto is_darkened = !has_nocto && grid.is_darkened();
     const auto tag_unsafe = (view_unsafe_grids && (grid.info & CAVE_UNSAFE)) ? TerrainTag::UNDETECTED : TerrainTag::NONE;
-    const auto *terrain_mimic_ptr = &grid.get_terrain(TerrainKind::MIMIC);
-    DisplaySymbol symbol_config;
-    if (terrain_mimic_ptr->flags.has_not(TerrainCharacteristics::REMEMBER)) {
-        const auto is_visible = any_bits(grid.info, (CAVE_MARK | CAVE_LITE | CAVE_MNLT));
-        const auto is_glowing = match_bits(grid.info, CAVE_GLOW | CAVE_MNDK, CAVE_GLOW);
-        const auto can_view = grid.is_view() && (is_glowing || has_nocto);
-        if (!is_blind && (is_visible || can_view)) {
-            symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_STANDARD);
-            if (is_wild_mode) {
-                if (view_special_lite && !world.is_daytime()) {
-                    symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                }
-            } else if (is_darkened) {
-                terrain_mimic_ptr = &terrains.get_terrain(tag_unsafe);
-                symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_STANDARD);
-            } else if (view_special_lite) {
-                if (grid.info & (CAVE_LITE | CAVE_MNLT)) {
-                    if (view_yellow_lite) {
-                        symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_LITE);
-                    }
-                } else if ((grid.info & (CAVE_GLOW | CAVE_MNDK)) != CAVE_GLOW) {
-                    symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                } else if (!(grid.info & CAVE_VIEW)) {
-                    if (view_bright_lite) {
-                        symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                    }
-                }
-            }
-        } else {
-            terrain_mimic_ptr = &terrains.get_terrain(tag_unsafe);
-            symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_STANDARD);
-        }
-    } else {
-        if (grid.is_mark() && is_revealed_wall(floor, pos)) {
-            symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_STANDARD);
-            if (is_wild_mode) {
-                if (view_granite_lite && (is_blind || !world.is_daytime())) {
-                    symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                }
-            } else if (is_darkened && !is_blind) {
-                if (terrain_mimic_ptr->flags.has_all_of({ TerrainCharacteristics::LOS, TerrainCharacteristics::PROJECTION })) {
-                    terrain_mimic_ptr = &terrains.get_terrain(tag_unsafe);
-                    symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_STANDARD);
-                } else if (view_granite_lite && view_bright_lite) {
-                    symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                }
-            } else if (view_granite_lite) {
-                if (is_blind) {
-                    symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                } else if (grid.info & (CAVE_LITE | CAVE_MNLT)) {
-                    if (view_yellow_lite) {
-                        symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_LITE);
-                    }
-                } else if (view_bright_lite) {
-                    if (!(grid.info & CAVE_VIEW)) {
-                        symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                    } else if ((grid.info & (CAVE_GLOW | CAVE_MNDK)) != CAVE_GLOW) {
-                        symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                    } else if (terrain_mimic_ptr->flags.has_not(TerrainCharacteristics::LOS) && !floor.is_illuminated_at(player_ptr->get_position(), pos)) {
-                        symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_DARK);
-                    }
-                }
-            }
-        } else {
-            terrain_mimic_ptr = &terrains.get_terrain(tag_unsafe);
-            symbol_config = terrain_mimic_ptr->symbol_configs.at(F_LIT_STANDARD);
-        }
-    }
-
+    const auto &terrain_mimic = grid.get_terrain(TerrainKind::MIMIC);
+    const auto is_visible = is_terrain_visible_on_map(*player_ptr, grid, terrain_mimic, pos);
+    const auto &terrain_shown = is_visible ? terrain_mimic : terrains.get_terrain(tag_unsafe);
+    const auto lighting = is_visible ? decide_visible_terrain_lighting(*player_ptr, grid, terrain_mimic, pos) : F_LIT_STANDARD;
+    auto symbol_config = terrain_shown.symbol_configs.at(lighting);
+    symbol_config = original_tiles::terrain_symbol(*player_ptr, pos, terrain_shown, lighting, symbol_config);
     if (feat_priority == -1) {
-        feat_priority = terrain_mimic_ptr->priority;
+        feat_priority = terrain_shown.priority;
     }
 
     DisplaySymbolPair symbol_pair(symbol_config, symbol_config);
-    const auto is_hallucinated = player_ptr->effects()->hallucination().is_hallucinated();
-    if (is_hallucinated && one_in_(256)) {
-        symbol_pair.symbol_foreground = image_random();
+
+    // 描画の回数は環境によって変わるため、ゲームのターンと座標から作った乱数生成器を使い、表示をゲームの状態だけで決める。
+    // 作るのは乱数が要る場合 (幻覚・万色など) だけにする
+    tl::optional<xso::rng32> display_rng;
+    const auto get_display_rng = [&display_rng, &pos]() -> xso::rng32 & {
+        if (!display_rng) {
+            display_rng = make_keyed_rng(KeyedRngPurpose::MAP_SYMBOL, { AngbandWorld::get_instance().game_turn, pos.y, pos.x });
+        }
+
+        return *display_rng;
+    };
+
+    const auto is_hallucinated = player_ptr->effects()->hallucination().is_active();
+    if (is_hallucinated && one_in_(get_display_rng(), 256)) {
+        symbol_pair.symbol_foreground = image_random(get_display_rng());
     }
 
     for (const auto this_o_idx : grid.o_idx_list) {
@@ -227,14 +306,14 @@ DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
             continue;
         }
 
-        if (display_autopick) {
+        if (display_autopick.any()) {
             match_autopick = find_autopick_list(player_ptr, &item);
             if (match_autopick == -1) {
                 continue;
             }
 
-            const auto act = autopick_list[match_autopick].action;
-            if ((act & DO_DISPLAY) && (act & display_autopick)) {
+            const auto &act = autopick_list[match_autopick].action;
+            if (act.has(AutopickMethod::DISPLAY) && (act.has_any_of(display_autopick))) {
                 autopick_obj = &item;
             } else {
                 match_autopick = -1;
@@ -245,13 +324,15 @@ DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
         symbol_pair.symbol_foreground = item.get_symbol();
         feat_priority = 20;
         if (is_hallucinated) {
-            symbol_pair.symbol_foreground = image_object();
+            symbol_pair.symbol_foreground = image_object(get_display_rng());
+        } else {
+            symbol_pair.symbol_foreground = original_tiles::item_symbol(item, symbol_pair.symbol_foreground);
         }
 
         break;
     }
 
-    if (grid.has_monster() && display_autopick != 0) {
+    if (grid.has_monster() && display_autopick.any()) {
         symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, symbol_pair.symbol_foreground);
         return symbol_pair;
     }
@@ -262,11 +343,18 @@ DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
         return symbol_pair;
     }
 
-    const auto &monrace_ap = monster.get_appearance_monrace();
+    const auto &monrace_ap = monster.get_apparent_monrace();
+    const auto monster_symbol = [&](DisplaySymbol symbol) {
+        const auto appearance_color = monrace_ap.visual_flags.has(MonsterVisualType::SHAPECHANGER) ? symbol.color : monrace_ap.symbol_config.color;
+        if (original_tiles::monster_catalog_available && !monrace_ap.visual_flags.has(MonsterVisualType::SHAPECHANGER)) {
+            return original_tiles::monster_catalog_symbol(static_cast<int>(monrace_ap.idx), symbol);
+        }
+        return original_tiles::monster_symbol(symbol, appearance_color);
+    };
     feat_priority = 30;
     if (is_hallucinated) {
         if (!monrace_ap.visual_flags.has_all_of({ MonsterVisualType::CLEAR, MonsterVisualType::CLEAR_COLOR })) {
-            symbol_pair.symbol_foreground = image_monster();
+            symbol_pair.symbol_foreground = image_monster(get_display_rng());
         }
 
         symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, symbol_pair.symbol_foreground);
@@ -274,8 +362,9 @@ DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
     }
 
     symbol_config = monrace_ap.symbol_config;
+    const auto use_ascii_monster_colors = !use_graphics || (original_tiles::is_enabled() && symbol_config.is_ascii_graphics());
     if (monrace_ap.visual_flags.has_none_of({ MonsterVisualType::CLEAR, MonsterVisualType::SHAPECHANGER, MonsterVisualType::CLEAR_COLOR, MonsterVisualType::MULTI_COLOR, MonsterVisualType::RANDOM_COLOR })) {
-        symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, symbol_config);
+        symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, monster_symbol(symbol_config));
         return symbol_pair;
     }
 
@@ -286,9 +375,9 @@ DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
 
     if (monrace_ap.visual_flags.has(MonsterVisualType::CLEAR_COLOR) && (symbol_pair.symbol_foreground.color != TERM_DARK) && !use_graphics) {
         /* Do nothing */
-    } else if (monrace_ap.visual_flags.has(MonsterVisualType::MULTI_COLOR) && !use_graphics) {
+    } else if (monrace_ap.visual_flags.has(MonsterVisualType::MULTI_COLOR) && use_ascii_monster_colors) {
         if (monrace_ap.visual_flags.has(MonsterVisualType::ANY_COLOR)) {
-            symbol_pair.symbol_foreground.color = randnum1<uint8_t>(15);
+            symbol_pair.symbol_foreground.color = randnum1<uint8_t>(get_display_rng(), 15);
         } else {
             constexpr static auto colors = {
                 TERM_RED,
@@ -300,9 +389,9 @@ DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
                 TERM_GREEN,
             };
 
-            symbol_pair.symbol_foreground.color = rand_choice(colors);
+            symbol_pair.symbol_foreground.color = rand_choice(get_display_rng(), colors);
         }
-    } else if (monrace_ap.visual_flags.has(MonsterVisualType::RANDOM_COLOR) && !use_graphics) {
+    } else if (monrace_ap.visual_flags.has(MonsterVisualType::RANDOM_COLOR) && use_ascii_monster_colors) {
         symbol_pair.symbol_foreground.color = grid.m_idx % 15 + 1;
     } else {
         symbol_pair.symbol_foreground.color = symbol_config.color;
@@ -314,20 +403,26 @@ DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
     }
 
     if (monrace_ap.visual_flags.has(MonsterVisualType::SHAPECHANGER)) {
+        auto &rng = get_display_rng();
         if (use_graphics) {
             const auto &monraces = MonraceList::get_instance();
-            const auto &monrace = monraces.pick_monrace_at_random();
+            const auto &monrace = monraces.pick_monrace_at_random(rng);
             symbol_pair.symbol_foreground = monrace.symbol_config;
         } else {
-            symbol_pair.symbol_foreground.character = one_in_(25) ? rand_choice(image_objects) : rand_choice(image_monsters);
+            symbol_pair.symbol_foreground.character = one_in_(rng, 25) ? rand_choice(rng, image_objects) : rand_choice(rng, image_monsters);
         }
 
-        symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, symbol_pair.symbol_foreground);
+        symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, monster_symbol(symbol_pair.symbol_foreground));
         return symbol_pair;
     }
 
-    symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, { symbol_pair.symbol_foreground.color, symbol_config.character });
+    symbol_pair.symbol_foreground = set_term_color(player_ptr, pos, monster_symbol({ symbol_pair.symbol_foreground.color, symbol_config.character }));
     return symbol_pair;
+}
+
+DisplaySymbolPair map_info(PlayerType *player_ptr, const Pos2D &pos)
+{
+    return original_tiles::encode_foreground(*player_ptr, pos, map_info_impl(player_ptr, pos));
 }
 
 /*!

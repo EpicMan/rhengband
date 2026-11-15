@@ -10,14 +10,16 @@
 #include "util/enum-converter.h"
 #include "view/display-messages.h"
 #include "world/world.h"
+#include <fmt/format.h>
 
 /*!
  * @brief セーブファイルからバージョン情報及びセーブ情報を取得する
  * @details
  * バージョン0.x.x時代のバージョン情報である場合、サポート対象外
  * (FAKE_VERもH_VERも10台の数字のはず)
+ * @return バージョン情報を解釈できればtrue、異常なバージョンであればfalse
  */
-void rd_version_info(void)
+bool rd_version_info()
 {
     auto tmp_major = rd_byte();
     auto is_old_ver = (10 <= tmp_major) && (tmp_major <= 13);
@@ -35,7 +37,7 @@ void rd_version_info(void)
     } else if (is_old_ver) {
         strip_bytes(3);
     } else {
-        THROW_EXCEPTION(std::runtime_error, _("異常なバージョンが検出されました！", "Invalid version is detected!"));
+        return false;
     }
 
     load_xor_byte = system.savefile_key;
@@ -51,11 +53,9 @@ void rd_version_info(void)
         system.set_version({ major, minor, patch, extra });
     }
 
-    auto &world = AngbandWorld::get_instance();
-    world.sf_system = rd_u32b();
-    world.sf_when = rd_u32b();
-    world.sf_lives = rd_u16b();
-    world.sf_saves = rd_u16b();
+    if (h_older_than(3, 0, 2, 3)) {
+        strip_bytes(12);
+    }
 
     loading_savefile_version = rd_u32b();
 
@@ -68,8 +68,9 @@ void rd_version_info(void)
         }
     }
 
-    constexpr auto fmt = _("バージョン %s のセーブデータ(SAVE%u形式)をロード中...", "Loading a version %s savefile (SAVE%u format)...");
-    load_note(format(fmt, system.build_version_expression(VersionExpression::WITHOUT_EXTRA).data(), loading_savefile_version));
+    constexpr auto fmt = _("バージョン {} のセーブデータ(SAVE{}形式)をロード中...", "Loading a version {} savefile (SAVE{} format)...");
+    load_note(fmt::format(fmt, system.build_version_expression(VersionExpression::WITHOUT_EXTRA), loading_savefile_version));
+    return true;
 }
 
 /*!
@@ -78,13 +79,12 @@ void rd_version_info(void)
 void rd_randomizer(void)
 {
     strip_bytes(4);
-    Xoshiro128StarStar::state_type state{};
+    std::array<uint32_t, xso::rng32::word_count()> state{};
     for (auto &s : state) {
         s = rd_u32b();
     }
 
-    Xoshiro128StarStar game_rng;
-    game_rng.set_state(state);
+    xso::rng32 game_rng(state.cbegin(), state.cend());
     AngbandSystem::get_instance().set_rng(game_rng);
     strip_bytes(4 * (RAND_DEG - state.size()));
 }

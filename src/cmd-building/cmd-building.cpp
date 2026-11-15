@@ -21,7 +21,7 @@
 #include "core/special-internal-keys.h"
 #include "core/stuff-handler.h"
 #include "floor/floor-mode-changer.h"
-#include "io/input-key-acceptor.h"
+#include "io/input-context.h"
 #include "io/input-key-requester.h"
 #include "locale/language-switcher.h"
 #include "main/music-definitions-table.h"
@@ -50,15 +50,16 @@
 #include "spell/spells-status.h"
 #include "system/angband-exceptions.h"
 #include "system/building-type-definition.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/floor/wilderness-grid.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
+#include "util/enum-converter.h"
 #include "util/int-char-converter.h"
 #include "view/display-messages.h"
 #include "world/world.h"
@@ -137,7 +138,7 @@ static bool bldg_process_command(PlayerType *player_ptr, const building_type &bl
     case BACT_REST:
     case BACT_RUMORS:
     case BACT_FOOD:
-        if (inn_comm(player_ptr, building_action)) {
+        if (inn_comm(player_ptr, building_action, building_cost)) {
             player_ptr->au -= building_cost;
         }
 
@@ -311,7 +312,7 @@ void do_cmd_building(PlayerType *player_ptr)
         return;
     }
 
-    int which = floor.get_grid(p_pos).get_terrain().subtype;
+    const auto which = enum2i(floor.get_grid(p_pos).get_terrain().building_type);
 
     auto &bldg = buildings[which];
     auto &wilderness = WildernessGrids::get_instance();
@@ -366,7 +367,7 @@ void do_cmd_building(PlayerType *player_ptr)
     while (true) {
         prt("", 1, 0);
         building_prt_gold(player_ptr->au);
-        const auto command = inkey();
+        const auto command = input_key_with_context(InputKind::BUILDING, "");
         if (command == ESCAPE) {
             floor.inside_arena = false;
             system.set_phase_out(false);
@@ -383,7 +384,11 @@ void do_cmd_building(PlayerType *player_ptr)
         }
 
         const auto should_leave = is_valid_command ? bldg_process_command(player_ptr, bldg, i) : false;
-        handle_stuff(player_ptr);
+
+        // 建物の中ではプレイヤーのターンの処理 (process_player()) が行われず、ターンごとの描き直しの要求が来ないので、
+        // 支払いや報酬で変わる所持金などを反映するよう、コマンドごとにプレイヤーの情報のサブウィンドウを描き直す
+        DeferredUpdateRequests::get_instance().set_flag(SubWindowRedrawingFlag::PLAYER);
+        handle_stuff_with_inventory_arrangement(player_ptr);
         if (should_leave) {
             break;
         }
@@ -401,25 +406,19 @@ void do_cmd_building(PlayerType *player_ptr)
     world.character_icky_depth--;
     term_clear();
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_monster_update_and_map_redrawing();
     static constexpr auto flags_srf = {
         StatusRecalculatingFlag::VIEW,
-        StatusRecalculatingFlag::MONSTER_STATUSES,
         StatusRecalculatingFlag::BONUS,
         StatusRecalculatingFlag::LITE,
         StatusRecalculatingFlag::MONSTER_LITE,
     };
-    rfu.set_flags(flags_srf);
+    dur.set_flags(flags_srf);
     static constexpr auto flags_mwrf = {
         MainWindowRedrawingFlag::BASIC,
         MainWindowRedrawingFlag::EXTRA,
         MainWindowRedrawingFlag::EQUIPPY,
-        MainWindowRedrawingFlag::MAP,
     };
-    rfu.set_flags(flags_mwrf);
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::OVERHEAD,
-        SubWindowRedrawingFlag::DUNGEON,
-    };
-    rfu.set_flags(flags_swrf);
+    dur.set_flags(flags_mwrf);
 }

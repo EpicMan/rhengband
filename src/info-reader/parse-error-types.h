@@ -1,19 +1,21 @@
 #pragma once
 
-enum parse_error_type : int {
-    PARSE_ERROR_NONE = 0,
-    PARSE_ERROR_GENERIC = 1,
-    PARSE_ERROR_OBSOLETE_FILE = 2,
-    PARSE_ERROR_MISSING_RECORD_HEADER = 3,
-    PARSE_ERROR_NON_SEQUENTIAL_RECORDS = 4,
-    PARSE_ERROR_INVALID_FLAG = 5,
-    PARSE_ERROR_UNDEFINED_DIRECTIVE = 6,
-    PARSE_ERROR_OUT_OF_MEMORY = 7,
-    PARSE_ERROR_OUT_OF_BOUNDS = 8,
-    PARSE_ERROR_TOO_FEW_ARGUMENTS = 9,
-    PARSE_ERROR_UNDEFINED_TERRAIN_TAG = 10,
-    PAESE_ERROR_INVALID_PVAL = 11,
-    PARSE_ERROR_INVALID_VALUE = 12,
-    PARSE_ERROR_INVALID_TYPE = 13,
-    PARSE_ERROR_MAX,
+/*!
+ * @brief ゲームデータの解析エラーの種類
+ * @details 値はエラーの番号として診断に表示する。保存はしない。
+ * 使われなくなった種類を削除した番号 (2, 3, 7) は、ほかの種類の番号を変えないよう欠番のままにする。
+ */
+enum class ParseErrorType : int {
+    NONE = 0,
+    GENERIC = 1,
+    NON_SEQUENTIAL_RECORDS = 4,
+    INVALID_FLAG = 5,
+    UNDEFINED_DIRECTIVE = 6,
+    OUT_OF_BOUNDS = 8,
+    TOO_FEW_ARGUMENTS = 9,
+    UNDEFINED_TERRAIN_TAG = 10,
+    INVALID_PVAL = 11,
+    INVALID_VALUE = 12,
+    INVALID_TYPE = 13,
+    MAX,
 };

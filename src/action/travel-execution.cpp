@@ -12,12 +12,14 @@
 #include "player-status/player-energy.h"
 #include "player/player-move.h"
 #include "player/player-status-flags.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
 #include "system/terrain/terrain-definition.h"
 #include "timed-effect/timed-effects.h"
+#include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
 #include <queue>
 #include <vector>
@@ -131,7 +133,7 @@ Direction decide_travel_step_dir(PlayerType *player_ptr, const Direction &prev_d
     }
 
     const auto &blindness = player_ptr->effects()->blindness();
-    if (blindness.is_blind() || no_lite(player_ptr)) {
+    if (blindness.is_active() || no_lite(player_ptr)) {
         msg_print(_("目が見えない！", "You cannot see!"));
         return Direction::none();
     }
@@ -240,7 +242,7 @@ void Travel::set_goal(PlayerType *player_ptr, const Pos2D &pos)
 void Travel::reset_goal()
 {
     this->pos_goal.reset();
-    this->state = TravelState::STOP;
+    this->stop();
     this->forget_flow();
 }
 
@@ -249,8 +251,16 @@ bool Travel::is_ongoing() const
     return this->state == TravelState::STANDBY_TO_EXECUTE || this->state == TravelState::EXECUTING;
 }
 
+/*!
+ * @brief トラベルをやめる
+ * @details トラベル中は足元・発見済みのアイテムの一覧を描き直していないので、トラベル中だったら描き直しを要求する
+ */
 void Travel::stop()
 {
+    if (this->is_ongoing()) {
+        DeferredUpdateRequests::get_instance().request_floor_item_lists_redrawing();
+    }
+
     this->state = TravelState::STOP;
 }
 
@@ -266,7 +276,6 @@ int Travel::get_cost(const Pos2D &pos) const
  */
 void Travel::step(PlayerType *player_ptr)
 {
-
     this->dir = decide_travel_step_dir(player_ptr, this->dir, this->costs);
     if (!this->dir) {
         if (this->state != TravelState::EXECUTING) {
@@ -280,14 +289,16 @@ void Travel::step(PlayerType *player_ptr)
 
     PlayerEnergy(player_ptr).set_player_turn_energy(100);
     exe_movement(player_ptr, this->dir, always_pickup, false);
+
+    if (player_ptr->get_position() == this->get_goal()) {
+        this->reset_goal();
+    }
+
     if (this->state == TravelState::STOP) {
         return;
     }
-    if (player_ptr->get_position() == this->get_goal()) {
-        this->reset_goal();
-    } else {
-        this->state = TravelState::EXECUTING;
-    }
+
+    this->state = TravelState::EXECUTING;
 }
 
 /*!

@@ -13,6 +13,7 @@
 #include "player/digestion-processor.h"
 #include "player/player-damage.h"
 #include "player/player-status-flags.h"
+#include "rumor/rumor-service.h"
 #include "spell-kind/magic-item-recharger.h"
 #include "spell-kind/spells-curse-removal.h"
 #include "spell-kind/spells-detection.h"
@@ -36,10 +37,10 @@
 #include "status/element-resistance.h"
 #include "store/rumor.h"
 #include "sv-definition/sv-scroll-types.h"
+#include "system/deferred-update-requests.h"
 #include "system/floor/floor-info.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "timed-effect/timed-effects.h"
 #include "util/bit-flags-calculator.h"
 #include "view/display-messages.h"
@@ -93,7 +94,7 @@ bool ScrollReadExecutor::read()
             k = INVEN_SUB_HAND;
         }
 
-        if (k && curse_weapon_object(this->player_ptr, false, this->player_ptr->inventory[k].get())) {
+        if (k && curse_weapon_object(this->player_ptr, false, *this->player_ptr->inventory[k])) {
             this->ident = true;
         }
 
@@ -210,13 +211,16 @@ bool ScrollReadExecutor::read()
 
         this->ident = true;
         break;
-    case SV_SCROLL_STAR_ENCHANT_WEAPON:
-        if (!enchant_spell(this->player_ptr, randnum1<short>(3), randint1(3), 0)) {
+    case SV_SCROLL_STAR_ENCHANT_WEAPON: {
+        const auto num_hit = randnum1<short>(3);
+        const auto num_dam = randint1(3);
+        if (!enchant_spell(this->player_ptr, num_hit, num_dam, 0)) {
             used_up = false;
         }
 
         this->ident = true;
         break;
+    }
     case SV_SCROLL_RECHARGING:
         if (!recharge(this->player_ptr, 130)) {
             used_up = false;
@@ -311,7 +315,7 @@ bool ScrollReadExecutor::read()
 
         msg_print(_("手が輝き始めた。", "Your hands begin to glow."));
         this->player_ptr->special_attack |= ATTACK_CONFUSE;
-        RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
+        DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::TIMED_EFFECT);
         this->ident = true;
         break;
     case SV_SCROLL_PROTECTION_FROM_EVIL: {
@@ -354,7 +358,7 @@ bool ScrollReadExecutor::read()
         }
 
         this->player_ptr->add_spells++;
-        RedrawingFlagsUpdater::get_instance().set_flag(StatusRecalculatingFlag::SPELLS);
+        DeferredUpdateRequests::get_instance().set_flag(StatusRecalculatingFlag::SPELLS);
         this->ident = true;
         break;
     case SV_SCROLL_GENOCIDE:
@@ -397,14 +401,16 @@ bool ScrollReadExecutor::read()
 
         this->ident = true;
         break;
-    case SV_SCROLL_RUMOR:
+    case SV_SCROLL_RUMOR: {
         msg_print(_("巻物にはメッセージが書かれている:", "There is message on the scroll. It says:"));
         msg_erase();
-        display_rumor(this->player_ptr, true);
+        const auto &rumor = RumorService::pick_rumor(tl::nullopt);
+        display_selected_rumor(rumor);
         msg_erase();
         msg_print(_("巻物は煙を立てて消え去った！", "The scroll disappears in a puff of smoke!"));
         this->ident = true;
         break;
+    }
     case SV_SCROLL_ARTIFACT:
         this->ident = true;
         if (!artifact_scroll(this->player_ptr)) {

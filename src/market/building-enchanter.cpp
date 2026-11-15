@@ -8,10 +8,11 @@
 #include "object/item-use-flags.h"
 #include "racial/racial-android.h"
 #include "spell/spells-object.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/player-type-definition.h"
 #include "term/screen-processor.h"
 #include "view/display-messages.h"
+#include <fmt/format.h>
 
 /*!
  * @brief アイテムの強化を行う。 / Enchant item
@@ -26,42 +27,40 @@ bool enchant_item(PlayerType *player_ptr, PRICE cost, HIT_PROB to_hit, int to_da
 {
     clear_bldg(4, 18);
     int maxenchant = (player_ptr->lev / 5);
-    prt(format(_("現在のあなたの技量だと、+%d まで改良できます。", "  Based on your skill, we can improve up to +%d."), maxenchant), 5, 0);
-    prt(format(_(" 改良の料金は一個につき＄%d です。", "  The price for the service is %d gold per item."), cost), 7, 0);
+    prt(fmt::format(_("現在のあなたの技量だと、+{} まで改良できます。", "  Based on your skill, we can improve up to +{}."), maxenchant), 5, 0);
+    prt(fmt::format(_(" 改良の料金は一個につき＄{} です。", "  The price for the service is {} gold per item."), cost), 7, 0);
 
     constexpr auto q = _("どのアイテムを改良しますか？", "Improve which item? ");
     constexpr auto s = _("改良できるものがありません。", "You have nothing to improve.");
-
-    short i_idx;
-    auto *o_ptr = choose_object(player_ptr, &i_idx, q, s, (USE_INVEN | USE_EQUIP | IGNORE_BOTHHAND_SLOT), item_tester);
-    if (!o_ptr) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_INVEN | USE_EQUIP | IGNORE_BOTHHAND_SLOT), item_tester);
+    if (!item) {
         return false;
     }
 
-    const PRICE total_cost = cost * o_ptr->number;
+    const PRICE total_cost = cost * item->number;
     if (player_ptr->au < total_cost) {
-        const auto item_name = describe_flavor(player_ptr, *o_ptr, OD_NAME_ONLY);
-        msg_format(_("%sを改良するだけのゴールドがありません！", "You do not have the gold to improve %s!"), item_name.data());
+        const auto item_name = describe_flavor(player_ptr, *item, OD_NAME_ONLY);
+        msg_print(_("{}を改良するだけのゴールドがありません！", "You do not have the gold to improve {}!"), item_name);
         return false;
     }
 
     bool okay = false;
     for (int i = 0; i < to_hit; i++) {
-        if ((o_ptr->to_h < maxenchant) && enchant_equipment(o_ptr, 1, (ENCH_TOHIT | ENCH_FORCE))) {
+        if ((item->to_h < maxenchant) && enchant_equipment(*item, 1, (ENCH_TOHIT | ENCH_FORCE))) {
             okay = true;
             break;
         }
     }
 
     for (int i = 0; i < to_dam; i++) {
-        if ((o_ptr->to_d < maxenchant) && enchant_equipment(o_ptr, 1, (ENCH_TODAM | ENCH_FORCE))) {
+        if ((item->to_d < maxenchant) && enchant_equipment(*item, 1, (ENCH_TODAM | ENCH_FORCE))) {
             okay = true;
             break;
         }
     }
 
     for (int i = 0; i < to_ac; i++) {
-        if ((o_ptr->to_a < maxenchant) && enchant_equipment(o_ptr, 1, (ENCH_TOAC | ENCH_FORCE))) {
+        if ((item->to_a < maxenchant) && enchant_equipment(*item, 1, (ENCH_TOAC | ENCH_FORCE))) {
             okay = true;
             break;
         }
@@ -75,11 +74,11 @@ bool enchant_item(PlayerType *player_ptr, PRICE cost, HIT_PROB to_hit, int to_da
         return false;
     }
 
-    const auto item_name = describe_flavor(player_ptr, *o_ptr, OD_NAME_AND_ENCHANT);
+    const auto item_name = describe_flavor(player_ptr, *item, OD_NAME_AND_ENCHANT);
 #ifdef JP
-    msg_format("＄%dで%sに改良しました。", total_cost, item_name.data());
+    msg_print("＄{}で{}に改良しました。", total_cost, item_name);
 #else
-    msg_format("Improved into %s for %d gold.", item_name.data(), total_cost);
+    msg_print("Improved into {} for {} gold.", item_name, total_cost);
 #endif
 
     player_ptr->au -= total_cost;

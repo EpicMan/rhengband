@@ -14,7 +14,6 @@
 #include "inventory/inventory-object.h"
 #include "main/sound-definitions-table.h"
 #include "main/sound-of-music.h"
-#include "object-enchant/special-object-flags.h"
 #include "object-hook/hook-expendable.h"
 #include "object/item-tester-hooker.h"
 #include "object/item-use-flags.h"
@@ -41,10 +40,10 @@
 #include "status/experience.h"
 #include "sv-definition/sv-food-types.h"
 #include "sv-definition/sv-other-types.h"
-#include "system/item-entity.h"
+#include "system/deferred-update-requests.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "util/dice.h"
 #include "util/string-processor.h"
 #include "view/display-messages.h"
@@ -163,15 +162,15 @@ static bool exe_eat_charge_of_magic_device(PlayerType *player_ptr, ItemEntity *o
 
     const auto staff = is_staff ? _("杖", "staff") : _("魔法棒", "wand");
 
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
+    auto &dur = DeferredUpdateRequests::get_instance();
     if (o_ptr->pval == 0) {
-        msg_format(_("この%sにはもう魔力が残っていない。", "The %s has no charges left."), staff);
-        o_ptr->ident |= IDENT_EMPTY;
-        rfu.set_flag(SubWindowRedrawingFlag::INVENTORY);
+        msg_print(_("この{}にはもう魔力が残っていない。", "The {} has no charges left."), staff);
+        o_ptr->set_identification_flag(IdentificationFlag::EMPTY);
+        dur.request_item_lists_redrawing();
         return true;
     }
 
-    msg_format(_("あなたは%sの魔力をエネルギー源として吸収した。", "You absorb mana of the %s as your energy."), staff);
+    msg_print(_("あなたは{}の魔力をエネルギー源として吸収した。", "You absorb mana of the {} as your energy."), staff);
 
     /* Use a single charge */
     o_ptr->pval--;
@@ -190,20 +189,14 @@ static bool exe_eat_charge_of_magic_device(PlayerType *player_ptr, ItemEntity *o
         /* Unstack the used item */
         o_ptr->number--;
         i_idx = store_item_to_inventory(player_ptr, &item);
-        msg_format(_("杖をまとめなおした。", "You unstack your staff."));
+        msg_print(_("杖をまとめなおした。", "You unstack your staff."));
     }
 
-    if (i_idx >= 0) {
-        inven_item_charges(*player_ptr->inventory[i_idx]);
-    } else {
-        floor_item_charges(*player_ptr->current_floor_ptr, 0 - i_idx);
-    }
+    describe_item_charges(player_ptr, i_idx >= 0, ref_item(player_ptr, i_idx));
 
-    static constexpr auto flags = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-    };
-    rfu.set_flags(flags);
+    // 充填が変わったので、足元の品も含めてアイテムの一覧の描き直しを予約する。
+    // 呼び出し元での予約は、充填を変える前のメッセージの表示で使われることがあるので当てにしない
+    dur.request_item_lists_redrawing();
     return true;
 }
 
@@ -222,33 +215,18 @@ void exe_eat_food(PlayerType *player_ptr, INVENTORY_IDX i_idx)
         (void)spell_hex.stop_all_spells();
     }
 
-    auto *o_ptr = ref_item(player_ptr, i_idx);
+    auto item = ref_item(player_ptr, i_idx);
 
     sound(SoundKind::EAT);
 
     PlayerEnergy(player_ptr).set_player_turn_energy(100);
-    const auto level = o_ptr->get_baseitem_level();
+    const auto level = item->get_baseitem_level();
 
     /* Identity not known yet */
-    const auto &bi_key = o_ptr->bi_key;
+    const auto &bi_key = item->bi_key;
     const auto ident = exe_eat_food_type_object(player_ptr, bi_key);
 
-    /*
-     * Store what may have to be updated for the inventory (including
-     * autodestroy if set by something else).  Then turn off those flags
-     * so that updates triggered by calling gain_exp() or set_food() below
-     * do not rearrange the inventory before the food item is destroyed in
-     * the pack.
-     */
-    auto &rfu = RedrawingFlagsUpdater::get_instance();
-    using Srf = StatusRecalculatingFlag;
-    EnumClassFlagGroup<Srf> flags_srf = { Srf::COMBINATION, Srf::REORDER };
-    if (rfu.has(Srf::AUTO_DESTRUCTION)) {
-        flags_srf.set(Srf::AUTO_DESTRUCTION);
-    }
-
-    rfu.reset_flags(flags_srf);
-    if (!(o_ptr->is_aware())) {
+    if (!(item->is_aware())) {
         chg_virtue(player_ptr, Virtue::KNOWLEDGE, -1);
         chg_virtue(player_ptr, Virtue::PATIENCE, -1);
         chg_virtue(player_ptr, Virtue::CHANCE, 1);
@@ -257,25 +235,21 @@ void exe_eat_food(PlayerType *player_ptr, INVENTORY_IDX i_idx)
     /* We have tried it */
     const auto tval = bi_key.tval();
     if (tval == ItemKindType::FOOD) {
-        o_ptr->mark_as_tried();
+        item->mark_as_tried();
     }
 
     /* The player is now aware of the object */
-    if (ident && !o_ptr->is_aware()) {
-        object_aware(player_ptr, *o_ptr);
+    if (ident && !item->is_aware()) {
+        object_aware(player_ptr, *item);
         gain_exp(player_ptr, (level + (player_ptr->lev >> 1)) / player_ptr->lev);
     }
 
-    static constexpr auto flags_swrf = {
-        SubWindowRedrawingFlag::INVENTORY,
-        SubWindowRedrawingFlag::EQUIPMENT,
-        SubWindowRedrawingFlag::PLAYER,
-    };
-    rfu.set_flags(flags_swrf);
+    auto &dur = DeferredUpdateRequests::get_instance();
+    dur.request_inventory_arrangement();
+    dur.request_item_lists_redrawing();
 
     /* Undeads drain recharge of magic device */
-    if (exe_eat_charge_of_magic_device(player_ptr, o_ptr, i_idx)) {
-        rfu.set_flags(flags_srf);
+    if (exe_eat_charge_of_magic_device(player_ptr, item.get(), i_idx)) {
         return;
     }
 
@@ -283,12 +257,10 @@ void exe_eat_food(PlayerType *player_ptr, INVENTORY_IDX i_idx)
 
     /* Balrogs change humanoid corpses to energy */
     if (food_type == PlayerRaceFoodType::CORPSE) {
-        if (o_ptr->is_corpse() && o_ptr->get_monrace().is_human()) {
-            const auto item_name = describe_flavor(player_ptr, *o_ptr, (OD_OMIT_PREFIX | OD_NAME_ONLY));
-            msg_format(_("%sは燃え上り灰になった。精力を吸収した気がする。", "%s^ is burnt to ashes.  You absorb its vitality!"), item_name.data());
+        if (item->is_corpse() && item->get_monrace().is_human()) {
+            const auto item_name = describe_flavor(player_ptr, *item, (OD_OMIT_PREFIX | OD_NAME_ONLY));
+            msg_print(_("{}は燃え上り灰になった。精力を吸収した気がする。", "{} is burnt to ashes.  You absorb its vitality!"), str_upcase_first(item_name));
             (void)set_food(player_ptr, PY_FOOD_MAX - 1);
-
-            rfu.set_flags(flags_srf);
             vary_item(player_ptr, i_idx, -1);
             return;
         }
@@ -297,17 +269,17 @@ void exe_eat_food(PlayerType *player_ptr, INVENTORY_IDX i_idx)
     if (PlayerRace(player_ptr).equals(PlayerRaceType::SKELETON)) {
         const auto sval = bi_key.sval();
         if ((sval != SV_FOOD_WAYBREAD) && (sval >= SV_FOOD_BISCUIT)) {
-            ItemEntity item(bi_key);
+            ItemEntity item_skeleton(bi_key);
             msg_print(_("食べ物がアゴを素通りして落ちた！", "The food falls through your jaws!"));
 
             /* Drop the object from heaven */
-            (void)drop_near(player_ptr, item, player_ptr->get_position());
+            (void)drop_near(player_ptr, item_skeleton, player_ptr->get_position());
         } else {
             msg_print(_("食べ物がアゴを素通りして落ち、消えた！", "The food falls through your jaws and vanishes!"));
         }
     } else if (food_type == PlayerRaceFoodType::BLOOD) {
         /* Vampires are filled only by bloods, so reduced nutritional benefit */
-        (void)set_food(player_ptr, player_ptr->food + (o_ptr->pval / 10));
+        (void)set_food(player_ptr, player_ptr->food + item->pval / 10);
         msg_print(_("あなたのような者にとって食糧など僅かな栄養にしかならない。", "Mere victuals hold scant sustenance for a being such as yourself."));
 
         if (player_ptr->food < PY_FOOD_ALERT) { /* Hungry */
@@ -315,21 +287,20 @@ void exe_eat_food(PlayerType *player_ptr, INVENTORY_IDX i_idx)
         }
     } else if (food_type == PlayerRaceFoodType::WATER) {
         msg_print(_("動物の食物はあなたにとってほとんど栄養にならない。", "The food of animals is poor sustenance for you."));
-        set_food(player_ptr, player_ptr->food + ((o_ptr->pval) / 20));
+        set_food(player_ptr, player_ptr->food + item->pval / 20);
     } else if (food_type != PlayerRaceFoodType::RATION) {
         msg_print(_("生者の食物はあなたにとってほとんど栄養にならない。", "The food of mortals is poor sustenance for you."));
-        set_food(player_ptr, player_ptr->food + ((o_ptr->pval) / 20));
+        set_food(player_ptr, player_ptr->food + item->pval / 20);
     } else {
         if (bi_key == BaseitemKey(ItemKindType::FOOD, SV_FOOD_WAYBREAD)) {
             /* Waybread is always fully satisfying. */
             set_food(player_ptr, std::max<short>(player_ptr->food, PY_FOOD_MAX - 1));
         } else {
             /* Food can feed the player */
-            (void)set_food(player_ptr, player_ptr->food + o_ptr->pval);
+            (void)set_food(player_ptr, player_ptr->food + item->pval);
         }
     }
 
-    rfu.set_flags(flags_srf);
     vary_item(player_ptr, i_idx, -1);
 }
 
@@ -342,8 +313,8 @@ void do_cmd_eat_food(PlayerType *player_ptr)
     PlayerClass(player_ptr).break_samurai_stance({ SamuraiStanceType::MUSOU, SamuraiStanceType::KOUKIJIN });
     constexpr auto q = _("どれを食べますか? ", "Eat which item? ");
     constexpr auto s = _("食べ物がない。", "You have nothing to eat.");
-    short i_idx;
-    if (!choose_object(player_ptr, &i_idx, q, s, (USE_INVEN | USE_FLOOR), FuncItemTester(item_tester_hook_eatable, player_ptr))) {
+    const auto &[item, i_idx] = choose_item(player_ptr, q, s, (USE_INVEN | USE_FLOOR), FuncItemTester(item_tester_hook_eatable, player_ptr));
+    if (!item) {
         return;
     }
 

@@ -1,5 +1,5 @@
 /*!
- * @brief ダンジョンにおける集合論的モデルの定義
+ * @brief ダンジョンにおける集合論的リポジトリの定義
  * @author Hourier
  * @date 2024/12/01
  */
@@ -12,6 +12,9 @@
 
 enum class DungeonId;
 class DungeonDefinition;
+namespace test {
+class DungeonListTestAccess;
+}
 class DungeonList : public util::AbstractMapWrapper<DungeonId, std::shared_ptr<DungeonDefinition>> {
 public:
     DungeonList(DungeonList &&) = delete;
@@ -21,21 +24,23 @@ public:
     ~DungeonList() = default;
 
     static DungeonList &get_instance();
-    DungeonDefinition &get_dungeon(DungeonId dungeon_id);
     const DungeonDefinition &get_dungeon(DungeonId dungeon_id) const;
-    std::shared_ptr<DungeonDefinition> get_dungeon_shared(DungeonId dungeon_id);
-    std::shared_ptr<const DungeonDefinition> get_dungeon_shared(DungeonId dungeon_id) const;
+    const std::shared_ptr<const DungeonDefinition> get_dungeon_shared(DungeonId dungeon_id) const;
     void emplace(DungeonId dungeon_id, DungeonDefinition &&definition);
     void retouch();
 
 private:
+    friend class test::DungeonListTestAccess;
+
     DungeonList() = default;
+
     static DungeonList instance;
 
     std::map<DungeonId, std::shared_ptr<DungeonDefinition>> dungeons;
-
     std::map<DungeonId, std::shared_ptr<DungeonDefinition>> &get_inner_container() override
     {
         return this->dungeons;
     }
+
+    void validate_dungeon_id(DungeonId dungeon_id) const;
 };

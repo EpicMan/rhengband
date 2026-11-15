@@ -1,194 +1,236 @@
 #include "info-reader/ego-reader.h"
 #include "artifact/random-art-effects.h"
+#include "floor/floor-base-definitions.h"
+#include "info-reader/activation-reader.h"
 #include "info-reader/baseitem-tokens-table.h"
-#include "info-reader/info-reader-util.h"
+#include "info-reader/item-flag-reader.h"
+#include "info-reader/item-reader-limits.h"
+#include "info-reader/json-reader-util.h"
 #include "info-reader/parse-error-types.h"
-#include "main/angband-headers.h"
+#include "inventory/inventory-slot-types.h"
+#include "locale/language-switcher.h"
 #include "object-enchant/object-ego.h"
 #include "object-enchant/tr-types.h"
-#include "util/bit-flags-calculator.h"
 #include "util/enum-converter.h"
-#include "util/string-processor.h"
 #include "view/display-messages.h"
+#include <cstdint>
+#include <limits>
+#include <nlohmann/json.hpp>
+
+namespace {
+// 基本の修正値と最大の修正値は16ビットの範囲とする (ダメージの修正値は int で持つが、ほかの修正値と同じ範囲に揃える)。
+constexpr Range EGO_BONUS_RANGE(std::numeric_limits<int16_t>::min(), std::numeric_limits<int16_t>::max());
+}
+
+EgoReader::Session EgoReader::create_session(tl::optional<int> last_id)
+{
+    return Session(DefinitionIdOrder::UNIQUE, { 1, MAX_EGO_ID }, _("エゴ", "ego"), last_id);
+}
+
+EgoReader::EgoReader(const nlohmann::json &ego_data, Session &session)
+    : ego_data(ego_data)
+    , session(session)
+{
+}
 
 /*!
- * @brief テキストトークンを走査してフラグを一つ得る(エゴ用) /
- * Grab one flag in a ego-item_type from a textual string
- * @param e_ptr 保管先のエゴ構造体参照ポインタ
- * @param what 参照元の文字列ポインタ
- * @return 見つけたらtrue
+ * @brief 百分率形式のエゴ定義のversionを、公開前に検証する
+ * @param root JSON文書のルート
+ * @return 成功時は空の値、失敗時は解析エラーコード。旧分数形式のversion 1は受理しない。
  */
-static bool grab_one_ego_item_flag(EgoItemDefinition *e_ptr, std::string_view what)
+tl::expected<void, ParseErrorType> EgoReader::validate_root(const nlohmann::json &root)
 {
-    if (TrFlags::grab_one_flag(e_ptr->flags, baseitem_flags, what)) {
-        return true;
+    int version = 0;
+    return info_set_integer(get_json_value(root, "version"), version, true, Range(FORMAT_VERSION, FORMAT_VERSION));
+}
+
+/*!
+ * @brief エゴ1件の数値・参照を検証し、成功した場合にだけ定義を公開する
+ * @return 成功時は空の値、失敗時は解析エラーコード
+ * @details 失敗時は既存のegos_infoを保持する。文書のversion検証は呼び出し側が先に行う。
+ */
+tl::expected<void, ParseErrorType> EgoReader::read() const
+{
+    if (!this->ego_data.is_object()) {
+        return tl::make_unexpected(ParseErrorType::INVALID_TYPE);
     }
 
-    if (EnumClassFlagGroup<ItemGenerationTraitType>::grab_one_flag(e_ptr->gen_flags, baseitem_geneneration_flags, what)) {
-        return true;
+    const auto id_result = this->session.read_and_report(get_json_value(this->ego_data, "id"));
+    if (!id_result) {
+        return tl::unexpected(id_result.error());
+    }
+    const auto id = *id_result;
+
+    EgoItemDefinition ego;
+    ego.idx = i2enum<EgoType>(id);
+    if (const auto result = info_set_string(get_json_value(this->ego_data, "name"), ego.name, true); !result) {
+        return result;
+    }
+    if (const auto result = info_set_integer(get_json_value(this->ego_data, "slot"), ego.slot, true, Range(INVEN_AMMO, INVEN_FEET)); !result) {
+        return result;
+    }
+    if (const auto result = info_set_integer(get_json_value(this->ego_data, "rating"), ego.rating, true, Range(0, 100)); !result) {
+        return result;
+    }
+    // エゴの level は指輪・アミュレットの発動の基本難易度で、生成階ではない。同じ計算に使うベースアイテム・アーティファクトの level にそろえ、
+    // それらの上限 (たどり着ける最深の階、MAX_DEPTH - 1) までとする。
+    if (const auto result = info_set_integer(get_json_value(this->ego_data, "level"), ego.level, true, Range(0, MAX_DEPTH - 1)); !result) {
+        return result;
+    }
+    if (const auto result = info_set_integer(get_json_value(this->ego_data, "rarity"), ego.rarity, true, Range(0, 255)); !result) {
+        return result;
+    }
+    if (const auto result = info_set_integer(get_json_value(this->ego_data, "cost"), ego.cost, true, Range(0, ITEM_COST_MAX)); !result) {
+        return result;
     }
 
-    msg_format(_("未知の名のあるアイテム・フラグ '%s'。", "Unknown ego-item flag '%s'."), what.data());
+    const auto &base = get_json_value(this->ego_data, "base_bonuses");
+    if (!base.is_null()) {
+        if (!base.is_object()) {
+            return tl::make_unexpected(ParseErrorType::INVALID_TYPE);
+        }
+        if (const auto result = info_set_integer(get_json_value(base, "to_hit"), ego.base_to_h, true, EGO_BONUS_RANGE); !result) {
+            return result;
+        }
+        if (const auto result = info_set_integer(get_json_value(base, "to_damage"), ego.base_to_d, true, EGO_BONUS_RANGE); !result) {
+            return result;
+        }
+        if (const auto result = info_set_integer(get_json_value(base, "to_ac"), ego.base_to_a, true, EGO_BONUS_RANGE); !result) {
+            return result;
+        }
+    }
+
+    const auto &maximum = get_json_value(this->ego_data, "maximum_bonuses");
+    if (!maximum.is_null()) {
+        if (!maximum.is_object()) {
+            return tl::make_unexpected(ParseErrorType::INVALID_TYPE);
+        }
+        if (const auto result = info_set_integer(get_json_value(maximum, "to_hit"), ego.max_to_h, true, EGO_BONUS_RANGE); !result) {
+            return result;
+        }
+        if (const auto result = info_set_integer(get_json_value(maximum, "to_damage"), ego.max_to_d, true, EGO_BONUS_RANGE); !result) {
+            return result;
+        }
+        if (const auto result = info_set_integer(get_json_value(maximum, "to_ac"), ego.max_to_a, true, EGO_BONUS_RANGE); !result) {
+            return result;
+        }
+        if (const auto result = info_set_integer(get_json_value(maximum, "pval"), ego.max_pval, true, EGO_BONUS_RANGE); !result) {
+            return result;
+        }
+    }
+
+    if (const auto result = this->set_activation(ego); !result) {
+        return result;
+    }
+    if (const auto result = this->set_flags(ego); !result) {
+        return result;
+    }
+    if (const auto result = this->set_extra_flags(ego); !result) {
+        return result;
+    }
+
+    // エゴ定義は代入禁止のため、記録全体の検証後に既存の要素を置き換える。
+    egos_info.erase(ego.idx);
+    egos_info.emplace(ego.idx, std::move(ego));
+    return {};
+}
+
+namespace {
+// 未知のエゴ・フラグ名の表示の書式。flags と extra の flags で同じ文言を使う
+constexpr std::string_view UNKNOWN_EGO_FLAG_FORMAT = _("未知のエゴ・フラグ '{}'。", "Unknown ego flag '{}'.");
+}
+
+bool EgoReader::grab_one_flag(EgoItemDefinition &ego, const nlohmann::json &flag) const
+{
+    const auto &name = flag.get_ref<const std::string &>();
+    return grab_one_item_flag_or_report(ego.flags, ego.gen_flags, name, UNKNOWN_EGO_FLAG_FORMAT);
+}
+
+bool EgoReader::grab_one_extra_flag(ego_generate_type &extra, const nlohmann::json &flag) const
+{
+    const auto &name = flag.get_ref<const std::string &>();
+    if (const auto it = baseitem_flags.find(name); it != baseitem_flags.end()) {
+        extra.tr_flags.push_back(it->second);
+        return true;
+    }
+    if (const auto it = baseitem_geneneration_flags.find(name); it != baseitem_geneneration_flags.end()) {
+        extra.trg_flags.push_back(it->second);
+        return true;
+    }
+    msg_print(UNKNOWN_EGO_FLAG_FORMAT, name);
     return false;
 }
 
 /*!
- * @brief テキストトークンを走査して生成フラグを一つ得る(エゴ用) /
- * Grab one genetation flag in a ego-item_type from a textual string
- * @param e_ptr 保管先のエゴ構造体参照ポインタ
- * @param what 参照元の文字列ポインタ
- * @return 見つけたらtrue
+ * @brief エゴのフラグを検証し、公開前の定義へ格納する
+ * @param ego 読み込み途中のエゴ定義
+ * @return 成功時は空の値、失敗時は解析エラーコード
  */
-static bool grab_ego_generate_flags(ego_generate_type &xtra, std::string_view what)
+tl::expected<void, ParseErrorType> EgoReader::set_flags(EgoItemDefinition &ego) const
 {
-    if (auto it = baseitem_flags.find(what); it != baseitem_flags.end()) {
-        xtra.tr_flags.push_back(it->second);
-        return true;
+    const auto &flags = get_json_value(this->ego_data, "flags");
+    if (flags.is_null()) {
+        return {};
     }
-
-    if (auto it = baseitem_geneneration_flags.find(what); it != baseitem_geneneration_flags.end()) {
-        xtra.trg_flags.push_back(it->second);
-        return true;
-    }
-
-    return false;
+    return info_read_flag_array(flags, [this, &ego](const auto &flag) { return this->grab_one_flag(ego, flag); });
 }
 
 /*!
- * @brief アイテムエゴ情報(EgoDefinitions)のパース関数
- * @param buf テキスト列
- * @param head ヘッダ構造体
- * @return エラーコード
+ * @brief 追加能力の整数百分率とフラグを検証し、公開前のエゴへ格納する
+ * @param ego 読み込み途中のエゴ定義
+ * @return 成功時は空の値、失敗時は解析エラーコード
+ * @details extra_flagsの省略は許可する。旧分数形式・新旧混在、0～100以外の確率を拒否する。
  */
-errr parse_egos_info(std::string_view buf, angband_header *)
+tl::expected<void, ParseErrorType> EgoReader::set_extra_flags(EgoItemDefinition &ego) const
 {
-    static EgoItemDefinition *e_ptr = nullptr;
-    const auto &tokens = str_split(buf, ':', false, 10);
-
-    error_idx = 0; //!< @note 順不同で登録しているため
-
-    if (tokens[0] == "N") {
-        // N:index:name_ja
-        if (tokens.size() < 3 || tokens[1].size() == 0) {
-            return PARSE_ERROR_GENERIC;
+    const auto &extras = get_json_value(this->ego_data, "extra_flags");
+    if (!extras.is_array()) {
+        if (extras.is_null()) {
+            return {};
         }
-
-        auto i = std::stoi(tokens[1]);
-        if (i < error_idx) {
-            return PARSE_ERROR_NON_SEQUENTIAL_RECORDS;
-        }
-
-        error_idx = i;
-        e_ptr = &(egos_info.emplace_hint(egos_info.end(), i2enum<EgoType>(i), EgoItemDefinition{})->second);
-        e_ptr->idx = i2enum<EgoType>(i);
-#ifdef JP
-        e_ptr->name = tokens[2];
-#endif
-    } else if (!e_ptr) {
-        return PARSE_ERROR_MISSING_RECORD_HEADER;
-    } else if (tokens[0] == "E") {
-        // E:name_en
-#ifndef JP
-        if (tokens[1].size() == 0) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-        e_ptr->name = tokens[1];
-#endif
-    } else if (tokens[0] == "X") {
-        // X:slot:rating
-        if (tokens.size() < 3) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        info_set_value(e_ptr->slot, tokens[1]);
-        info_set_value(e_ptr->rating, tokens[2]);
-    } else if (tokens[0] == "W") {
-        // W:level:ratiry:xtra:cost
-        // xtra is not used
-        if (tokens.size() < 5) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        info_set_value(e_ptr->level, tokens[1]);
-        info_set_value(e_ptr->rarity, tokens[2]);
-        info_set_value(e_ptr->cost, tokens[4]);
-    } else if (tokens[0] == "B") {
-        // Base bonuses
-        // B:to_hit:to_dam:to_ac
-        if (tokens.size() < 4) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        info_set_value(e_ptr->base_to_h, tokens[1]);
-        info_set_value(e_ptr->base_to_d, tokens[2]);
-        info_set_value(e_ptr->base_to_a, tokens[3]);
-    } else if (tokens[0] == "C") {
-        // Creation bonuses (random plus)
-        // C:to_hit:to_dam:to_ac:pval
-        if (tokens.size() < 5) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        info_set_value(e_ptr->max_to_h, tokens[1]);
-        info_set_value(e_ptr->max_to_d, tokens[2]);
-        info_set_value(e_ptr->max_to_a, tokens[3]);
-        info_set_value(e_ptr->max_pval, tokens[4]);
-    } else if (tokens[0] == "U") {
-        // U:activation_flag
-        if (tokens.size() < 2 || tokens[1].size() == 0) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        auto n = grab_one_activation_flag(tokens[1]);
-        if (n <= RandomArtActType::NONE) {
-            return PARSE_ERROR_INVALID_FLAG;
-        }
-
-        e_ptr->act_idx = n;
-    } else if (tokens[0] == "F") {
-        // F:flags
-        if (tokens.size() < 2 || tokens[1].size() == 0) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        const auto &flags = str_split(tokens[1], '|', true, 10);
-        for (const auto &f : flags) {
-            if (f.size() == 0) {
-                continue;
-            }
-            if (!grab_one_ego_item_flag(e_ptr, f)) {
-                return PARSE_ERROR_INVALID_FLAG;
-            }
-        }
-    } else if (tokens[0] == "G") {
-        // G:mul/dev:flags
-        if (tokens.size() < 3) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        const auto &prob = str_split(tokens[1], '/', false, 2);
-        if (prob.size() != 2 || tokens[1].size() == 0 || tokens[2].size() == 0) {
-            return PARSE_ERROR_TOO_FEW_ARGUMENTS;
-        }
-
-        ego_generate_type xtra;
-        xtra.mul = std::stoi(prob[0]);
-        xtra.dev = std::stoi(prob[1]);
-
-        const auto &flags = str_split(tokens[2], '|', true, 10);
-        for (const auto &f : flags) {
-            if (f.size() == 0) {
-                continue;
-            }
-            if (!grab_ego_generate_flags(xtra, f)) {
-                return PARSE_ERROR_INVALID_FLAG;
-            }
-        }
-
-        e_ptr->xtra_flags.push_back(std::move(xtra));
-    } else {
-        return PARSE_ERROR_UNDEFINED_DIRECTIVE;
+        return tl::make_unexpected(ParseErrorType::INVALID_TYPE);
     }
+    for (const auto &extra_data : extras) {
+        if (!extra_data.is_object()) {
+            return tl::make_unexpected(ParseErrorType::INVALID_TYPE);
+        }
+        ego_generate_type extra;
+        // 旧分数や混在指定を黙って無視せず、整数百分率へ移行させる。
+        if (extra_data.contains("numerator") || extra_data.contains("denominator")) {
+            return tl::make_unexpected(ParseErrorType::INVALID_VALUE);
+        }
+        if (const auto result = info_set_integer(get_json_value(extra_data, "chance"), extra.chance, true, Range(0, 100)); !result) {
+            return result;
+        }
+        const auto &flags = get_json_value(extra_data, "flags");
+        if (!flags.is_array()) {
+            return tl::make_unexpected(flags.is_null() ? ParseErrorType::TOO_FEW_ARGUMENTS : ParseErrorType::INVALID_TYPE);
+        }
+        if (flags.empty()) {
+            return tl::make_unexpected(ParseErrorType::TOO_FEW_ARGUMENTS);
+        }
+        if (const auto result = info_read_flag_array(flags, [this, &extra](const auto &flag) { return this->grab_one_extra_flag(extra, flag); }); !result) {
+            return result;
+        }
+        ego.xtra_flags.push_back(std::move(extra));
+    }
+    return {};
+}
 
-    return PARSE_ERROR_NONE;
+/*!
+ * @brief 任意の発動指定を検証し、公開前の定義へ格納する
+ * @param ego 読み込み途中のエゴ定義
+ * @return 成功時は空の値、失敗時は解析エラーコード
+ */
+tl::expected<void, ParseErrorType> EgoReader::set_activation(EgoItemDefinition &ego) const
+{
+    const auto activation = read_activation(get_json_value(this->ego_data, "activation"));
+    if (!activation) {
+        return tl::unexpected(activation.error());
+    }
+    if (*activation == RandomArtActType::NONE) {
+        return {};
+    }
+    ego.act_idx = *activation;
+    return {};
 }

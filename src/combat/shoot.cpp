@@ -11,7 +11,6 @@
 #include "flavor/object-flavor-types.h"
 #include "floor/floor-object.h"
 #include "floor/geometry.h"
-#include "game-option/cheat-types.h"
 #include "game-option/special-options.h"
 #include "grid/grid.h"
 #include "inventory/inventory-object.h"
@@ -32,6 +31,7 @@
 #include "monster/monster-status-setter.h"
 #include "monster/monster-status.h"
 #include "monster/monster-update.h"
+#include "monster/monster-util.h"
 #include "object/object-broken.h"
 #include "object/object-info.h"
 #include "object/object-mark-types.h"
@@ -43,23 +43,25 @@
 #include "player/player-skill.h"
 #include "player/player-status-table.h"
 #include "sv-definition/sv-bow-types.h"
-#include "system/artifact-type-definition.h"
+#include "system/artifact/artifact-definition.h"
+#include "system/artifact/artifact-record.h"
 #include "system/baseitem/baseitem-key.h"
+#include "system/deferred-update-requests.h"
 #include "system/enums/monrace/monrace-id.h"
 #include "system/enums/terrain/terrain-characteristics.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 #include "system/monrace/monrace-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "target/projection-path-calculator.h"
 #include "target/target-checker.h"
 #include "target/target-getter.h"
 #include "timed-effect/timed-effects.h"
 #include "tracking/lore-tracker.h"
 #include "util/bit-flags-calculator.h"
+#include "util/string-processor.h"
 #include "view/display-messages.h"
 #include "wizard/wizard-messages.h"
 
@@ -430,7 +432,7 @@ static MULTIPLY calc_shot_damage_with_slay(
 
         if ((flags.has(TR_FORCE_WEAPON)) && (player_ptr->csp > (player_ptr->msp / 30))) {
             player_ptr->csp -= (1 + (player_ptr->msp / 30));
-            RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::MP);
+            DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::MP);
             mult = mult * 5 / 2;
         }
         break;
@@ -457,7 +459,6 @@ static MULTIPLY calc_shot_damage_with_slay(
 void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SPELL_IDX snipe_type)
 {
     POSITION y, x, prev_y, prev_x;
-    ItemEntity *o_ptr;
 
     AttributeFlags attribute_flags{};
     attribute_flags.set(AttributeType::PLAYER_SHOOT);
@@ -465,13 +466,11 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
     auto hit_body = false;
     auto stick_to = false;
 
-    /* Access the item (if in the pack) */
+    // 連射の1射目の効果で矢弾が削除されても参照できるよう、shared_ptrで保持する。
     auto &floor = *player_ptr->current_floor_ptr;
-    if (i_idx >= 0) {
-        o_ptr = player_ptr->inventory[i_idx].get();
-    } else {
-        o_ptr = floor.o_list[0 - i_idx].get();
-    }
+    const auto is_inventory = i_idx >= 0;
+    const auto ammo = ref_item(player_ptr, i_idx);
+    auto *o_ptr = ammo.get();
 
     /* Sniper - Cannot shot a single arrow twice */
     if ((snipe_type == SP_DOUBLE) && (o_ptr->number < 2)) {
@@ -582,6 +581,14 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
     /* Sniper - Repeat shooting when double shots */
     auto &tracker = LoreTracker::get_instance();
     for (auto i = 0; i < ((snipe_type == SP_DOUBLE) ? 2 : 1); i++) {
+        // 1射目の効果でアイテムが削除されると番号が変わるため、同じ実体を探し直す。
+        const auto current_i_idx = find_current_i_idx(player_ptr, is_inventory, ammo);
+        if (!current_i_idx) {
+            break;
+        }
+
+        i_idx = *current_i_idx;
+
         /* Start at the player */
         y = player_ptr->y;
         x = player_ptr->x;
@@ -615,7 +622,7 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
             /* Shatter Arrow */
             auto &grid = floor.get_grid(pos_impact);
             if (snipe_type == SP_KILL_WALL) {
-                if (grid.has(TerrainCharacteristics::HURT_ROCK) && !grid.has_monster()) {
+                if (grid.has(TerrainCharacteristics::STONE) && !grid.has_monster()) {
                     if (any_bits(grid.info, (CAVE_MARK))) {
                         msg_print(_("岩が砕け散った。", "Wall rocks were shattered."));
                     }
@@ -627,10 +634,10 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
                         StatusRecalculatingFlag::FLOW,
                         StatusRecalculatingFlag::MONSTER_LITE,
                     };
-                    RedrawingFlagsUpdater::get_instance().set_flags(flags);
+                    DeferredUpdateRequests::get_instance().set_flags(flags);
 
                     /* Destroy the wall */
-                    cave_alter_feat(player_ptr, pos_impact.y, pos_impact.x, TerrainCharacteristics::HURT_ROCK);
+                    cave_alter_feat(player_ptr, pos_impact.y, pos_impact.x, TerrainCharacteristics::STONE);
 
                     hit_body = true;
                     break;
@@ -738,7 +745,7 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
                     /* Handle unseen monster */
                     if (!visible) {
                         /* Invisible monster */
-                        msg_format(_("%sが敵を捕捉した。", "The %s finds a mark."), item_name.data());
+                        msg_print(_("{}が敵を捕捉した。", "The {} finds a mark."), item_name);
                     }
 
                     /* Handle visible monster */
@@ -746,10 +753,10 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
                         /* Get "the monster" or "it" */
                         const auto m_name = monster_desc(player_ptr, monster, 0);
 
-                        msg_format(_("%sが%sに命中した。", "The %s hits %s."), item_name.data(), m_name.data());
+                        msg_print(_("{}が{}に命中した。", "The {} hits {}."), item_name, m_name);
 
                         if (monster.ml) {
-                            if (!player_ptr->effects()->hallucination().is_hallucinated()) {
+                            if (!player_ptr->effects()->hallucination().is_active()) {
                                 tracker.set_trackee(monster.ap_r_idx);
                             }
 
@@ -767,7 +774,7 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
 
                             tdam = monster.hp + 1;
                             base_dam = tdam;
-                            msg_format(_("%sの急所に突き刺さった！", "Your shot hit a fatal spot of %s!"), m_name.data());
+                            msg_print(_("{}の急所に突き刺さった！", "Your shot hit a fatal spot of {}!"), m_name);
                         } else {
                             if (no_instantly_death) {
                                 monrace.r_resistance_flags.set(MonsterResistanceType::NO_INSTANTLY_DEATH);
@@ -792,8 +799,7 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
                         tdam = mon_damage_mod(player_ptr, monster, tdam, false);
                     }
 
-                    msg_format_wizard(player_ptr, CHEAT_MONSTER, _("%dのダメージを与えた。(残りHP %d/%d(%d))", "You do %d damage. (left HP %d/%d(%d))"), tdam,
-                        monster.hp - tdam, monster.maxhp, monster.max_maxhp);
+                    msg_print_wizard_damage(player_ptr, monster, tdam);
 
                     /* Sniper */
                     if (snipe_type == SP_EXPLODE) {
@@ -823,7 +829,7 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
                         /* STICK TO */
                         if (fire_item.is_fixed_artifact() && (sniper_concent == 0)) {
                             stick_to = true;
-                            msg_format(_("%sは%sに突き刺さった！", "%s^ is stuck in %s!"), item_name.data(), m_name.data());
+                            msg_print(_("{}は{}に突き刺さった！", "{} is stuck in {}!"), str_upcase_first(item_name), m_name);
                         }
 
                         const auto pain_message = monster.get_pain_message(m_name, tdam);
@@ -838,7 +844,7 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
 
                         if (fear && monster.ml) {
                             sound(SoundKind::FLEE);
-                            msg_format(_("%s^は恐怖して逃げ出した！", "%s^ flees in terror!"), m_name.data());
+                            msg_print(_("{}は恐怖して逃げ出した！", "{} flees in terror!"), str_upcase_first(m_name));
                         }
 
                         monster.set_target(player_ptr->get_position());
@@ -848,8 +854,6 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
                             //!< @details プレイヤーの場所が同一であることが保証できないので変数を再宣言する.
                             const auto p_pos1 = player_ptr->get_position();
                             auto n = randint1(5) + 3;
-                            const auto n0 = n;
-                            const auto m_idx = c_mon_ptr->m_idx;
                             for (; cur_dis <= tdis;) {
                                 const Pos2D pos_orig = { y, x };
                                 if (n == 0) {
@@ -874,17 +878,10 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
                                     break;
                                 }
 
-                                floor.get_grid(pos_to).m_idx = m_idx;
-                                floor.get_grid(pos_orig).m_idx = 0;
-                                monster.set_position(pos_to);
-                                update_monster(player_ptr, m_idx, true);
+                                move_monster_to(player_ptr, monster, pos_to);
                                 if (delay_factor > 0) {
-                                    lite_spot(player_ptr, pos_to);
-                                    lite_spot(player_ptr, pos_orig);
                                     term_fresh();
                                     term_xtra(TERM_XTRA_DELAY, delay_factor);
-                                } else if (n == n0) {
-                                    lite_spot(player_ptr, pos_orig);
                                 }
 
                                 x = pos_to.x;
@@ -914,9 +911,9 @@ void exe_fire(PlayerType *player_ptr, INVENTORY_IDX i_idx, ItemEntity *j_ptr, SP
             const auto m_idx = floor.get_grid(pos_impact).m_idx;
             const auto item_idx = floor.pop_empty_index_item();
             if (item_idx == 0) {
-                msg_format(_("%sはどこかへ行った。", "The %s went somewhere."), item_name.data());
+                msg_print(_("{}はどこかへ行った。", "The {} went somewhere."), item_name);
                 if (fire_item.is_fixed_artifact()) {
-                    ArtifactList::get_instance().get_artifact(j_ptr->fa_id).is_generated = false;
+                    ArtifactRecords::get_instance().set_generated(j_ptr->fa_id, false);
                 }
                 return;
             }
@@ -1009,7 +1006,7 @@ bool test_hit_fire(PlayerType *player_ptr, int chance, const MonsterEntity &mons
     if (randint0(chance) < (ac * 3 / 4)) {
         if (monster.r_idx == MonraceId::GOEMON && !monster.is_asleep()) {
             const auto m_name = monster_desc(player_ptr, monster, 0);
-            msg_format(_("%sは%sを斬り捨てた！", "%s cuts down %s!"), m_name.data(), item_name.data());
+            msg_print(_("{}は{}を斬り捨てた！", "{} cuts down {}!"), m_name, item_name);
         }
         return false;
     }
@@ -1184,19 +1181,19 @@ int calc_expect_crit(PlayerType *player_ptr, WEIGHT weight, int plus, int dam, i
         i = 0;
     }
 
-    auto num = 0;
+    int64_t num = 0;
 
     if (impact) {
         // 強撃クリティカル(クリティカル強度: weight + d650 + d650)のときの期待値
-        auto sum = 0;
+        int64_t sum = 0;
         for (auto d = 2; d <= CRITICAL_DIE_SIDES * 2; ++d) { // d650 + d650 で出る 2～1300 について計算する
-            const auto count = (d <= CRITICAL_DIE_SIDES + 1) ? (d - 1) : (CRITICAL_DIE_SIDES * 2 - d + 1); // d650 + d650 で出る 650*650 通りのうちdが出るパターンの数
+            const int64_t count = (d <= CRITICAL_DIE_SIDES + 1) ? (d - 1) : (CRITICAL_DIE_SIDES * 2 - d + 1); // d650 + d650 で出る 650*650 通りのうちdが出るパターンの数
             sum += std::get<0>(apply_critical_norm_damage(weight + d, dam, mult)) * count;
         }
         num = sum / (CRITICAL_DIE_SIDES * CRITICAL_DIE_SIDES);
     } else {
         // 通常クリティカル(クリティカル強度: weight + d650)のときの期待値
-        auto sum = 0;
+        int64_t sum = 0;
         for (auto d = 1; d <= CRITICAL_DIE_SIDES; ++d) {
             sum += std::get<0>(apply_critical_norm_damage(weight + d, dam, mult));
         }

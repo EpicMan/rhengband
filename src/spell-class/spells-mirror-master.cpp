@@ -25,13 +25,13 @@
 #include "pet/pet-util.h"
 #include "spell-kind/spells-teleport.h"
 #include "system/angband-system.h"
+#include "system/deferred-update-requests.h"
 #include "system/dungeon/dungeon-definition.h"
 #include "system/enums/terrain/terrain-tag.h"
 #include "system/floor/floor-info.h"
 #include "system/grid-type-definition.h"
 #include "system/monster-entity.h"
 #include "system/player-type-definition.h"
-#include "system/redrawing-flags-updater.h"
 #include "system/terrain/terrain-definition.h"
 #include "target/grid-selector.h"
 #include "target/projection-path-calculator.h"
@@ -163,7 +163,7 @@ bool SpellsMirrorMaster::mirror_concentration()
         this->player_ptr->csp_frac = 0;
     }
 
-    RedrawingFlagsUpdater::get_instance().set_flag(MainWindowRedrawingFlag::MP);
+    DeferredUpdateRequests::get_instance().set_flag(MainWindowRedrawingFlag::MP);
     return true;
 }
 
@@ -220,7 +220,7 @@ Pos2D SpellsMirrorMaster::get_next_mirror_position(const Pos2D &pos_current) con
     }
 
     while (true) {
-        const Pos2D next_mirror(pos_current.y + randint0(5) - 2, pos_current.x + randint0(5) - 2);
+        const Pos2D next_mirror{ pos_current.y + randint0(5) - 2, pos_current.x + randint0(5) - 2 };
         if (next_mirror != pos_current) {
             return next_mirror;
         }
@@ -267,7 +267,7 @@ void SpellsMirrorMaster::project_seeker_ray(int target_x, int target_y, int dam)
         for (auto path_g_itr = path_g.begin(); path_g_itr != path_g.end(); path_g_itr++) {
             const auto &pos_dst = *path_g_itr;
             const auto &pos_src = *(path_g_itr == path_g.begin() ? path_g.begin() : path_g_itr - 1);
-            if (delay_factor > 0 && !this->player_ptr->effects()->blindness().is_blind()) {
+            if (delay_factor > 0 && !this->player_ptr->effects()->blindness().is_active()) {
                 if (panel_contains(pos_dst) && floor.has_los_at(pos_dst)) {
                     print_bolt_pict(this->player_ptr, pos_src, pos_dst, typ);
                     move_cursor_relative(pos_dst.y, pos_dst.x);
@@ -296,7 +296,7 @@ void SpellsMirrorMaster::project_seeker_ray(int target_x, int target_y, int dam)
             const auto &grid = floor.grid_array[project_m_y][project_m_x];
             const auto &monster = floor.m_list[grid.m_idx];
             if (project_m_n == 1 && grid.has_monster() && monster.ml) {
-                if (!this->player_ptr->effects()->hallucination().is_hallucinated()) {
+                if (!this->player_ptr->effects()->hallucination().is_active()) {
                     tracker.set_trackee(monster.ap_r_idx);
                 }
 
@@ -396,7 +396,7 @@ static bool activate_super_ray_effect(PlayerType *player_ptr, int y, int x, int 
     const auto &grid = floor.grid_array[project_m_y][project_m_x];
     const auto &monster = floor.m_list[grid.m_idx];
     if (project_m_n == 1 && grid.has_monster() && monster.ml) {
-        if (!player_ptr->effects()->hallucination().is_hallucinated()) {
+        if (!player_ptr->effects()->hallucination().is_active()) {
             LoreTracker::get_instance().set_trackee(monster.ap_r_idx);
         }
 

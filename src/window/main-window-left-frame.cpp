@@ -12,7 +12,6 @@
 #include "system/player-type-definition.h"
 #include "term/gameterm.h"
 #include "term/screen-processor.h"
-#include "term/z-form.h"
 #include "timed-effect/timed-effects.h"
 #include "tracking/health-bar-tracker.h"
 #include "util/string-processor.h"
@@ -35,21 +34,41 @@ struct condition_layout_info {
  */
 void print_title(PlayerType *player_ptr)
 {
-    std::string p;
+    print_field(get_player_title(player_ptr), ROW_TITLE, COL_TITLE);
+}
+
+/*!
+ * @brief 画面左の称号欄に表示する文字列を返す
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @return 称号 (ウィザード・勝利者の表示を含む)
+ */
+std::string get_player_title(PlayerType *player_ptr)
+{
     const auto &world = AngbandWorld::get_instance();
     if (world.wizard) {
-        p = _("[ウィザード]", "[=-WIZARD-=]");
-    } else if (world.total_winner) {
-        if (world.is_player_true_winner()) {
-            p = _("*真・勝利者*", "*TRUEWINNER*");
-        } else {
-            p = _("***勝利者***", "***WINNER***");
-        }
-    } else {
-        p = player_titles.at(player_ptr->pclass).at((player_ptr->lev - 1) / 5);
+        return _("[ウィザード]", "[=-WIZARD-=]");
     }
 
-    print_field(p, ROW_TITLE, COL_TITLE);
+    if (world.total_winner) {
+        if (world.is_player_true_winner()) {
+            return _("*真・勝利者*", "*TRUEWINNER*");
+        }
+
+        return _("***勝利者***", "***WINNER***");
+    }
+
+    return player_titles.at(player_ptr->pclass).at((player_ptr->lev - 1) / 5);
+}
+
+/*!
+ * @brief 画面左の種族欄に表示する種族名を返す (変身中は変身先の名前)
+ * @param player_ptr プレイヤーへの参照ポインタ
+ * @return 種族名 (画面では先頭12桁だけが表示される)
+ */
+std::string get_displayed_race_title(PlayerType *player_ptr)
+{
+    const auto &title = player_ptr->mimic_form == MimicKindType::NONE ? rp_ptr->title : mimic_info.at(player_ptr->mimic_form).title;
+    return title.string();
 }
 
 /*!
@@ -57,7 +76,7 @@ void print_title(PlayerType *player_ptr)
  */
 void print_level(PlayerType *player_ptr)
 {
-    const auto tmp = format("%5d", player_ptr->lev);
+    const auto tmp = fmt::format("{:5}", player_ptr->lev);
     if (player_ptr->lev >= player_ptr->max_plv) {
         put_str(_("レベル ", "LEVEL "), ROW_LEVEL, 0);
         c_put_str(TERM_L_GREEN, tmp, ROW_LEVEL, COL_LEVEL + 7);
@@ -76,31 +95,12 @@ void print_exp(PlayerType *player_ptr)
 
     PlayerRace pr(player_ptr);
     if ((!exp_need) || pr.equals(PlayerRaceType::ANDROID)) {
-        out_val = format("%8d", player_ptr->exp);
-
-        auto current_xp = player_ptr->exp;
-        if (player_ptr->lev > 1) {
-            current_xp -= player_exp[player_ptr->lev - 2] * player_ptr->expfact / 100;
-        }
-
-        auto advance_xp = player_exp[player_ptr->lev - 1] * player_ptr->expfact / 100;
-
-        auto percentage = current_xp * 10000 / advance_xp;
-
-        auto xpPct = percentage / 100;
-        auto xpPctDecimal = percentage % 100;
-
-        if (xpPctDecimal < 10) {
-            out_val = format("  %2d.0%d%%", xpPct, xpPctDecimal);
-        } else {
-            out_val = format("  %2d.%d%%", xpPct, xpPctDecimal);
-        }
-        
+        out_val = fmt::format("{:8}", player_ptr->exp);
     } else {
         if (player_ptr->lev >= PY_MAX_LEVEL) {
             out_val = "********";
         } else {
-            out_val = format("%8d", player_exp[player_ptr->lev - 1] * player_ptr->expfact / 100 - player_ptr->exp);
+            out_val = fmt::format("{:8}", player_exp[player_ptr->lev - 1] * player_ptr->expfact / 100 - player_ptr->exp);
         }
     }
 
@@ -124,7 +124,7 @@ void print_ac(PlayerType *player_ptr)
 {
     /* AC の表示方式を変更している */
     put_str(_(" ＡＣ(     )", "Cur AC "), ROW_AC, COL_AC);
-    c_put_str(TERM_L_GREEN, format("%5d", player_ptr->dis_ac + player_ptr->dis_to_a), ROW_AC, COL_AC + _(6, 7));
+    c_put_str(TERM_L_GREEN, fmt::format("{:5}", player_ptr->dis_ac + player_ptr->dis_to_a), ROW_AC, COL_AC + _(6, 7));
 }
 
 /*!
@@ -142,10 +142,10 @@ void print_hp(PlayerType *player_ptr)
         color = TERM_RED;
     }
 
-    c_put_str(color, format("%4d", player_ptr->chp), ROW_CURHP, COL_CURHP + 3);
+    c_put_str(color, fmt::format("{:4}", player_ptr->chp), ROW_CURHP, COL_CURHP + 3);
     put_str("/", ROW_CURHP, COL_CURHP + 7);
     color = TERM_L_GREEN;
-    c_put_str(color, format("%4d", player_ptr->mhp), ROW_CURHP, COL_CURHP + 8);
+    c_put_str(color, fmt::format("{:4}", player_ptr->mhp), ROW_CURHP, COL_CURHP + 8);
 }
 
 /*!
@@ -167,10 +167,10 @@ void print_sp(PlayerType *player_ptr)
         color = TERM_RED;
     }
 
-    c_put_str(color, format("%4d", player_ptr->csp), ROW_CURSP, COL_CURSP + 3);
+    c_put_str(color, fmt::format("{:4}", player_ptr->csp), ROW_CURSP, COL_CURSP + 3);
     put_str("/", ROW_CURSP, COL_CURSP + 7);
     color = TERM_L_GREEN;
-    c_put_str(color, format("%4d", player_ptr->msp), ROW_CURSP, COL_CURSP + 8);
+    c_put_str(color, fmt::format("{:4}", player_ptr->msp), ROW_CURSP, COL_CURSP + 8);
 }
 
 /*!
@@ -180,7 +180,7 @@ void print_sp(PlayerType *player_ptr)
 void print_gold(PlayerType *player_ptr)
 {
     put_str(_("＄ ", "AU "), ROW_GOLD, COL_GOLD);
-    c_put_str(TERM_L_GREEN, format("%9d", player_ptr->au), ROW_GOLD, COL_GOLD + 3);
+    c_put_str(TERM_L_GREEN, fmt::format("{:9}", player_ptr->au), ROW_GOLD, COL_GOLD + 3);
 }
 
 /*!
@@ -195,7 +195,7 @@ void print_depth(PlayerType *player_ptr)
     const auto row_depth = hgt + ROW_DEPTH;
     const auto &floor = *player_ptr->current_floor_ptr;
     if (!floor.is_underground()) {
-        c_prt(attr, format("%7s", _("地上", "Surf.")), row_depth, col_depth);
+        c_prt(attr, fmt::format("{:>7}", fmt::bytes(_("地上", "Surf."))), row_depth, col_depth);
         return;
     }
 
@@ -242,7 +242,7 @@ void print_depth(PlayerType *player_ptr)
         break; /* Boring place */
     }
 
-    c_prt(attr, format("%7s", depths.data()), row_depth, col_depth);
+    c_prt(attr, fmt::format("{:>7}", fmt::bytes(depths)), row_depth, col_depth);
 }
 
 /*!
@@ -251,10 +251,7 @@ void print_depth(PlayerType *player_ptr)
  */
 void print_frame_basic(PlayerType *player_ptr)
 {
-    const auto &title = player_ptr->mimic_form == MimicKindType::NONE
-                            ? rp_ptr->title
-                            : mimic_info.at(player_ptr->mimic_form).title;
-    print_field(str_substr(title, 0, 12), ROW_RACE, COL_RACE);
+    print_field(str_substr(get_displayed_race_title(player_ptr), 0, 12), ROW_RACE, COL_RACE);
     print_title(player_ptr);
     print_level(player_ptr);
     print_exp(player_ptr);
@@ -292,9 +289,9 @@ static void print_health_monster_in_arena_for_wizard(PlayerType *player_ptr)
         if (monster.is_valid()) {
             const auto &monrace = monster.get_monrace();
             const auto &symbol_config = monrace.symbol_config;
-            term_putstr(col - 2, row + row_offset, 2, symbol_config.color, format("%c", symbol_config.character));
-            term_putstr(col - 1, row + row_offset, 5, TERM_WHITE, format("%5d", monster.hp));
-            term_putstr(col + 5, row + row_offset, 6, TERM_WHITE, format("%5d", monster.max_maxhp));
+            term_putstr(col - 2, row + row_offset, 2, symbol_config.color, fmt::format("{:c}", symbol_config.character));
+            term_putstr(col - 1, row + row_offset, 5, TERM_WHITE, fmt::format("{:5}", monster.hp));
+            term_putstr(col + 5, row + row_offset, 6, TERM_WHITE, fmt::format("{:5}", monster.max_maxhp));
         }
     }
 }
@@ -391,7 +388,7 @@ void print_health(PlayerType *player_ptr, bool riding)
 
     const auto &monster = player_ptr->current_floor_ptr->m_list[*monster_idx];
 
-    if ((!monster.ml) || (player_ptr->effects()->hallucination().is_hallucinated()) || monster.is_dead()) {
+    if ((!monster.ml) || (player_ptr->effects()->hallucination().is_active()) || monster.is_dead()) {
         term_putstr(col, row, max_width, TERM_WHITE, "[----------]");
         return;
     }

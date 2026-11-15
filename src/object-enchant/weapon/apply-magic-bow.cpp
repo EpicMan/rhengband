@@ -7,7 +7,7 @@
 #include "object-enchant/weapon/apply-magic-bow.h"
 #include "artifact/random-art-generator.h"
 #include "inventory/inventory-slot-types.h"
-#include "system/item-entity.h"
+#include "system/item/item-entity.h"
 
 /*!
  * @brief 弓強化クラスのコンストラクタ
@@ -36,11 +36,15 @@ void BowEnchanter::apply_magic()
 
     this->give_killing_bonus();
     if (this->power > 1) {
-        if ((this->power > 2) || one_in_(20)) {
+        if (!this->has_ego_request() && ((this->power > 2) || one_in_(20))) {
             become_random_artifact(this->player_ptr, this->o_ptr, false);
             return;
         }
 
-        this->o_ptr->ego_idx = get_random_ego(INVEN_BOW, true);
+        if (const auto &ego = this->get_specific_ego_request()) {
+            this->o_ptr->ego_idx = *ego;
+        } else {
+            this->o_ptr->ego_idx = get_random_ego(INVEN_BOW, true);
+        }
     }
 }

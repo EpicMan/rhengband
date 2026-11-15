@@ -46,6 +46,7 @@
 #include "window/main-window-row-column.h"
 #include "world/world-movement-processor.h"
 #include "world/world.h"
+#include <fmt/format.h>
 #include <range/v3/view.hpp>
 
 WorldTurnProcessor::WorldTurnProcessor(PlayerType *player_ptr)
@@ -72,7 +73,6 @@ void WorldTurnProcessor::process_world()
         return;
     }
 
-    decide_auto_save();
     const auto &floor = *this->player_ptr->current_floor_ptr;
     if (floor.monster_noise && !ignore_unview) {
         msg_print(_("何かが聞こえた。", "You hear noise."));
@@ -114,12 +114,12 @@ void WorldTurnProcessor::print_time()
     auto day = 0;
     std::tie(day, this->hour, this->min) = AngbandWorld::get_instance().extract_date_time(InnerGameData::get_instance().get_start_race());
     if (day < 1000) {
-        c_put_str(TERM_WHITE, format(_("%2d日目", "Day%3d"), day), row, COL_DAY);
+        c_put_str(TERM_WHITE, fmt::format(_("{:2}日目", "Day{:3}"), day), row, COL_DAY);
     } else {
         c_put_str(TERM_WHITE, _("***日目", "Day***"), row, COL_DAY);
     }
 
-    c_put_str(TERM_WHITE, format("%2d:%02d", this->hour, this->min), row, COL_DAY + 7);
+    c_put_str(TERM_WHITE, fmt::format("{:2}:{:02}", this->hour, this->min), row, COL_DAY + 7);
 }
 
 void WorldTurnProcessor::process_downward()
@@ -176,14 +176,14 @@ void WorldTurnProcessor::process_monster_arena_winner(int win_m_idx)
 {
     const auto &monster = this->player_ptr->current_floor_ptr->m_list[win_m_idx];
     const auto m_name = monster_desc(this->player_ptr, monster, 0);
-    msg_format(_("%sが勝利した！", "%s won!"), m_name.data());
+    msg_print(_("{}が勝利した！", "{} won!"), m_name);
     msg_erase();
 
     auto &melee_arena = MeleeArena::get_instance();
     if (melee_arena.matches_bet_number(win_m_idx - 1)) {
         msg_print(_("おめでとうございます。", "Congratulations."));
         const auto payback = melee_arena.get_payback();
-        msg_format(_("%d＄を受け取った。", "You received %d gold."), payback);
+        msg_print(_("{}＄を受け取った。", "You received {} gold."), payback);
         this->player_ptr->au += payback;
     } else {
         msg_print(_("残念でした。", "You lost gold."));
@@ -209,6 +209,12 @@ void WorldTurnProcessor::process_monster_arena_draw()
     melee_arena.update_gladiators(player_ptr);
 }
 
+/*!
+ * @brief 一定ターン毎の自動セーブを行う
+ * @details 読み込むとメインループの頭から再開するので、ゲームターンの処理の途中ではなく、
+ * メインループの切れ目 (ゲームターンを進めた後) で呼ぶ。途中でセーブすると、再開したときに
+ * そのゲームターンのプレイヤーとモンスターの処理がもう一度行われる。
+ */
 void WorldTurnProcessor::decide_auto_save()
 {
     if (autosave_freq == 0) {
@@ -256,7 +262,7 @@ void WorldTurnProcessor::process_change_daytime_night()
 
 void WorldTurnProcessor::process_world_monsters()
 {
-    /* decide_alloc_monster(); */
+    decide_alloc_monster();
     const auto &world = AngbandWorld::get_instance();
     if (!(world.game_turn % (TURNS_PER_TICK * 10)) && !AngbandSystem::get_instance().is_phase_out()) {
         regenerate_monsters(this->player_ptr);
@@ -271,7 +277,7 @@ void WorldTurnProcessor::process_world_monsters()
     }
 
     for (const auto mte : MONSTER_TIMED_EFFECT_RANGE) {
-        if (this->player_ptr->current_floor_ptr->mproc_max[mte] > 0) {
+        if (!this->player_ptr->current_floor_ptr->mproc_list[mte].empty()) {
             process_monsters_mtimed(this->player_ptr, mte);
         }
     }
@@ -283,10 +289,10 @@ void WorldTurnProcessor::shuffle_shopkeeper()
         return;
     }
 
-    int n;
+    StoreSaleType store_sale_type;
     while (true) {
-        n = randint0(MAX_STORES);
-        if ((n == enum2i(StoreSaleType::HOME)) || (n == enum2i(StoreSaleType::MUSEUM))) {
+        store_sale_type = randnum0<StoreSaleType>(MAX_STORES);
+        if ((store_sale_type != StoreSaleType::HOME) && (store_sale_type != StoreSaleType::MUSEUM)) {
             break;
         }
     }
@@ -296,15 +302,15 @@ void WorldTurnProcessor::shuffle_shopkeeper()
             continue;
         }
 
-        if (terrain.subtype != n) {
+        if (terrain.store_sale_type != store_sale_type) {
             continue;
         }
 
         if (cheat_xtra) {
-            msg_format(_("%sの店主をシャッフルします。", "Shuffle a Shopkeeper of %s."), terrain.name.data());
+            msg_print(_("{}の店主をシャッフルします。", "Shuffle a Shopkeeper of {}."), terrain.name);
         }
 
-        store_shuffle(this->player_ptr, i2enum<StoreSaleType>(n));
+        store_shuffle(AngbandWorld::get_instance().get_town_index(), store_sale_type);
         break;
     }
 }
@@ -312,7 +318,7 @@ void WorldTurnProcessor::shuffle_shopkeeper()
 void WorldTurnProcessor::decide_alloc_monster()
 {
     const auto &floor = *this->player_ptr->current_floor_ptr;
-    auto should_alloc = one_in_(floor.get_dungeon_definition().max_m_alloc_chance);
+    auto should_alloc = one_in_(floor.get_dungeon_definition().additional_monster_spawn_chance);
     should_alloc &= !floor.inside_arena;
     should_alloc &= !floor.is_in_quest();
     should_alloc &= !AngbandSystem::get_instance().is_phase_out();
