@@ -12350,7 +12350,7 @@
           "rarity": 1,
         },
       ],
-      "flags": ["LITE", "LITE_FUEL"],
+      "flags": ["LITE_2", "LITE_FUEL"],
     },
     {
       "id": 347,
@@ -12367,9 +12367,9 @@
         "subtype_value": 1,
       },
       "parameter_value": 0,
-      "level": 3,
+      "level": 15,
       "weight": 50,
-      "cost": 35,
+      "cost": 350,
       "base_ac": 0,
       "base_dice": "1d1",
       "hit_bonus": 0,
@@ -12377,7 +12377,7 @@
       "ac_bonus": 0,
       "allocations": [
         {
-          "depth": 3,
+          "depth": 15,
           "rarity": 1,
         },
       ],
